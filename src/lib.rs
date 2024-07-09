@@ -13,3 +13,4 @@ mod rwlatch;
 pub mod hashindex;
 
 pub use logger::log;
+pub use page::PAGE_SIZE;

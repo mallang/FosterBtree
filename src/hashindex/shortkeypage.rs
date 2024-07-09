@@ -17,6 +17,7 @@ pub trait ShortKeyPage {
     /// Update the value of an existing key.
     /// If the key does not exist, it will return an error.
     fn update(&mut self, key: &[u8], val: &[u8]) -> Result<Vec<u8>, ShortKeyPageError>;
+    fn update_at_slot(&mut self, slot_id: u16, val: &[u8]) -> Result<(), ShortKeyPageError>;
 
     /// Upsert a key-value pair into the index.
     /// If the key already exists, it will update the value.
@@ -67,13 +68,39 @@ pub trait ShortKeyPage {
     // return (found, index)
     where
         F: Fn(u16) -> std::cmp::Ordering;
-    fn is_exist(&self, key: &[u8]) -> bool {
-        let (found, _) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
-        found
+    fn interpolation_search(&self, key: &[u8]) -> (bool, u16);
+    fn search_slot(&self, key: &[u8]) -> (bool, u16) {
+        self.binary_search(|slot_id| self.compare_key(key, slot_id))
+        // self.interpolation_search(key)
+    }
+    // Convert key to a numeric value for interpolation search
+    fn key_to_u64(key: &[u8]) -> u64 {
+        let mut key_array = [0u8; 8];
+        let copy_len = std::cmp::min(8, key.len());
+        key_array[..copy_len].copy_from_slice(&key[..copy_len]);
+        u64::from_be_bytes(key_array)
+    }
+    fn is_exist(&self, key: &[u8]) -> (Option<u16>, usize) {
+        // return (Option(slot_id), vals_len)
+        let (found, slot_id) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        if found {
+            (
+                Some(slot_id),
+                self.decode_shortkey_value_by_id(slot_id).vals_len as usize,
+            )
+        } else {
+            (None, 0)
+        }
     }
     fn slot_end_offset(&self) -> usize;
     fn num_slots(&self) -> u16 {
         self.decode_shortkey_header().slot_num
+    }
+    fn total_free_spcae(&self) -> usize {
+        self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
+    }
+    fn get_free_space(&self) -> usize {
+        self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
     }
 }
 
@@ -207,8 +234,56 @@ impl ShortKeyPage for Page {
         (false, low)
     }
 
+    // Interpolation search with input key
+    fn interpolation_search(&self, key: &[u8]) -> (bool, u16) {
+        let header = self.decode_shortkey_header();
+        if header.slot_num == 0 {
+            return (false, 0);
+        }
+
+        let mut low = 0;
+        let mut high = header.slot_num - 1;
+        let key_value = Self::key_to_u64(key);
+
+        while low <= high {
+            let low_value = Self::key_to_u64(&self.decode_shortkey_slot(low).key_prefix);
+            if key_value == low_value {
+                return (true, low);
+            } else if key_value < low_value {
+                return (false, low);
+            }
+
+            let high_value = Self::key_to_u64(&self.decode_shortkey_slot(high).key_prefix);
+            if key_value == high_value {
+                return (true, high);
+            } else if key_value > high_value {
+                return (false, high + 1);
+            }
+
+            // Estimate the position using interpolation
+            let pos = low as u64
+                + ((key_value - low_value) / (high_value - low_value) * (high as u64 - low as u64));
+
+            if pos > high as u64 {
+                panic!("Should filtered by the above condition");
+            }
+
+            let pos = pos as u16;
+            let pos_value = Self::key_to_u64(&self.decode_shortkey_slot(pos).key_prefix);
+
+            match pos_value.cmp(&key_value) {
+                std::cmp::Ordering::Equal => return (true, pos),
+                std::cmp::Ordering::Less => low = pos + 1,
+                std::cmp::Ordering::Greater => high = pos,
+            }
+        }
+
+        (false, low)
+    }
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ShortKeyPageError> {
-        let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.interpolation_search(key);
+        let (found, index) = self.search_slot(key);
 
         if found {
             return Err(ShortKeyPageError::KeyExists);
@@ -272,8 +347,11 @@ impl ShortKeyPage for Page {
         Ok(())
     }
 
+    // when update, if the new value is bigger so OutofSpace, then remove the slot
     fn update(&mut self, key: &[u8], val: &[u8]) -> Result<Vec<u8>, ShortKeyPageError> {
-        let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.interpolation_search(key);
+        let (found, index) = self.search_slot(key);
 
         if !found {
             return Err(ShortKeyPageError::KeyNotFound);
@@ -310,16 +388,60 @@ impl ShortKeyPage for Page {
             self.encode_shortkey_slot(index, &slot);
 
             self.encode_shortkey_value(new_val_offset, &new_value_entry);
-            self.decode_shortkey_header().val_start_offset = new_val_offset as u16;
-            self.encode_shortkey_header(&self.decode_shortkey_header());
+            let mut header = self.decode_shortkey_header();
+            header.val_start_offset = new_val_offset as u16;
+            self.encode_shortkey_header(&header);
 
             return Ok(old_value_entry.vals);
         }
     }
 
+    fn update_at_slot(&mut self, slot_id: u16, val: &[u8]) -> Result<(), ShortKeyPageError> {
+        let slot = self.decode_shortkey_slot(slot_id);
+        let mut old_value_entry =
+            self.decode_shortkey_value(slot.val_offset as usize, slot.key_len);
+
+        if val.len() <= old_value_entry.vals.len() {
+            let _old_vals = std::mem::replace(&mut old_value_entry.vals, val.to_vec());
+            old_value_entry.vals_len = val.len() as u16;
+            self.encode_shortkey_value(slot.val_offset as usize, &old_value_entry);
+            return Ok(());
+        } else {
+            let remain_key_len = slot.key_len.saturating_sub(8) as usize;
+            let required_space = remain_key_len + val.len() + 2;
+            if required_space
+                > self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
+            {
+                self.remove_shortkey_slot(slot_id);
+                return Err(ShortKeyPageError::OutOfSpace);
+            }
+
+            let new_val_offset = self.decode_shortkey_header().val_start_offset as usize
+                - (val.len() + 2 + remain_key_len);
+            let new_value_entry = ShortKeyValue {
+                remain_key: old_value_entry.remain_key,
+                vals_len: val.len() as u16,
+                vals: val.to_vec(),
+            };
+
+            let mut slot = self.decode_shortkey_slot(slot_id);
+            slot.val_offset = new_val_offset as u16;
+            self.encode_shortkey_slot(slot_id, &slot);
+
+            self.encode_shortkey_value(new_val_offset, &new_value_entry);
+            let mut header = self.decode_shortkey_header();
+            header.val_start_offset = new_val_offset as u16;
+            self.encode_shortkey_header(&header);
+
+            return Ok(());
+        }
+    }
+
     fn upsert(&mut self, key: &[u8], value: &[u8]) -> (bool, Option<Vec<u8>>) {
         let mut header = self.decode_shortkey_header();
-        let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.interpolation_search(key);
+        let (found, index) = self.search_slot(key);
 
         if found {
             let mut slot = self.decode_shortkey_slot(index);
@@ -417,7 +539,9 @@ impl ShortKeyPage for Page {
         F: Fn(&[u8], &[u8]) -> Vec<u8>,
     {
         let mut header = self.decode_shortkey_header();
-        let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.interpolation_search(key);
+        let (found, index) = self.search_slot(key);
 
         if found {
             let mut slot = self.decode_shortkey_slot(index);
@@ -507,8 +631,10 @@ impl ShortKeyPage for Page {
     }
 
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
-        // println!("found: {}, index: {}", found, index);
+        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.interpolation_search(key);
+        let (found, index) = self.search_slot(key);
+
         if found {
             let slot = self.decode_shortkey_slot(index);
             let value_entry = self.decode_shortkey_value(slot.val_offset as usize, slot.key_len);
@@ -518,7 +644,9 @@ impl ShortKeyPage for Page {
     }
 
     fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        // let (found, index) = self.interpolation_search(key);
+        let (found, index) = self.search_slot(key);
 
         if found {
             let slot = self.decode_shortkey_slot(index);
@@ -655,8 +783,11 @@ impl ShortKeyPage for Page {
 
         let vals_len_start = offset + remain_key_len;
 
-        let vals_len =
-            u16::from_le_bytes([self[vals_len_start], self[vals_len_start + 1]]) as usize;
+        let vals_len = u16::from_le_bytes(
+            self[vals_len_start..vals_len_start + 2]
+                .try_into()
+                .expect("Invalid slice length"),
+        ) as usize;
 
         let vals_start = vals_len_start + 2;
         let vals = self[vals_start..vals_start + vals_len].to_vec();
@@ -1249,7 +1380,7 @@ mod tests {
 
         for _ in 0..20 {
             let operation: u8 = rng.gen_range(0..4);
-            let key = random_string(10);
+            let key = random_string(100);
             let value = random_string(20);
 
             match operation {

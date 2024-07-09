@@ -1,23 +1,28 @@
-use core::panic;
 use crate::log;
+use core::panic;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     marker::PhantomData,
-    sync::{atomic::AtomicU32, Arc}, time::Duration,
+    sync::{atomic::AtomicU32, Arc},
+    time::Duration,
 };
 
 use clap::Error;
 #[cfg(feature = "stat")]
 use stat::*;
 
-use crate::{bp::prelude::*, page::{self, Page}};
+use crate::{
+    bp::prelude::*,
+    page::{self, Page},
+};
 use crate::{log_info, page::PageId};
 
 use super::shortkeypage::{ShortKeyPage, ShortKeyPageError, SHORT_KEY_PAGE_HEADER_SIZE};
 use crate::page::AVAILABLE_PAGE_SIZE;
 
-const DEFAULT_BUCKET_NUM: usize = 4096;
+// const DEFAULT_BUCKET_NUM: usize = 1024;
+const DEFAULT_BUCKET_NUM: usize = 1024 * 4;
 const PAGE_HEADER_SIZE: usize = 0;
 
 pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
@@ -46,6 +51,20 @@ struct BucketMeta {
     last_page_id: u32,
     last_frame_id: u32,
     bloomfilter: Vec<u8>,
+}
+
+/// Opportunistically try to fix the child page frame id
+fn fix_frame_id<'a, E: EvictionPolicy>(
+    this: FrameReadGuard<'a, E>,
+    new_frame_key: &PageFrameKey,
+) -> FrameReadGuard<'a, E> {
+    match this.try_upgrade(true) {
+        Ok(mut write_guard) => {
+            let _res = write_guard.set_next_frame_id(new_frame_key.frame_id());
+            write_guard.downgrade()
+        }
+        Err(read_guard) => read_guard,
+    }
 }
 
 impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
@@ -121,7 +140,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), PagedHashMapError> {
         #[cfg(feature = "stat")]
         inc_local_stat_insert_count();
-        
+
         let required_space = key.as_ref().len() + val.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
         if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
             panic!("key and value should be less than a (page size - meta data size)");
@@ -132,117 +151,38 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
         let page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
-        
+
         let mut last_page = self.insert_traverse_to_endofchain_for_write(page_key, key.as_ref())?;
         match last_page.insert(key.as_ref(), val.as_ref()) {
             Ok(_) => Ok(()),
-            Err(ShortKeyPageError::KeyExists) => panic!("Key exists should detected in traverse_to_endofchain_for_write"),
+            Err(ShortKeyPageError::KeyExists) => {
+                panic!("Key exists should detected in traverse_to_endofchain_for_write")
+            }
             Err(ShortKeyPageError::OutOfSpace) => {
                 let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
-                #[cfg(feature = "stat")]{
+                #[cfg(feature = "stat")]
+                {
                     inc_local_stat_total_page_count();
+                    inc_local_stat_chain_len(hashed_key as usize - 1);
                 }
+
                 new_page.init();
                 last_page.set_next_page_id(new_page.get_id());
                 last_page.set_next_frame_id(new_page.frame_id());
                 match new_page.insert(key.as_ref(), val.as_ref()) {
                     Ok(_) => Ok(()),
-                    Err(err) => panic!("Inserting to new page should succeed: {:?}", err)
+                    Err(err) => panic!("Inserting to new page should succeed: {:?}", err),
                 }
-            },
+            }
             Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
         }
-
-
-        // let mut current_page = self.bp.get_page_for_read(page_key).unwrap();
-        // if current_page.frame_id() != expect_frame_id {
-        //     self.frame_buckets[hashed_key as usize].store(
-        //         current_page.frame_id(),
-        //         std::sync::atomic::Ordering::Release,
-        //     );
-        // }
-
-        // let mut chain_len = 0;
-        // #[cfg(feature = "stat")]
-        // {
-        //     chain_len += 1;
-        // }
-
-        // loop {
-        //     if current_page.get_next_page_id() == 0 {
-        //         // current_page = match current_page.try_upgrade(true) {
-        //         //     Ok(mut upgraded_page) => {
-        //         //         upgraded_page.set_next_frame_id(next_page.frame_id());
-        //         //         upgraded_page.downgrade()
-        //         //     }
-        //         //     Err(current_page) => {
-                        
-        //         //     },
-        //         // };
-        //         match current_page.insert(key.as_ref(), value.as_ref()) {
-        //             Ok(_) => {
-        //                 #[cfg(feature = "stat")]
-        //                 {
-        //                     update_local_stat_max_chain_len(chain_len);
-        //                     update_local_stat_min_chain_len(chain_len);
-        //                 }
-        //                 return Ok(());
-        //             }
-        //             Err(ShortKeyPageError::KeyExists) => {
-        //                 return Err(PagedHashMapError::KeyExists);
-        //             }
-        //             Err(ShortKeyPageError::OutOfSpace) => {
-        //                 break;
-        //             }
-        //             Err(err) => {
-        //                 return Err(PagedHashMapError::Other(format!("Insert error: {:?}", err)));
-        //             }
-        //         }
-        //     } else {
-        //         match current_page.get(key.as_ref()) {
-        //             Some(_) => {
-        //                 return Err(PagedHashMapError::KeyExists);
-        //             }
-        //             None => {
-        //                 let (next_page_id, next_frame_id) = (
-        //                     current_page.get_next_page_id(),
-        //                     current_page.get_next_frame_id(),
-        //                 );
-        //                 page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
-        //                 let next_page = self.bp.get_page_for_write(page_key).unwrap();
-        //                 if next_frame_id != next_page.frame_id() {
-        //                     current_page.set_next_frame_id(next_page.frame_id());
-        //                 }
-        //                 #[cfg(feature = "stat")]
-        //                 {
-        //                     chain_len += 1;
-        //                 }
-        //                 current_page = next_page;
-        //             }
-        //         }
-        //     }
-        // }
-
-        // // If we reach here, we need to create a new page
-        // let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
-        // #[cfg(feature = "stat")]
-        // {
-        //     chain_len += 1;
-        //     update_local_stat_max_chain_len(chain_len);
-        //     update_local_stat_min_chain_len(chain_len);
-        //     inc_local_stat_total_page_count();
-        // }
-        // new_page.init();
-        // current_page.set_next_page_id(new_page.get_id());
-        // current_page.set_next_frame_id(new_page.frame_id());
-
-        // match new_page.insert(key.as_ref(), value.as_ref()) {
-        //     Ok(_) => Ok(()),
-        //     Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
-        // }
     }
 
-    fn insert_traverse_to_endofchain_for_write(&self, page_key: PageFrameKey, key: &[u8]) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
+    fn insert_traverse_to_endofchain_for_write(
+        &self,
+        page_key: PageFrameKey,
+        key: &[u8],
+    ) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -261,48 +201,62 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 Err(err) => {
                     panic!("Traverse to end of chain error: {:?}", err);
                 }
-            }    
+            }
         }
     }
 
-    fn try_insert_traverse_to_endofchain_for_write(&self, page_key: PageFrameKey, key: &[u8]) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
+    fn try_insert_traverse_to_endofchain_for_write(
+        &self,
+        page_key: PageFrameKey,
+        key: &[u8],
+    ) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
         let mut current_page = self.read_page(page_key);
+        if current_page.frame_id() != page_key.frame_id() {
+            self.frame_buckets[page_key.p_key().page_id as usize].store(
+                current_page.frame_id(),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
         loop {
-            if current_page.is_exist(key) {
+            let (slot_id, _) = current_page.is_exist(key);
+            if slot_id.is_some() {
                 return Err(PagedHashMapError::KeyExists);
             }
             let next_page_id = current_page.get_next_page_id();
             if next_page_id == 0 {
                 match current_page.try_upgrade(true) {
-                    Ok(mut upgraded_page) => {
+                    Ok(upgraded_page) => {
                         return Ok(upgraded_page);
                     }
-                    Err(current_page) => {
+                    Err(_) => {
                         return Err(PagedHashMapError::WriteLatchFailed);
-                    },
+                    }
                 };
             }
             let next_frame_id = current_page.get_next_frame_id();
-            let next_page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+            let mut next_page_key =
+                PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
             let next_page = self.read_page(next_page_key);
             if next_frame_id != next_page.frame_id() {
-                current_page = match current_page.try_upgrade(true) {
-                    Ok(mut upgraded_page) => {
-                        upgraded_page.set_next_frame_id(next_page.frame_id());
-                        upgraded_page.downgrade()
-                    }
-                    Err(current_page) => current_page,
-                };
+                next_page_key.set_frame_id(next_page.frame_id());
+                current_page = fix_frame_id(current_page, &next_page_key);
             }
             current_page = next_page;
         }
     }
 
+    // read_page and update frame_buckets
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
         loop {
             let page = self.bp.get_page_for_read(page_key);
             match page {
                 Ok(page) => {
+                    // if page_key.p_key().page_id <= DEFAULT_BUCKET_NUM as u32
+                    //     && page.frame_id() != page_key.frame_id()
+                    // {
+                    //     self.frame_buckets[page_key.p_key().page_id as usize]
+                    //         .store(page.frame_id(), std::sync::atomic::Ordering::Release);
+                    // }
                     return page;
                 }
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
@@ -318,68 +272,143 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
     }
 
+    fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard<E> {
+        loop {
+            let page = self.bp.get_page_for_write(page_key);
+            match page {
+                Ok(page) => {
+                    return page;
+                }
+                Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
+                    std::hint::spin_loop();
+                }
+                Err(MemPoolStatus::CannotEvictPage) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(err) => {
+                    panic!("Write page error: {:?}", err);
+                }
+            }
+        }
+    }
+
     /// Update the value of an existing key.
     /// If the key does not exist, it will return an error.
-    pub fn update<K: AsRef<[u8]> + Hash>(
-        &self,
-        key: K,
-        value: K,
-    ) -> Result<Vec<u8>, PagedHashMapError> {
+    pub fn update<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), PagedHashMapError> {
         #[cfg(feature = "stat")]
-        inc_local_stat_insert_count();
+        inc_local_stat_update_count();
 
         let hashed_key = self.hash(&key);
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
-        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
-        let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
-        if current_page.frame_id() != expect_frame_id {
-            self.frame_buckets[hashed_key as usize].store(
-                current_page.frame_id(),
-                std::sync::atomic::Ordering::Release,
-            );
-        }
+        let page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
 
-        #[cfg(feature = "stat")]
-        let mut chain_len = 0;
-        #[cfg(feature = "stat")]
-        {
-            chain_len += 1;
-        }
+        let mut attempt = 0;
 
-        loop {
-            match current_page.update(key.as_ref(), value.as_ref()) {
-                Ok(old_value) => {
-                    #[cfg(feature = "stat")]
-                    {
-                        update_local_stat_max_chain_len(chain_len);
-                        update_local_stat_min_chain_len(chain_len);
+        let (mut updating_page, slot_id) =
+            self.update_traverse_to_endofchain_for_write(page_key, key.as_ref())?;
+        match updating_page.update_at_slot(slot_id, val.as_ref()) {
+            Ok(_) => Ok(()),
+            Err(ShortKeyPageError::KeyNotFound) => {
+                panic!("Key not found should detected in traverse_to_endofchain_for_write")
+            }
+            Err(ShortKeyPageError::OutOfSpace) => {
+                loop {
+                    let next_page_id = updating_page.get_next_page_id();
+                    if next_page_id == 0 {
+                        // create new page
+                        let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+                        #[cfg(feature = "stat")]
+                        inc_local_stat_total_page_count();
+                        new_page.init();
+                        updating_page.set_next_page_id(new_page.get_id());
+                        updating_page.set_next_frame_id(new_page.frame_id());
+                        match new_page.insert(key.as_ref(), val.as_ref()) {
+                            Ok(_) => return Ok(()),
+                            Err(err) => panic!("Inserting to new page should succeed: {:?}", err),
+                        }
                     }
-                    return Ok(old_value);
+                    let next_frame_id = updating_page.get_next_frame_id();
+                    let next_page_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                    let mut next_page = self.write_page(next_page_key);
+                    if next_frame_id != next_page.frame_id() {
+                        updating_page.set_next_frame_id(next_page.frame_id());
+                    }
+                    match next_page.insert(key.as_ref(), val.as_ref()) {
+                        Ok(_) => return Ok(()),
+                        Err(ShortKeyPageError::OutOfSpace) => {
+                            updating_page = next_page;
+                        }
+                        Err(err) => panic!("Unexpected Error: {:?}", err),
+                    }
                 }
-                Err(ShortKeyPageError::KeyNotFound) => {
-                    let (next_page_id, next_frame_id) = (
-                        current_page.get_next_page_id(),
-                        current_page.get_next_frame_id(),
-                    );
+            }
+            Err(err) => Err(PagedHashMapError::Other(format!("Update error: {:?}", err))),
+        }
+    }
+
+    fn update_traverse_to_endofchain_for_write(
+        &self,
+        page_key: PageFrameKey,
+        key: &[u8],
+    ) -> Result<(FrameWriteGuard<E>, u16), PagedHashMapError> {
+        let base = Duration::from_millis(1);
+        let mut attempts = 0;
+        loop {
+            let page = self.try_update_traverse_to_endofchain_for_write(page_key, key);
+            match page {
+                Ok(page) => {
+                    return Ok(page);
+                }
+                Err(PagedHashMapError::WriteLatchFailed) => {
+                    attempts += 1;
+                    std::thread::sleep(base * attempts);
+                }
+                Err(PagedHashMapError::KeyNotFound) => {
+                    return Err(PagedHashMapError::KeyNotFound);
+                }
+                Err(err) => {
+                    panic!("Traverse to end of chain error: {:?}", err);
+                }
+            }
+        }
+    }
+
+    fn try_update_traverse_to_endofchain_for_write(
+        &self,
+        page_key: PageFrameKey,
+        key: &[u8],
+    ) -> Result<(FrameWriteGuard<E>, u16), PagedHashMapError> {
+        let mut current_page = self.read_page(page_key);
+        loop {
+            let (slot_id, _) = current_page.is_exist(key);
+            match slot_id {
+                Some(slot_id) => {
+                    match current_page.try_upgrade(true) {
+                        Ok(upgraded_page) => {
+                            return Ok((upgraded_page, slot_id));
+                        }
+                        Err(_) => {
+                            return Err(PagedHashMapError::WriteLatchFailed);
+                        }
+                    };
+                }
+                None => {
+                    let next_page_id = current_page.get_next_page_id();
                     if next_page_id == 0 {
                         return Err(PagedHashMapError::KeyNotFound);
                     }
-                    page_key =
+                    let next_frame_id = current_page.get_next_frame_id();
+                    let mut next_page_key =
                         PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
-                    let next_page = self.bp.get_page_for_write(page_key).unwrap();
+                    let next_page = self.read_page(next_page_key);
                     if next_frame_id != next_page.frame_id() {
-                        current_page.set_next_frame_id(next_page.frame_id());
-                    }
-                    #[cfg(feature = "stat")]
-                    {
-                        chain_len += 1;
+                        next_page_key.set_frame_id(next_page.frame_id());
+                        current_page = fix_frame_id(current_page, &next_page_key);
                     }
                     current_page = next_page;
-                }
-                Err(err) => {
-                    return Err(PagedHashMapError::Other(format!("Update error: {:?}", err)));
                 }
             }
         }
@@ -394,7 +423,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         value: K,
     ) -> Result<Option<Vec<u8>>, PagedHashMapError> {
         #[cfg(feature = "stat")]
-        inc_local_stat_insert_count();
+        inc_local_stat_upsert_count();
 
         let required_space = key.as_ref().len() + value.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
         if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
@@ -414,20 +443,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             );
         }
 
-        let mut chain_len = 0;
-        #[cfg(feature = "stat")]
-        {
-            chain_len += 1;
-        }
-
         loop {
             match current_page.upsert(key.as_ref(), value.as_ref()) {
                 (true, old_value) => {
-                    #[cfg(feature = "stat")]
-                    {
-                        update_local_stat_max_chain_len(chain_len);
-                        update_local_stat_min_chain_len(chain_len);
-                    }
                     return Ok(old_value);
                 }
                 (false, old_value) => {
@@ -444,10 +462,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                     if next_frame_id != next_page.frame_id() {
                         current_page.set_next_frame_id(next_page.frame_id());
                     }
-                    #[cfg(feature = "stat")]
-                    {
-                        chain_len += 1;
-                    }
                     current_page = next_page;
                 }
             }
@@ -457,9 +471,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
         #[cfg(feature = "stat")]
         {
-            chain_len += 1;
-            update_local_stat_max_chain_len(chain_len);
-            update_local_stat_min_chain_len(chain_len);
+            inc_local_stat_chain_len(hashed_key as usize - 1);
             inc_local_stat_total_page_count();
         }
         new_page.init();
@@ -481,9 +493,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         value: K,
         merge: fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Option<Vec<u8>> {
-        let mut chain_len = 0;
         #[cfg(feature = "stat")]
-        inc_local_stat_insert_count();
+        inc_local_stat_upsert_with_merge_count();
 
         let required_space = key.as_ref().len() + value.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
         if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
@@ -503,10 +514,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             );
             // self.frame_buckets[hashed_key as usize] = current_page.frame_id();
         }
-        #[cfg(feature = "stat")]
-        {
-            chain_len += 1;
-        }
 
         let mut current_value: Option<Vec<u8>> = None;
 
@@ -516,10 +523,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 current_page.upsert_with_merge(key.as_ref(), value.as_ref(), &merge);
             if inserted {
                 #[cfg(feature = "stat")]
-                {
-                    update_local_stat_max_chain_len(chain_len);
-                    update_local_stat_min_chain_len(chain_len);
-                }
                 return current_value;
             }
             let (next_page_id, next_frame_id) = (
@@ -537,10 +540,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             let next_page = self.bp.get_page_for_write(page_key).unwrap();
             if next_frame_id != next_page.frame_id() {
                 current_page.set_next_frame_id(next_page.frame_id());
-            }
-            #[cfg(feature = "stat")]
-            {
-                chain_len += 1;
             }
             current_page = next_page;
         }
@@ -566,19 +565,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             if next_frame_id != next_page.frame_id() {
                 current_page.set_next_frame_id(next_page.frame_id());
             }
-            #[cfg(feature = "stat")]
-            {
-                chain_len += 1;
-            }
             current_page = next_page;
 
             let (inserted, _) = current_page.upsert(key.as_ref(), &new_value);
             if inserted {
-                #[cfg(feature = "stat")]
-                {
-                    update_local_stat_max_chain_len(chain_len);
-                    update_local_stat_min_chain_len(chain_len);
-                }
                 return current_value;
             }
             next_page_id = current_page.get_next_page_id();
@@ -588,9 +578,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
         #[cfg(feature = "stat")]
         {
-            chain_len += 1;
-            update_local_stat_max_chain_len(chain_len);
-            update_local_stat_min_chain_len(chain_len);
+            inc_local_stat_chain_len(hashed_key as usize - 1);
             inc_local_stat_total_page_count();
         }
 
@@ -606,22 +594,19 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     /// If the key does not exist, it will return an error.
     pub fn get<K: AsRef<[u8]> + Hash>(&self, key: K) -> Result<Vec<u8>, PagedHashMapError> {
         #[cfg(feature = "stat")]
-        {
-            inc_local_stat_get_count();
-        }
+        inc_local_stat_get_count();
 
         let hashed_key = self.hash(&key);
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
         let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
-        let mut current_page = self.bp.get_page_for_read(page_key).unwrap();
+        let mut current_page = self.read_page(page_key);
         if current_page.frame_id() != expect_frame_id {
             self.frame_buckets[hashed_key as usize].store(
                 current_page.frame_id(),
                 std::sync::atomic::Ordering::Release,
             );
-            // self.frame_buckets[hashed_key as usize] = current_page.frame_id();
         }
 
         let mut result: Option<Vec<u8>> = None;
@@ -636,15 +621,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 break;
             }
             page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
-            let next_page = self.bp.get_page_for_read(page_key).unwrap();
+            let next_page = self.read_page(page_key);
             if next_frame_id != next_page.frame_id() {
-                current_page = match current_page.try_upgrade(true) {
-                    Ok(mut upgraded_page) => {
-                        upgraded_page.set_next_frame_id(next_page.frame_id());
-                        upgraded_page.downgrade()
-                    }
-                    Err(current_page) => current_page,
-                };
+                page_key.set_frame_id(next_page.frame_id());
+                current_page = fix_frame_id(current_page, &page_key);
             }
             current_page = next_page;
         }
@@ -747,7 +727,7 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for PagedHashMapIter<'a, E, 
                     .bp
                     .get_page_for_read(PageFrameKey::new(
                         self.map.c_key,
-                        (self.current_bucket as u32),
+                        self.current_bucket as u32,
                     ))
                     .ok();
                 self.current_index = 0;
@@ -771,11 +751,13 @@ mod stat {
     pub struct PagedHashMapStat {
         pub insert_count: UnsafeCell<usize>,
         pub get_count: UnsafeCell<usize>,
+        pub update_count: UnsafeCell<usize>,
+        pub upsert_count: UnsafeCell<usize>,
+        pub upsert_with_merge_count: UnsafeCell<usize>,
         pub remove_count: UnsafeCell<usize>,
 
         pub total_page_count: UnsafeCell<usize>,
-        pub max_chain_len: UnsafeCell<usize>,
-        pub min_chain_len: UnsafeCell<usize>,
+        pub chain_len: UnsafeCell<[usize; DEFAULT_BUCKET_NUM]>,
     }
 
     impl PagedHashMapStat {
@@ -783,10 +765,12 @@ mod stat {
             PagedHashMapStat {
                 insert_count: UnsafeCell::new(0),
                 get_count: UnsafeCell::new(0),
+                update_count: UnsafeCell::new(0),
+                upsert_count: UnsafeCell::new(0),
+                upsert_with_merge_count: UnsafeCell::new(0),
                 remove_count: UnsafeCell::new(0),
                 total_page_count: UnsafeCell::new(0),
-                max_chain_len: UnsafeCell::new(0),
-                min_chain_len: UnsafeCell::new(999),
+                chain_len: UnsafeCell::new([1; DEFAULT_BUCKET_NUM]),
             }
         }
 
@@ -802,6 +786,24 @@ mod stat {
             }
         }
 
+        pub fn inc_update_count(&self) {
+            unsafe {
+                *self.update_count.get() += 1;
+            }
+        }
+
+        pub fn inc_upsert_count(&self) {
+            unsafe {
+                *self.upsert_count.get() += 1;
+            }
+        }
+
+        pub fn inc_upsert_with_merge_count(&self) {
+            unsafe {
+                *self.upsert_with_merge_count.get() += 1;
+            }
+        }
+
         pub fn inc_remove_count(&self) {
             unsafe {
                 *self.remove_count.get() += 1;
@@ -814,60 +816,109 @@ mod stat {
             }
         }
 
-        pub fn update_max_chain_len(&self, chain_len: usize) {
+        pub fn inc_chain_len(&self, bucket_id: usize) {
             unsafe {
-                let max_chain_len = self.max_chain_len.get();
-                if chain_len > *max_chain_len {
-                    *max_chain_len = chain_len;
-                }
+                let chain_len = &mut *self.chain_len.get();
+                chain_len[bucket_id] += 1;
             }
         }
 
-        pub fn update_min_chain_len(&self, chain_len: usize) {
+        pub fn update_chain_len(&self, bucket_id: usize, len: usize) {
             unsafe {
-                let min_chain_len = self.min_chain_len.get();
-                if chain_len < *min_chain_len {
-                    *min_chain_len = chain_len;
+                let chain_len = &mut *self.chain_len.get();
+                if len > chain_len[bucket_id] {
+                    chain_len[bucket_id] = len;
                 }
             }
         }
 
         pub fn to_string(&self) -> String {
+            let insert_count = unsafe { *self.insert_count.get() };
+            let get_count = unsafe { *self.get_count.get() };
+            let update_count = unsafe { *self.update_count.get() };
+            let upsert_count = unsafe { *self.upsert_count.get() };
+            let upsert_with_merge_count = unsafe { *self.upsert_with_merge_count.get() };
+            let remove_count = unsafe { *self.remove_count.get() };
+            let total_page_count = unsafe { *self.total_page_count.get() };
+
+            let chain_len = unsafe { &*self.chain_len.get() };
+            let max_chain_len = chain_len.iter().max().unwrap_or(&0);
+            let min_chain_len = chain_len.iter().min().unwrap_or(&0);
+            let avg_chain_len = chain_len.iter().sum::<usize>() as f64 / chain_len.len() as f64;
+
+            // Calculate the distribution of chain lengths
+            let mut distribution = std::collections::HashMap::new();
+            for &len in chain_len.iter() {
+                *distribution.entry(len).or_insert(0) += 1;
+            }
+
+            // Create a formatted string for the distribution, sorted by chain length
+            let mut distribution_vec: Vec<_> = distribution.iter().collect();
+            distribution_vec.sort();
+            let mut distribution_str = String::new();
+            for (len, count) in distribution_vec {
+                distribution_str.push_str(&format!("Chain length {}: {} buckets\n", len, count));
+            }
+
             format!(
-                "Paged Hash Map Statistics\ninsert_count: {}\nget_count: {}\nremove_count: {}\ntotal_page_count: {}\nmax_chain_len: {}\nmin_chain_len: {}",
-                unsafe { *self.insert_count.get() },
-                unsafe { *self.get_count.get() },
-                unsafe { *self.remove_count.get() },
-                unsafe { *self.total_page_count.get() },
-                unsafe { *self.max_chain_len.get() },
-                unsafe { *self.min_chain_len.get() }
+                "Paged Hash Map Statistics\n\
+                insert_count: {}\n\
+                get_count: {}\n\
+                update_count: {}\n\
+                upsert_count: {}\n\
+                upsert_with_merge_count: {}\n\
+                remove_count: {}\n\n\
+                total_page_count: {}\n\
+                max_chain_len: {}\n\
+                min_chain_len: {}\n\
+                avg_chain_len: {:.2}\n\n\
+                Chain length distribution:\n{}",
+                insert_count,
+                get_count,
+                update_count,
+                upsert_count,
+                upsert_with_merge_count,
+                remove_count,
+                total_page_count,
+                max_chain_len,
+                min_chain_len,
+                avg_chain_len,
+                distribution_str
             )
         }
 
         pub fn merge(&self, other: &PagedHashMapStat) {
-            let insert_count = unsafe { &mut *self.insert_count.get() };
-            let get_count = unsafe { &mut *self.get_count.get() };
-            let remove_count = unsafe { &mut *self.remove_count.get() };
-            let total_page_count = unsafe { &mut *self.total_page_count.get() };
-            let max_chain_len = unsafe { &mut *self.max_chain_len.get() };
-            let min_chain_len = unsafe { &mut *self.min_chain_len.get() };
+            unsafe {
+                *self.insert_count.get() += *other.insert_count.get();
+                *self.get_count.get() += *other.get_count.get();
+                *self.update_count.get() += *other.update_count.get();
+                *self.upsert_count.get() += *other.upsert_count.get();
+                *self.upsert_with_merge_count.get() += *other.upsert_with_merge_count.get();
+                *self.remove_count.get() += *other.remove_count.get();
+                *self.total_page_count.get() += *other.total_page_count.get();
 
-            *insert_count += unsafe { &*other.insert_count.get() };
-            *get_count += unsafe { &*other.get_count.get() };
-            *remove_count += unsafe { &*other.remove_count.get() };
-            *total_page_count += unsafe { &*other.total_page_count.get() };
-            *max_chain_len = std::cmp::max(*max_chain_len, *unsafe { &*other.max_chain_len.get() });
-            *min_chain_len = std::cmp::min(*min_chain_len, *unsafe { &*other.min_chain_len.get() });
+                let self_chain_len = &mut *self.chain_len.get();
+                let other_chain_len = &*other.chain_len.get();
+                for i in 0..DEFAULT_BUCKET_NUM {
+                    self_chain_len[i] = std::cmp::max(self_chain_len[i], other_chain_len[i]);
+                }
+            }
         }
 
         pub fn clear(&self) {
             unsafe {
                 *self.insert_count.get() = 0;
                 *self.get_count.get() = 0;
+                *self.update_count.get() = 0;
+                *self.upsert_count.get() = 0;
+                *self.upsert_with_merge_count.get() = 0;
                 *self.remove_count.get() = 0;
                 *self.total_page_count.get() = 0;
-                *self.max_chain_len.get() = 0;
-                *self.min_chain_len.get() = 999;
+
+                let chain_len = &mut *self.chain_len.get();
+                for i in 0..DEFAULT_BUCKET_NUM {
+                    chain_len[i] = 1; // Reset to default length
+                }
             }
         }
     }
@@ -904,6 +955,24 @@ mod stat {
         });
     }
 
+    pub fn inc_local_stat_update_count() {
+        LOCAL_STAT.with(|s| {
+            s.stat.inc_update_count();
+        });
+    }
+
+    pub fn inc_local_stat_upsert_count() {
+        LOCAL_STAT.with(|s| {
+            s.stat.inc_upsert_count();
+        });
+    }
+
+    pub fn inc_local_stat_upsert_with_merge_count() {
+        LOCAL_STAT.with(|s| {
+            s.stat.inc_upsert_with_merge_count();
+        });
+    }
+
     pub fn inc_local_stat_remove_count() {
         LOCAL_STAT.with(|s| {
             s.stat.inc_remove_count();
@@ -916,15 +985,15 @@ mod stat {
         });
     }
 
-    pub fn update_local_stat_max_chain_len(chain_len: usize) {
+    pub fn inc_local_stat_chain_len(bucket_id: usize) {
         LOCAL_STAT.with(|s| {
-            s.stat.update_max_chain_len(chain_len);
+            s.stat.inc_chain_len(bucket_id);
         });
     }
 
-    pub fn update_local_stat_min_chain_len(chain_len: usize) {
+    pub fn update_local_stat_chain_len(bucket_id: usize, len: usize) {
         LOCAL_STAT.with(|s| {
-            s.stat.update_min_chain_len(chain_len);
+            s.stat.update_chain_len(bucket_id, len);
         });
     }
 }
@@ -1319,8 +1388,9 @@ mod tests {
         let value2 = "value2".as_bytes();
 
         map.insert(key, value1).unwrap();
-        let old_value = map.update(key, value2).unwrap();
-        assert_eq!(old_value, value1.to_vec(), "Update should return old value");
+        map.update(key, value2).unwrap();
+        // let old_value = map.update(key, value2).unwrap();
+        // assert_eq!(old_value, value1.to_vec(), "Update should return old value");
 
         let retrieved_value = map.get(key).unwrap();
         assert_eq!(
