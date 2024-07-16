@@ -48,6 +48,8 @@ pub type FileManager = linux::FileManager;
     target_arch = "wasm32"
 ))]
 pub mod not_linux {
+    use memmap2::MmapMut;
+
     use super::FMError;
     #[allow(unused_imports)]
     use crate::log;
@@ -55,6 +57,7 @@ pub mod not_linux {
     use crate::page::{Page, PageId, PAGE_SIZE};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::fd::FromRawFd;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 

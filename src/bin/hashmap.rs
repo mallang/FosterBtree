@@ -10,18 +10,26 @@ use fbtree::PAGE_SIZE;
 
 fn main() {
     let mut bench_params = BenchParams::parse();
-    bench_params.bp_size = 100_000;
+    bench_params.bp_size = 200_000;
     bench_params.ops_ratio = "0:0:0:1".to_string();
-    bench_params.num_keys = 200_000;
     println!("{}", bench_params);
 
     let bp_size = bench_params.bp_size;
     // let phm_in_mem = gen_paged_hash_map_in_mem();
     let phm_on_disk = gen_paged_hash_map_on_disk(bp_size);
-    let mut rhm = gen_rust_hash_map();
+    let rhm = gen_rust_hash_map();
     // let phm = gen_paged_hash_map_on_disk_with_hash_eviction_policy(bp_size);
 
     let kvs = RandomKVs::new(
+        bench_params.unique_keys,
+        bench_params.num_threads,
+        bench_params.num_keys,
+        bench_params.key_size,
+        bench_params.val_min_size,
+        bench_params.val_max_size,
+    );
+
+    let kvs2 = RandomKVs::new(
         bench_params.unique_keys,
         bench_params.num_threads,
         bench_params.num_keys,
@@ -34,7 +42,7 @@ fn main() {
     insert_into_paged_hash_map(&phm_on_disk, &kvs);
     insert_into_rust_hash_map(&rhm, &kvs);
 
-    let iterations = 20;
+    let iterations = 10;
     // let mut in_mem_paged_hash_map_times = vec![];
     let mut on_disk_paged_hash_map_times = vec![];
     let mut rust_hash_map_times = vec![];
@@ -92,10 +100,13 @@ fn main() {
     {
         println!("BP stats: ");
         println!("{}", phm_on_disk.bp.eviction_stats());
+        // println!("{}", phm_in_mem.bp.eviction_stats());
         println!("File stats: ");
         println!("{}", phm_on_disk.bp.file_stats());
+        // println!("{}", phm_in_mem.bp.file_stats());
         println!("PagedHashMap stats: ");
         println!("{}", phm_on_disk.stats());
+        // println!("{}", phm_in_mem.stats());
     }
 }
 

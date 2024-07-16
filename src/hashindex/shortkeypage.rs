@@ -280,6 +280,7 @@ impl ShortKeyPage for Page {
 
         (false, low)
     }
+
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ShortKeyPageError> {
         // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
         // let (found, index) = self.interpolation_search(key);

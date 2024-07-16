@@ -5,7 +5,7 @@ mod eviction_policy;
 mod in_mem_pool;
 mod mem_pool_trait;
 
-use std::sync::Arc;
+use std::{fs::File, io, path::PathBuf, sync::Arc};
 
 use eviction_policy::{DummyEvictionPolicy, EvictionPolicy};
 
@@ -13,6 +13,7 @@ pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
 pub use buffer_pool::BufferPool;
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey};
+use memmap2::MmapMut;
 use tempfile::TempDir;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
@@ -72,6 +73,7 @@ pub fn get_test_bp<E: EvictionPolicy>(num_frames: usize) -> Arc<BufferPoolForTes
 pub fn get_in_mem_pool() -> Arc<InMemPool<DummyEvictionPolicy>> {
     Arc::new(InMemPool::new())
 }
+
 pub mod prelude {
     pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
     pub use super::eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};

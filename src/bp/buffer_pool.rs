@@ -194,6 +194,7 @@ mod stat {
     }
 }
 
+use memmap2::MmapMut;
 #[cfg(feature = "stat")]
 use stat::*;
 

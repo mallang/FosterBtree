@@ -8,6 +8,8 @@ use std::{
 use clap::Parser;
 use criterion::black_box;
 
+use crate::page::PAGE_SIZE;
+
 use crate::{
     bp::{
         get_in_mem_pool, get_test_bp,
