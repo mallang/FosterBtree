@@ -64,7 +64,7 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
 macro_rules! log_error {
     ($($arg:tt)*) => {
         #[cfg(any(feature = "log_error", feature = "log_warn", feature = "log_info", feature = "log_debug", feature = "log_trace"))]
-        log("ERROR", file!(), line!(), &format!($($arg)*))
+        $crate::logger::log("ERROR", file!(), line!(), &format!($($arg)*))
     }
 }
 
@@ -72,7 +72,7 @@ macro_rules! log_error {
 macro_rules! log_warn {
     ($($arg:tt)*) => {
         #[cfg(any(feature = "log_warn", feature = "log_info", feature = "log_debug", feature = "log_trace"))]
-        log("WARN ", file!(), line!(), &format!($($arg)*))
+        $crate::logger::log("WARN ", file!(), line!(), &format!($($arg)*))
     }
 }
 
@@ -80,7 +80,7 @@ macro_rules! log_warn {
 macro_rules! log_info {
     ($($arg:tt)*) => {
         #[cfg(any(feature = "log_info", feature = "log_debug", feature = "log_trace"))]
-        log("INFO ", file!(), line!(), &format!($($arg)*))
+        $crate::logger::log("INFO ", file!(), line!(), &format!($($arg)*))
     }
 }
 
@@ -88,7 +88,7 @@ macro_rules! log_info {
 macro_rules! log_debug {
     ($($arg:tt)*) => {
         #[cfg(any(feature = "log_debug", feature = "log_trace"))]
-        log("DEBUG", file!(), line!(), &format!($($arg)*))
+        $crate::logger::log("DEBUG", file!(), line!(), &format!($($arg)*))
     }
 }
 
@@ -96,6 +96,6 @@ macro_rules! log_debug {
 macro_rules! log_trace {
     ($($arg:tt)*) => {
         #[cfg(feature = "log_trace")]
-        log("TRACE", file!(), line!(), &format!($($arg)*))
+        $crate::logger::log("TRACE", file!(), line!(), &format!($($arg)*))
     }
 }

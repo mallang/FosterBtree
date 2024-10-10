@@ -112,7 +112,7 @@ pub mod sync_write {
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
-            log_info!("Reading page: {} from file: {:?}", page_id, self.path);
+            log_info!("Reading page: {} from file: {:?}", page_id, self._path);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
                 .map_err(|_| FMError::Seek)?;
             file.read_exact(page.get_raw_bytes_mut())
@@ -123,7 +123,7 @@ pub mod sync_write {
 
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
-            log_info!("Writing page: {} to file: {:?}", page_id, self.path);
+            log_info!("Writing page: {} to file: {:?}", page_id, self._path);
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
@@ -135,7 +135,7 @@ pub mod sync_write {
 
         pub fn flush(&self) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
-            log_info!("Flushing file: {:?}", self.path);
+            log_info!("Flushing file: {:?}", self._path);
             file.flush().map_err(|_| FMError::Flush)
         }
     }
