@@ -192,12 +192,27 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         }
     }
     
+    /*
+        Return: old_ts, old_val
+     */
     pub fn update(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
+    ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
+        todo!()
+    }
+
+    /*
+        Return: old_ts, old_val
+     */
+    pub fn delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
         todo!()
     }
