@@ -448,13 +448,13 @@ pub trait MvccHashJoinRecentPage {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<Vec<u8>, AccessMethodError>;
+    ) -> Result<(Vec<u8>, Timestamp), AccessMethodError>;
     fn delete(
         &mut self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, AccessMethodError>;
+    ) -> Result<(Vec<u8>, Timestamp), AccessMethodError>;
     
     fn next_page(&self) -> Option<(PageId, u32)>;
     fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32);
@@ -484,7 +484,7 @@ pub trait MvccHashJoinRecentPage {
         val: &[u8],
         ts: Timestamp,
         slot_id: u32,
-    ) -> Result<Vec<u8>, AccessMethodError>;
+    ) -> Result<(Vec<u8>, Timestamp), AccessMethodError>;
 
     fn slot(&self, slot_id: u32) -> Option<Slot>;
 
@@ -604,7 +604,8 @@ impl MvccHashJoinRecentPage for Page {
 /*  
     update a specific key with ts
     if not found -> key not found
-    if space is not enough -> space not enough [AccessMethodError::OutOfSpace]
+    if record too large for a single page -> RecordTooLarge
+    if space is not enough in current page -> space not enough [AccessMethodError::OutOfSpace]
     (if record ts > ts -> return [AccessMethodError::KeyFoundButInvalidTimestamp])
 */
     fn update(
@@ -613,7 +614,7 @@ impl MvccHashJoinRecentPage for Page {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<Vec<u8>, AccessMethodError> {
+    ) -> Result<(Vec<u8>, Timestamp), AccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count() /* default value: slot_count */;
         let mut slot_id_to_update = slot_count;
@@ -666,21 +667,15 @@ impl MvccHashJoinRecentPage for Page {
             1. insert new record at new offset
             2. update slot
             3. update header(metadata)
-        */
+        */        
 
-        // space_need() need to minus SLOT_SIZE is because it is an update
-        let space_need = Self::space_need(key, pkey, val);
-
-        if (space_need - SLOT_SIZE as u32) > self.free_space_with_compaction() {
+        // only check RecordTooLarge
+        let space_need = <Page as MvccHashJoinRecentPage>::space_need(key, pkey, val);
+        if space_need > AVAILABLE_PAGE_SIZE as u32 {
             return Err(AccessMethodError::RecordTooLarge);
         }
 
-        if (space_need - SLOT_SIZE as u32) > self.free_space_without_compaction() {
-            log_debug!("Compaction needed");
-            todo!()
-        }
-
-        // we can now update record safely
+        // we can now update record (record size check is inside)
         self.update_at_slot_id(key, pkey, val, ts, slot_id_to_update)
     }
 
@@ -694,11 +689,12 @@ impl MvccHashJoinRecentPage for Page {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, AccessMethodError> {
+    ) -> Result<(Vec<u8>, Timestamp), AccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count() /* default value: slot_count */;
         let mut slot_id_to_delete = slot_count;
-        let mut old_val = Vec::new();
+        let mut old_val: Vec<u8> = Vec::new();
+        let mut old_ts: Timestamp = 0;
         for slot_idx in (0..slot_count).rev() {
             let slot_offset = self.slot_offset(slot_idx) as usize;
             let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
@@ -731,6 +727,7 @@ impl MvccHashJoinRecentPage for Page {
                     if slot.ts() <= ts {
                         slot_id_to_delete = slot_idx;
                         old_val.extend_from_slice(record.val());
+                        old_ts = slot.ts();
                         break;
                     } else {
                         return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
@@ -751,7 +748,7 @@ impl MvccHashJoinRecentPage for Page {
          */
         self.delete_slot_at_id(slot_id_to_delete);
 
-        return Ok(old_val);
+        return Ok((old_val, old_ts));
     }
 
     fn next_page(&self) -> Option<(PageId, u32)> {
@@ -810,7 +807,6 @@ impl MvccHashJoinRecentPage for Page {
     fn delete_slot_at_id(&mut self, slot_id: u32) {
         // check if rec_start_offset should change 
         let slot = self.slot(slot_id).expect("Invalid slot_id");
-        println!("SLOT ID: {}, OFFSET: {}, rec_start_offset:{}", slot_id, slot.offset(), self.rec_start_offset());
 
         if slot.offset() == self.rec_start_offset() {
             self.set_rec_start_offset(
@@ -843,6 +839,10 @@ impl MvccHashJoinRecentPage for Page {
         self[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
+    /*  
+        calculate to find whether the record size is okay or not
+        if compaction is not enough -> OutOfSpace
+     */
     fn update_at_slot_id(
         &mut self,
         key: &[u8],
@@ -850,11 +850,12 @@ impl MvccHashJoinRecentPage for Page {
         val: &[u8],
         ts: Timestamp,
         slot_id: u32,
-    ) -> Result<Vec<u8>, AccessMethodError> {
+    ) -> Result<(Vec<u8>, Timestamp), AccessMethodError> {
         let new_rec_size = Self::space_need(key, pkey, val) - SLOT_SIZE as u32;
 
         let mut slot = self.slot(slot_id).expect("Invalid slot_id");
         let old_val = self.get_value_with_slot(&slot).to_vec();
+        let old_ts = slot.ts();
         let old_record_offset = slot.offset();
         let old_val_size = slot.val_size();
         let old_rec_size = slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32) + 
@@ -862,7 +863,7 @@ impl MvccHashJoinRecentPage for Page {
 
         if self.free_space_without_compaction() < new_rec_size {
             if (self.free_space_with_compaction() as i32) < (new_rec_size as i32) - (old_rec_size as i32) {
-                return Err(AccessMethodError::OutOfSpaceForUpdate(old_val));
+                return Err(AccessMethodError::OutOfSpace);
             }
             if new_rec_size > old_rec_size && self.free_space_with_compaction() != self.free_space_without_compaction() {
                 // compaction
@@ -901,7 +902,7 @@ impl MvccHashJoinRecentPage for Page {
         self.increase_total_bytes_used(new_rec_size as u32);
         self.decrease_total_bytes_used(old_rec_size as u32);
 
-        Ok(old_val)
+        Ok((old_val, old_ts))
     }
 
     fn slot(&self, slot_id: u32) -> Option<Slot> {
@@ -1164,10 +1165,11 @@ mod tests {
         page.insert(key, pkey, ts, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts);
+        let del_result = page.delete(key, pkey, ts + 1);
 
         assert!(del_result.is_ok());
-        assert_eq!(del_result.unwrap(), val);
+        assert_eq!(del_result.as_ref().unwrap().0, val);
+        assert_eq!(del_result.as_ref().unwrap().1, ts);
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
@@ -1191,9 +1193,10 @@ mod tests {
         page.insert(key, pkey, ts, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts);
+        let del_result = page.delete(key, pkey, ts + 1);
         assert!(del_result.is_ok());
-        assert_eq!(del_result.unwrap(), val);
+        assert_eq!(del_result.as_ref().unwrap().0, val);
+        assert_eq!(del_result.as_ref().unwrap().1, ts);
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
@@ -1217,9 +1220,10 @@ mod tests {
         page.insert(key, pkey, ts, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts);
+        let del_result = page.delete(key, pkey, ts + 1);
         assert!(del_result.is_ok());
-        assert_eq!(del_result.unwrap(), val);
+        assert_eq!(del_result.as_ref().unwrap().0, val);
+        assert_eq!(del_result.as_ref().unwrap().1, ts);
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
@@ -1243,9 +1247,10 @@ mod tests {
         page.insert(key, pkey, ts, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts);
+        let del_result = page.delete(key, pkey, ts + 1);
         assert!(del_result.is_ok());
-        assert_eq!(del_result.unwrap(), val);
+        assert_eq!(del_result.as_ref().unwrap().0, val);
+        assert_eq!(del_result.as_ref().unwrap().1, ts);
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
@@ -1274,11 +1279,11 @@ mod tests {
 
         // Delete entries
         for (key, pkey, ts, val) in &entries {
-            assert_eq!(page.delete(key, pkey, *ts).unwrap(), *val);
+            assert_eq!(page.delete(key, pkey, *ts).unwrap().0, *val);
         }
     
         // Retrieve and verify entries
-        for (key, pkey, ts, val) in &entries {
+        for (key, pkey, ts, _val) in &entries {
             let retrieved_res = page.get(key, pkey, *ts);
             assert_eq!(retrieved_res.err(), Some(AccessMethodError::KeyNotFound));
         }
