@@ -304,7 +304,7 @@ impl<T: MemPool> HashJoinTable<T> {
 
         let old_result = recent_chain.update(&key, &pkey, ts, &val);
         match old_result {
-            Ok((old_val, old_ts)) => {
+            Ok((old_ts, old_val)) => {
                 history_chain.insert(&key, &pkey, old_ts, ts, &old_val)
             },
             Err(e) => Err(e),
