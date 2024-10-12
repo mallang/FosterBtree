@@ -207,21 +207,22 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         ts: Timestamp,
         val: &[u8],
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
+        let space_need = <Page as MvccHashJoinRecentPage>::space_need(key, pkey, val);
+        if space_need > AVAILABLE_PAGE_SIZE as u32 {
+            panic!("record too large for a single page");
+        }
         let mut current_pid = self.first_page_id;
         let mut current_fid = self.first_frame_id.load(atomic::Ordering::Acquire);
-    
+
         loop {
             let page_key = PageFrameKey::new_with_frame_id(self.c_key, current_pid, current_fid);
             let mut page = self.write_page(page_key);
-    
+            
             // Attempt to update the value in the current page
             match MvccHashJoinRecentPage::update(&mut *page, key, pkey, ts, val) {
-                Ok((old_ts, old_val)) => {
-                    // Update successful
-                    return Ok((old_ts, old_val));
-                }
-                Err(AccessMethodError::KeyNotFound) => {
-                    // Key not found in this page, check for next page
+                Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::OutOfSpace) => 
+                {
+                    // try to update in next page
                     match MvccHashJoinRecentPage::next_page(&*page) {
                         Some((next_pid, next_fid)) => {
                             // Move to the next page
@@ -234,14 +235,24 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                             return Err(AccessMethodError::KeyNotFound);
                         }
                     }
-                }
-                Err(e) => {
-                    // Propagate other errors
-                    return Err(e);
+                },
+                Err(AccessMethodError::KeyFoundButInvalidTimestamp) => 
+                {
+                    // find in history chain
+                    return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
+                },
+                Ok((old_ts, old_val)) => 
+                {
+                    return Ok((old_ts, old_val));
+                },
+                Err(e) => 
+                {
+                    panic!("unexpected error in update {}", e);
                 }
             }
         }
     }
+
     /*
         iterate over all pages
         if delete success -> return old ts and old value
@@ -255,7 +266,7 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<(Vec<u8>, Timestamp), AccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
         let mut attempts = 0;
         let base = 2;
 
@@ -292,9 +303,9 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                             // find in history chain
                             return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
                         },
-                        Ok((old_val, old_ts)) => 
+                        Ok((old_ts, old_val)) => 
                         {
-                            return Ok((old_val, old_ts));
+                            return Ok((old_ts, old_val));
                         },
                         Err(e) => 
                         {
@@ -404,6 +415,7 @@ mod tests {
         let result = chain.get(b"nonexistent_key", b"nonexistent_pkey", 60u64);
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
     }
+
     #[test]
     fn test_chain_insert_multiple_pages_and_get_entries() {
         // Initialize mem_pool and container key
@@ -600,5 +612,4 @@ mod tests {
             assert_eq!(retrieved_val, expected_value);
         }
     }
-
 }
