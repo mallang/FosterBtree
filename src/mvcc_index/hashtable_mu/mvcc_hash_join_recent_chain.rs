@@ -8,7 +8,7 @@ use std::{
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
-    log_debug, log_trace, log_warn,
+    log_debug, log_trace, log_warn, log_info,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -131,10 +131,10 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                     let new_fid = new_page.frame_id();
                     MvccHashJoinRecentPage::init(&mut *new_page);
                     match MvccHashJoinRecentPage::insert(&mut *new_page, key, pkey, ts, val) {
-                        Ok(_) => {},
                         Err(_) => {
                             panic!("Unexpected error");
-                        }
+                        },
+                        _ => {}
                     }
                     MvccHashJoinRecentPage::set_next_page(&mut *upgraded_page, new_pid, new_fid);
                     self.last_page_id.store(new_pid, atomic::Ordering::Release);
@@ -160,11 +160,9 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
     ) -> Result<Vec<u8>, AccessMethodError> {
         let mut current_pid = self.first_page_id;
         let mut current_fid = self.first_frame_id.load(atomic::Ordering::Acquire);
-
         loop {
             let page_key = PageFrameKey::new_with_frame_id(self.c_key, current_pid, current_fid);
             let page = self.read_page(page_key);
-
             // Attempt to retrieve the value from the current page
             match MvccHashJoinRecentPage::get(&*page, key, pkey, ts) {
                 Ok(val) => {
@@ -194,6 +192,14 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         }
     }
     
+    /*
+        iterate through all page in chain
+        try to update every page
+        if succ -> return old value and old ts
+        else -> next page
+
+        Return: old_ts, old_val
+     */
     pub fn update(
         &self,
         key: &[u8],
@@ -201,21 +207,22 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         ts: Timestamp,
         val: &[u8],
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
+        let space_need = <Page as MvccHashJoinRecentPage>::space_need(key, pkey, val);
+        if space_need > AVAILABLE_PAGE_SIZE as u32 {
+            panic!("record too large for a single page");
+        }
         let mut current_pid = self.first_page_id;
         let mut current_fid = self.first_frame_id.load(atomic::Ordering::Acquire);
-    
+
         loop {
             let page_key = PageFrameKey::new_with_frame_id(self.c_key, current_pid, current_fid);
             let mut page = self.write_page(page_key);
-    
+            
             // Attempt to update the value in the current page
             match MvccHashJoinRecentPage::update(&mut *page, key, pkey, ts, val) {
-                Ok((old_ts, old_val)) => {
-                    // Update successful
-                    return Ok((old_ts, old_val));
-                }
-                Err(AccessMethodError::KeyNotFound) => {
-                    // Key not found in this page, check for next page
+                Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::OutOfSpace) => 
+                {
+                    // try to update in next page
                     match MvccHashJoinRecentPage::next_page(&*page) {
                         Some((next_pid, next_fid)) => {
                             // Move to the next page
@@ -228,15 +235,94 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                             return Err(AccessMethodError::KeyNotFound);
                         }
                     }
-                }
-                Err(e) => {
-                    // Propagate other errors
-                    return Err(e);
+                },
+                Err(AccessMethodError::KeyFoundButInvalidTimestamp) => 
+                {
+                    // find in history chain
+                    return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
+                },
+                Ok((old_ts, old_val)) => 
+                {
+                    return Ok((old_ts, old_val));
+                },
+                Err(e) => 
+                {
+                    panic!("unexpected error in update {}", e);
                 }
             }
         }
     }
-    
+
+    /*
+        iterate over all pages
+        if delete success -> return old ts and old value
+        if keynotfound -> next page
+        if invalidTimeStamp -> history chain
+
+        Return: old_ts, old_val
+     */
+    pub fn delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
+        let mut attempts = 0;
+        let base = 2;
+
+        let mut current_pid = self.first_page_id;
+        let mut current_fid = self.first_frame_id.load(atomic::Ordering::Acquire);
+
+        loop {
+            let page_key = PageFrameKey::new_with_frame_id(self.c_key, current_pid, current_fid);
+            let page = self.read_page(page_key);
+
+            // Attempt to delete
+            match page.try_upgrade(true) {
+                Ok(mut upgraded_page) => 
+                {
+                    match MvccHashJoinRecentPage::delete(&mut *upgraded_page, key, pkey, ts) {
+                        Err(AccessMethodError::KeyNotFound) => 
+                        {
+                            // try to delete in next page
+                            match MvccHashJoinRecentPage::next_page(&*upgraded_page) {
+                                Some((next_pid, next_fid)) => {
+                                    // Move to the next page
+                                    current_pid = next_pid;
+                                    current_fid = next_fid;
+                                    continue;
+                                }
+                                None => {
+                                    // End of the chain reached, key not found
+                                    return Err(AccessMethodError::KeyNotFound);
+                                }
+                            }
+                        },
+                        Err(AccessMethodError::KeyFoundButInvalidTimestamp) => 
+                        {
+                            // find in history chain
+                            return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
+                        },
+                        Ok((old_ts, old_val)) => 
+                        {
+                            return Ok((old_ts, old_val));
+                        },
+                        Err(e) => 
+                        {
+                            panic!("unexpected error in delete {}", e);
+                        }
+                    }
+                },
+                Err(_) => {
+                    log_debug!("Page upgrade failed, retrying");
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
+                    continue;
+                }
+            }
+            
+        }
+    }
 
     pub fn first_page_id(&self) -> PageId {
         self.first_page_id
@@ -330,6 +416,55 @@ mod tests {
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
     }
 
+    #[test]
+    fn test_chain_insert_multiple_pages_and_get_entries() {
+        // Initialize mem_pool and container key
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+
+        // Create a new chain
+        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+        let my_pkey = b"pkey_long_long_long_prefix_11231";
+        let my_ts = 1;
+        let ite_count = 2000;
+        for i in 1..ite_count {
+            let key = format!("key_long_long_prefix_{:05}", i).into_bytes();
+            let value = format!("value_long_long_prefix_{:05}", i).into_bytes();
+            chain.insert(&key, my_pkey, my_ts, &value).unwrap();
+        }
+
+        // Entries to insert
+        let entries: Vec<(&[u8], &[u8], Timestamp, &[u8])> = vec![
+            (b"key1", b"pkey1", 10u64, b"value1"),
+            (b"key2", b"pkey2", 20u64, b"value2"),
+            (b"key_longer_than_prefix", b"pkey3", 30u64, b"value3"),
+            (b"key4", b"pkey_longer_than_prefix", 40u64, b"value4"),
+            (b"key_long", b"pkey_long", 50u64, b"value5"),
+        ];
+
+        // Insert entries
+        for (key, pkey, ts, val) in &entries {
+            chain.insert(key, pkey, *ts, val).unwrap();
+        }
+
+        // Retrieve and verify entries
+        for (key, pkey, ts, val) in &entries {
+            let retrieved_val = chain.get(key, pkey, *ts).unwrap();
+            assert_eq!(retrieved_val, *val);
+        }
+
+        for i in 1..ite_count {
+            let key = format!("key_long_long_prefix_{:05}", i).into_bytes();
+            let value = format!("value_long_long_prefix_{:05}", i).into_bytes();
+            let get_res = chain.get(&key, my_pkey, my_ts).unwrap();
+            assert_eq!(get_res, value);
+        }
+
+        // Attempt to retrieve a non-existent key
+        let result = chain.get(b"nonexistent_key", b"nonexistent_pkey", 60u64);
+        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+    }
     #[test]
     fn test_chain_insert_empty_keys_and_values() {
         let mem_pool = get_in_mem_pool();

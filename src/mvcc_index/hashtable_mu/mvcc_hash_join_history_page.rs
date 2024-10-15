@@ -169,7 +169,8 @@ mod slot {
         pkey_size: u32,
         pkey_prefix: [u8; SLOT_PKEY_PREFIX_SIZE],
         // timestamp
-        ts: Timestamp,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
         // value
         val_size: u32,
         offset: u32,
@@ -201,10 +202,15 @@ mod slot {
             pkey_prefix.copy_from_slice(&bytes[current_pos..current_pos + SLOT_PKEY_PREFIX_SIZE]);
             current_pos += SLOT_PKEY_PREFIX_SIZE;
 
-            let ts = u64::from_be_bytes(
-                bytes[current_pos..current_pos + 8].try_into().map_err(|_| "Failed to parse timestamp")?,
+            let start_ts = u64::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()].try_into().map_err(|_| "Failed to parse timestamp")?,
             );
-            current_pos += 8;
+            current_pos += std::mem::size_of::<Timestamp>();
+
+            let end_ts = u64::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()].try_into().map_err(|_| "Failed to parse timestamp")?,
+            );
+            current_pos += std::mem::size_of::<Timestamp>();
 
             let val_size = u32::from_be_bytes(
                 bytes[current_pos..current_pos + 4].try_into().map_err(|_| "Failed to parse val_size")?,
@@ -220,7 +226,8 @@ mod slot {
                 key_prefix,
                 pkey_size,
                 pkey_prefix,
-                ts,
+                start_ts,
+                end_ts,
                 val_size,
                 offset,
             })
@@ -242,8 +249,11 @@ mod slot {
             bytes[current_pos..current_pos + SLOT_PKEY_PREFIX_SIZE].copy_from_slice(&self.pkey_prefix);
             current_pos += SLOT_PKEY_PREFIX_SIZE;
 
-            bytes[current_pos..current_pos + 8].copy_from_slice(&self.ts.to_be_bytes());
-            current_pos += 8;
+            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()].copy_from_slice(&self.start_ts.to_be_bytes());
+            current_pos += std::mem::size_of::<Timestamp>();
+
+            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()].copy_from_slice(&self.end_ts.to_be_bytes());
+            current_pos += std::mem::size_of::<Timestamp>();
 
             bytes[current_pos..current_pos + 4].copy_from_slice(&self.val_size.to_be_bytes());
             current_pos += 4;
@@ -253,7 +263,7 @@ mod slot {
             bytes
         }
 
-        pub fn new(key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8], offset: usize) -> Self {
+        pub fn new(key: &[u8], pkey: &[u8], start_ts: Timestamp, end_ts: Timestamp, val: &[u8], offset: usize) -> Self {
             let key_size = key.len() as u32;
             let pkey_size = pkey.len() as u32;
             let val_size = val.len() as u32;
@@ -271,7 +281,8 @@ mod slot {
                 key_prefix,
                 pkey_size,
                 pkey_prefix,
-                ts,
+                start_ts,
+                end_ts,
                 val_size,
                 offset: offset as u32,
             }
@@ -301,12 +312,20 @@ mod slot {
             }
         }
 
-        pub fn ts(&self) -> Timestamp {
-            self.ts
+        pub fn start_ts(&self) -> Timestamp {
+            self.start_ts
         }
 
-        pub fn set_ts(&mut self, ts: Timestamp) {
-            self.ts = ts;
+        pub fn set_start_ts(&mut self, ts: Timestamp) {
+            self.start_ts = ts;
+        }
+
+        pub fn end_ts(&self) -> Timestamp {
+            self.end_ts
+        }
+
+        pub fn set_end_ts(&mut self, ts: Timestamp) {
+            self.end_ts = ts;
         }
 
         pub fn val_size(&self) -> u32 {
@@ -419,13 +438,14 @@ mod record {
 }
 use record::*;
 
-pub trait MvccHashJoinRecentPage {
+pub trait MvccHashJoinHistoryPage {
     fn init(&mut self);
     fn insert(
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
         val: &[u8],
     ) -> Result<(), AccessMethodError>;
     fn get(
@@ -438,9 +458,10 @@ pub trait MvccHashJoinRecentPage {
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), AccessMethodError>;
+    ) -> Result<(Timestamp, Timestamp, Vec<u8>), AccessMethodError>;
     
     fn next_page(&self) -> Option<(PageId, u32)>;
     fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32);
@@ -460,7 +481,7 @@ pub trait MvccHashJoinRecentPage {
     }
 }
 
-impl MvccHashJoinRecentPage for Page {
+impl MvccHashJoinHistoryPage for Page {
     fn init(&mut self) {
         let header = Header::new();
         self.set_header(&header);
@@ -470,12 +491,13 @@ impl MvccHashJoinRecentPage for Page {
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
         val: &[u8],
     ) -> Result<(), AccessMethodError> {
-        let space_need = <Page as MvccHashJoinRecentPage>::space_need(key, pkey, val);
+        let space_need = Self::space_need(key, pkey, val);
         if space_need > self.free_space_without_compaction() {
-            log_debug!("should not happen, detect before calling insert");
+            log_debug!("Not enough space for insert");
             return Err(AccessMethodError::OutOfSpace);
         }
 
@@ -484,19 +506,20 @@ impl MvccHashJoinRecentPage for Page {
         let rec_offset = header.rec_start_offset() - record_size;
         let slot_offset = PAGE_HEADER_SIZE as u32 + header.slot_count() * SLOT_SIZE as u32;
         if rec_offset < slot_offset + SLOT_SIZE as u32 {
-            log_debug!("should not happen, detect before calling insert");
+            log_debug!("Not enough space after checking offsets");
             return Err(AccessMethodError::OutOfSpace);
         }
 
-        let slot = Slot::new(key, pkey, ts, val, rec_offset as usize);
+        let slot = Slot::new(key, pkey, start_ts, end_ts, val, rec_offset as usize);
         let slot_bytes = slot.to_bytes();
-        
+
         let record = Record::new(key, pkey, val);
         let record_bytes = record.to_bytes();
-        
+
         self[slot_offset as usize..slot_offset as usize + SLOT_SIZE].copy_from_slice(&slot_bytes);
-        self[rec_offset as usize..rec_offset as usize + record_size as usize].copy_from_slice(&record_bytes);
-        
+        self[rec_offset as usize..rec_offset as usize + record_size as usize]
+            .copy_from_slice(&record_bytes);
+
         header.increment_slot_count();
         header.set_total_bytes_used(header.total_bytes_used() + space_need);
         header.set_rec_start_offset(rec_offset);
@@ -514,38 +537,40 @@ impl MvccHashJoinRecentPage for Page {
         let header = self.header();
         let slot_count = header.slot_count();
         let mut slot_offset = PAGE_HEADER_SIZE;
-
+    
         for _ in 0..slot_count {
             let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
             let slot = Slot::from_bytes(slot_bytes).unwrap();
-            if slot.key_size() == key.len() as u32 
+            if slot.key_size() == key.len() as u32
                 && slot.pkey_size() == pkey.len() as u32
                 && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())] 
+                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
             {
                 let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size() 
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32) 
+                let rec_size = slot.val_size()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
                     + slot.pkey_size().saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
                 let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
                 let record = Record::from_bytes(
-                    record_bytes, 
-                    slot.key_size(), 
-                    slot.pkey_size(), 
+                    record_bytes,
+                    slot.key_size(),
+                    slot.pkey_size(),
                     slot.val_size(),
                 );
-
+    
                 let mut full_key = slot.key_prefix().to_vec();
                 full_key.extend_from_slice(record.remain_key());
-                
+    
                 let mut full_pkey = slot.pkey_prefix().to_vec();
                 full_pkey.extend_from_slice(record.remain_pkey());
 
                 if full_key == key && full_pkey == pkey {
-                    if slot.ts() <= ts {
+                    if slot.start_ts() <= ts && ts < slot.end_ts() {
                         return Ok(record.val().to_vec());
                     } else {
-                        return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
+                        slot_offset += SLOT_SIZE;
+                        continue;
+                        // return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
                     }
                 }
             }
@@ -558,24 +583,24 @@ impl MvccHashJoinRecentPage for Page {
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
+    ) -> Result<(Timestamp, Timestamp, Vec<u8>), AccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
         let mut slot_offset = PAGE_HEADER_SIZE;
-
+    
         for _ in 0..slot_count {
             let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
             let mut slot = Slot::from_bytes(slot_bytes).unwrap();
-
-            // Check if key and pkey match
+    
             if slot.key_size() == key.len() as u32
                 && slot.pkey_size() == pkey.len() as u32
                 && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
                 && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+                && slot.start_ts() == start_ts
             {
-                // Retrieve the record
                 let rec_offset = slot.offset() as usize;
                 let rec_size = slot.val_size()
                     + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
@@ -587,54 +612,47 @@ impl MvccHashJoinRecentPage for Page {
                     slot.pkey_size(),
                     slot.val_size(),
                 );
-
+    
                 let mut full_key = slot.key_prefix().to_vec();
                 full_key.extend_from_slice(record.remain_key());
-
+    
                 let mut full_pkey = slot.pkey_prefix().to_vec();
                 full_pkey.extend_from_slice(record.remain_pkey());
-
+    
                 if full_key == key && full_pkey == pkey {
-                    // Check timestamp
-                    if slot.ts() <= ts {
-                        // Save old timestamp and value
-                        let old_ts = slot.ts();
-                        let old_val = record.val().to_vec();
-
+                    // Save old timestamps and value
+                    let old_start_ts = slot.start_ts();
+                    let old_end_ts = slot.end_ts();
+                    let old_val = record.val().to_vec();
+    
+                    // Update the end_ts
+                    slot.set_end_ts(end_ts);
+    
+                    // If the value has changed
+                    if val != record.val() {
                         let new_val_size = val.len() as u32;
-
+    
                         if new_val_size <= slot.val_size() {
                             // Overwrite in place
                             record.update(val);
-                            let new_rec_size = record.to_bytes().len() as u32;
-
-                            // Write back the record
                             let record_bytes_new = record.to_bytes();
-                            self[rec_offset..rec_offset + new_rec_size as usize]
+                            self[rec_offset..rec_offset + record_bytes_new.len()]
                                 .copy_from_slice(&record_bytes_new);
-
-                            // Update slot timestamp
-                            slot.set_ts(ts);
+    
+                            // Update slot's val_size if needed
                             slot.set_val_size(new_val_size as usize);
-
-                            let slot_bytes_new = slot.to_bytes();
-                            self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot_bytes_new);
-
-                            return Ok((old_ts, old_val));
                         } else {
-                            // Need to allocate new space for the record
-                            // Calculate space need for new record
+                            // Need to allocate new space
                             let remain_key_size = key.len().saturating_sub(SLOT_KEY_PREFIX_SIZE);
                             let remain_pkey_size = pkey.len().saturating_sub(SLOT_PKEY_PREFIX_SIZE);
                             let new_rec_size =
                                 remain_key_size as u32 + remain_pkey_size as u32 + new_val_size;
-
-                            // Check if there is enough space
+    
                             let free_space = self.free_space_without_compaction();
                             if new_rec_size > free_space {
                                 return Err(AccessMethodError::OutOfSpace);
                             }
-
+    
                             // Update header
                             let mut header = self.header();
                             let new_rec_offset = header.rec_start_offset() - new_rec_size;
@@ -643,32 +661,29 @@ impl MvccHashJoinRecentPage for Page {
                                 header.total_bytes_used() + new_rec_size - rec_size,
                             );
                             self.set_header(&header);
-
+    
                             // Create new record
                             let new_record = Record::new(key, pkey, val);
                             let new_record_bytes = new_record.to_bytes();
-                            self[new_rec_offset as usize
-                                ..(new_rec_offset + new_rec_size) as usize]
+                            self[new_rec_offset as usize..(new_rec_offset + new_rec_size) as usize]
                                 .copy_from_slice(&new_record_bytes);
-
+    
                             // Update slot
-                            slot.set_ts(ts);
                             slot.set_val_size(new_val_size as usize);
                             slot.set_offset(new_rec_offset);
-                            let slot_bytes_new = slot.to_bytes();
-                            self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot_bytes_new);
-
-                            return Ok((old_ts, old_val));
                         }
-                    } else {
-                        return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
                     }
+    
+                    // Write back the updated slot
+                    let slot_bytes_new = slot.to_bytes();
+                    self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot_bytes_new);
+    
+                    return Ok((old_start_ts, old_end_ts, old_val));
                 }
             }
-
             slot_offset += SLOT_SIZE;
         }
-
+    
         Err(AccessMethodError::KeyNotFound)
     }
 
@@ -705,324 +720,128 @@ impl MvccHashJoinRecentPage for Page {
 mod tests {
     use super::*;
     use crate::prelude::{Page, AVAILABLE_PAGE_SIZE};
-    
+
     #[test]
-    fn test_insert_and_get_key_pkey_len_less_than_prefix() {
-        // Key and PKey lengths less than prefix sizes
-        let key = b"key1"; // Length 4
-        let pkey = b"pk1"; // Length 3
-        let ts: Timestamp = 1;
-        let val = b"value1";
+    fn test_history_page_insert_and_get() {
+        let key = b"history_key";
+        let pkey = b"history_pkey";
+        let start_ts = 100u64;
+        let end_ts = 200u64;
+        let val = b"history_value";
 
         let mut page = Page::new_empty();
         page.init();
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, start_ts, end_ts, val).unwrap();
 
-        // Retrieve the entry
+        // Retrieve the entry at a timestamp within the range
+        let ts = 150u64;
         let retrieved_val = page.get(key, pkey, ts).unwrap();
         assert_eq!(retrieved_val, val);
-    }
 
-    #[test]
-    fn test_insert_and_get_key_len_less_than_prefix_pkey_len_greater_than_prefix() {
-        // Key length less than prefix size, PKey length greater than prefix size
-        let key = b"key2"; // Length 4
-        let pkey = b"primarykey_longer"; // Length > 8
-        let ts: Timestamp = 2;
-        let val = b"value2";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
-
-        // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_and_get_key_len_greater_than_prefix_pkey_len_less_than_prefix() {
-        // Key length greater than prefix size, PKey length less than prefix size
-        let key = b"key_longer_than_prefix"; // Length > 8
-        let pkey = b"pk2"; // Length 3
-        let ts: Timestamp = 3;
-        let val = b"value3";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
-
-        // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_and_get_key_pkey_len_greater_than_prefix() {
-        // Key and PKey lengths greater than prefix sizes
-        let key = b"key_longer_than_prefix_size"; // Length > 8
-        let pkey = b"primarykey_longer_than_prefix"; // Length > 8
-        let ts: Timestamp = 4;
-        let val = b"value4";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
-
-        // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_multiple_entries_with_various_key_pkey_lengths() {
-        // Define the entries with keys and pkeys as slices (&[u8])
-        let entries: Vec<(&[u8], &[u8], u64, &[u8])> = vec![
-            (b"k1", b"p1", 10u64, b"v1"), // Both key and pkey < prefix size
-            (b"key_longlong", b"p2", 20u64, b"v2"), // Key > prefix size, pkey < prefix size
-            (b"k3", b"primarykey_long", 30u64, b"v3"), // Key < prefix size, pkey > prefix size
-            (b"key_very_long", b"primarykey_very_long", 40u64, b"v4"), // Both key and pkey > prefix size
-        ];
-    
-        let mut page = Page::new_empty();
-        page.init();
-    
-        // Insert entries
-        for (key, pkey, ts, val) in &entries {
-            page.insert(key, pkey, *ts, val).unwrap();
-        }
-    
-        // Retrieve and verify entries
-        for (key, pkey, ts, val) in &entries {
-            let retrieved_val = page.get(key, pkey, *ts).unwrap();
-            assert_eq!(retrieved_val, *val);
-        }
-    }
-
-    #[test]
-    fn test_insert_and_get_with_timestamp_check() {
-        // Test that entries with timestamps greater than the query timestamp are not returned
-        let key = b"key_test";
-        let pkey = b"pkey_test";
-        let ts_insert: Timestamp = 100;
-        let ts_query: Timestamp = 50; // Less than ts_insert
-        let val = b"value_test";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
-
-        // Attempt to retrieve with earlier timestamp
-        let result = page.get(key, pkey, ts_query);
+        // Attempt to retrieve at a timestamp outside the range
+        let ts_out_of_range = 250u64;
+        let result = page.get(key, pkey, ts_out_of_range);
         assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+    }
 
-        // Retrieve with correct timestamp
-        let retrieved_val = page.get(key, pkey, ts_insert).unwrap();
+    #[test]
+    fn test_history_page_update_end_ts() {
+        let key = b"key_update";
+        let pkey = b"pkey_update";
+        let start_ts = 100u64;
+        let end_ts = 200u64;
+        let new_end_ts = 300u64;
+        let val = b"value_update";
+
+        let mut page = Page::new_empty();
+        page.init();
+
+        // Insert the entry
+        page.insert(key, pkey, start_ts, end_ts, val).unwrap();
+
+        // Update the entry's end_ts
+        let (old_start_ts, old_end_ts, old_val) = page.update(key, pkey, start_ts, new_end_ts, val).unwrap();
+
+        // Verify old values
+        assert_eq!(old_start_ts, start_ts);
+        assert_eq!(old_end_ts, end_ts);
+        assert_eq!(old_val, val);
+
+        // Retrieve the entry at a timestamp within the new range
+        let ts = 250u64;
+        let retrieved_val = page.get(key, pkey, ts).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
     #[test]
-    fn test_insert_duplicate_keys() {
-        // Insert entries with the same key and pkey but different timestamps
-        let key = b"key_dup";
-        let pkey1: &[u8; 8] = b"pkey_dup";
-        let pkey2: &[u8; 9] = b"pkey_dup2";
-        let val1 = b"value1";
-        let val2 = b"value2";
-        let ts1: Timestamp = 1;
-        let ts2: Timestamp = 2;
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert first entry
-        page.insert(key, pkey1, ts1, val1).unwrap();
-
-        // Insert second entry with a newer timestamp
-        page.insert(key, pkey2, ts2, val2).unwrap();
-
-        // Retrieve with ts1
-        let retrieved_val = page.get(key, pkey1, ts1).unwrap();
-        assert_eq!(retrieved_val, val1);
-
-        // Retrieve with ts2
-        let retrieved_val = page.get(key, pkey2, ts2).unwrap();
-        assert_eq!(retrieved_val, val2);
-    }
-
-    #[test]
-    fn test_insert_when_page_full() {
-        // Fill the page to capacity and attempt to insert another entry
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Use fixed-length keys and pkeys
-        let key = b"key_full_full";         // Length 12 bytes
-        let pkey = b"pkey_full_full";       // Length 13 bytes
-        let val = b"value_full";            // Value size
-        let ts: Timestamp = 1;
-
-        let space_per_entry = Page::space_need(key, pkey, val) as usize;
-        let available_space = AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE;
-        let page_capacity = available_space / space_per_entry;
-
-        // Insert entries until the page is full
-        for _ in 0..page_capacity {
-            page.insert(key, pkey, ts, val).unwrap();
-        }
-
-        // Attempt to insert one more entry
-        let result = page.insert(key, pkey, ts, val);
-        assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
-    }
-
-    #[test]
-    fn test_update_same_size_value() {
-        let key = b"key1";
-        let pkey = b"pkey1";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"value1"; // Length 6
-        let val_update = b"value2"; // Length 6 (same as val_insert)
+    fn test_history_page_update_value() {
+        let key = b"key_update_val";
+        let pkey = b"pkey_update_val";
+        let start_ts = 100u64;
+        let end_ts = 200u64;
+        let val = b"value_old";
+        let new_val = b"value_new";
 
         let mut page = Page::new_empty();
         page.init();
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+        page.insert(key, pkey, start_ts, end_ts, val).unwrap();
 
-        // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+        // Update the entry's value
+        let (old_start_ts, old_end_ts, old_val) = page.update(key, pkey, start_ts, end_ts, new_val).unwrap();
 
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts_insert);
-        assert_eq!(old_val, val_insert);
+        // Verify old values
+        assert_eq!(old_start_ts, start_ts);
+        assert_eq!(old_end_ts, end_ts);
+        assert_eq!(old_val, val);
 
-        // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
-        assert_eq!(retrieved_val, val_update);
+        // Retrieve the entry with the updated value
+        let ts = 150u64;
+        let retrieved_val = page.get(key, pkey, ts).unwrap();
+        assert_eq!(retrieved_val, new_val);
     }
 
     #[test]
-    fn test_update_smaller_value() {
-        let key = b"key2";
-        let pkey = b"pkey2";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"value_longer"; // Length 12
-        let val_update = b"short";        // Length 5 (smaller than val_insert)
+    fn test_history_page_update_non_existent() {
+        let key = b"nonexistent_key";
+        let pkey = b"nonexistent_pkey";
+        let start_ts = 100u64;
+        let end_ts = 200u64;
+        let val = b"value";
 
         let mut page = Page::new_empty();
         page.init();
 
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts_insert);
-        assert_eq!(old_val, val_insert);
-
-        // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
-        assert_eq!(retrieved_val, val_update);
-    }
-
-    #[test]
-    fn test_update_larger_value_enough_space() {
-        let key = b"key3";
-        let pkey = b"pkey3";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"short";           // Length 5
-        let val_update = b"value_is_longer"; // Length 14 (larger than val_insert)
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts_insert);
-        assert_eq!(old_val, val_insert);
-
-        // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
-        assert_eq!(retrieved_val, val_update);
-    }
-
-    #[test]
-    fn test_update_larger_value_insufficient_space() {
-        let key = b"key4";
-        let pkey = b"pkey4";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"val";           // Length 3
-        let val_update = vec![b'a'; (AVAILABLE_PAGE_SIZE / 2) as usize]; // Large value
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Fill the page to limit the available space
-        page.insert(b"key_dummy", b"pkey_dummy", 50, &vec![b'b'; (AVAILABLE_PAGE_SIZE / 2) as usize]).unwrap();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Attempt to update the entry with a larger value
-        let result = page.update(key, pkey, ts_update, &val_update);
-        assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
-    }
-
-    #[test]
-    fn test_update_non_existent_key() {
-        let key = b"key_nonexistent";
-        let pkey = b"pkey_nonexistent";
-        let ts_update: Timestamp = 100;
-        let val_update = b"value";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Attempt to update a non-existent key
-        let result = page.update(key, pkey, ts_update, val_update);
+        // Attempt to update a non-existent entry
+        let result = page.update(key, pkey, start_ts, end_ts, val);
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
     }
 
     #[test]
-    fn test_update_invalid_timestamp() {
-        let key = b"key5";
-        let pkey = b"pkey5";
-        let ts_insert: Timestamp = 200;
-        let ts_update: Timestamp = 100; // Less than ts_insert
-        let val_insert = b"value1";
-        let val_update = b"value2";
+    fn test_history_page_get_non_matching_ts() {
+        let key = b"key_ts_test";
+        let pkey = b"pkey_ts_test";
+        let start_ts = 100u64;
+        let end_ts = 200u64;
+        let val = b"value_ts_test";
 
         let mut page = Page::new_empty();
         page.init();
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+        page.insert(key, pkey, start_ts, end_ts, val).unwrap();
 
-        // Attempt to update with an earlier timestamp
-        let result = page.update(key, pkey, ts_update, val_update);
+        // Attempt to retrieve at a timestamp before start_ts
+        let ts_before = 50u64;
+        let result = page.get(key, pkey, ts_before);
+        assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+
+        // Attempt to retrieve at a timestamp equal to end_ts
+        let ts_at_end = end_ts;
+        let result = page.get(key, pkey, ts_at_end);
         assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
     }
-
 }

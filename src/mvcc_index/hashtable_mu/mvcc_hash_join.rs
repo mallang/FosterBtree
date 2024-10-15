@@ -67,7 +67,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        HashJoinTable::insert(self, key, pkey, ts, tx_id, value)
+        self.insert_(key, pkey, ts, tx_id, value)
     }
 
     fn get(
@@ -76,7 +76,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         pkey: &Self::PKey,
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
-        match self.get(key, pkey, ts) {
+        match self.get_(key, pkey, ts) {
             Ok(val) => Ok(Some(val)),
             Err(AccessMethodError::KeyNotFound) => Ok(None),
             Err(e) => Err(e),
@@ -88,7 +88,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        self.get_all(key, ts)
+        todo!()
     }
 
     fn update(
@@ -99,7 +99,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        HashJoinTable::update(&self, key, pkey, ts, tx_id, value)
+        self.update_(key, pkey, ts, tx_id, value)
     }
 
     fn delete(
@@ -109,14 +109,14 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         ts: Timestamp,
         tx_id: TxId,
     ) -> Result<(), Self::Error> {
-        HashJoinTable::delete(&self, key, pkey, ts, tx_id)
+        self.delete_(key, pkey, ts, tx_id)
     }
 
     fn scan(
         &self,
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error> {
-        self.scan(ts)
+        todo!();
     }
 
     fn delta_scan(
@@ -127,14 +127,14 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        self.delta_scan(from_ts, to_ts)
+        todo!()
     }
 
     fn garbage_collect(
         &self,
         safe_ts: Timestamp,
     ) -> Result<(), Self::Error> {
-        self.garbage_collect(safe_ts)
+        todo!()
     }
 }
 
@@ -199,7 +199,7 @@ impl<T: MemPool> HashJoinTable<T> {
         let mut table = Self::new_with_bucket_num(c_key, mem_pool, num_buckets);
         for (key, ts, val) in scanner {
             let pkey = key.clone();
-            table.insert(key, pkey, ts, tx_id, val).unwrap();
+            table.insert_(key, pkey, ts, tx_id, val).unwrap();
         }
         table
     }
@@ -250,7 +250,7 @@ impl<T: MemPool> HashJoinTable<T> {
     }
 
     /// Inserts a key-value pair into the hash join table.
-    pub fn insert(
+    pub fn insert_(
         &self,
         key: Vec<u8>,
         pkey: Vec<u8>,
@@ -259,13 +259,13 @@ impl<T: MemPool> HashJoinTable<T> {
         val: Vec<u8>,
     ) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(&key);
-        let (recent_chian, _) = &self.bucket_entries[index];
+        let (recent_chain, _) = &self.bucket_entries[index];
 
-        recent_chian.insert(&key, &pkey, ts, &val)
+        recent_chain.insert(&key, &pkey, ts, &val)
     }
 
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
-    pub fn get(
+    pub fn get_(
         &self,
         key: &[u8],
         pkey: &[u8],
@@ -291,7 +291,7 @@ impl<T: MemPool> HashJoinTable<T> {
     }
 
     /// Updates an existing key-value pair in the hash join table.
-    pub fn update(
+    pub fn update_(
         &self,
         key: Vec<u8>,
         pkey: Vec<u8>,
@@ -312,7 +312,7 @@ impl<T: MemPool> HashJoinTable<T> {
     }
 
     /// Deletes a key-value pair from the hash join table.
-    pub fn delete(
+    pub fn delete_(
         &self,
         key: &[u8],
         pkey: &[u8],
