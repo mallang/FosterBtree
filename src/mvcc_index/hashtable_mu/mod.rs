@@ -1,10 +1,9 @@
-pub mod mvcc_hash_join;
-mod mvcc_hash_join_bucket;
-mod mvcc_hash_join_recent_chain;
-mod mvcc_hash_join_history_chain;
-mod mvcc_hash_join_recent_page;
-mod mvcc_hash_join_history_page;
-
+pub mod mvcc_hash_join_cuckoo;
+mod mvcc_hash_join_cuckoo_table;
+mod mvcc_hash_join_cuckoo_page;
+mod mvcc_hash_join_cuckoo_common;
+mod mvcc_hash_join_cuckoo_history_page;
+mod mvcc_hash_join_cuckoo_history_table;
 use super::{
     Timestamp,
     TxId,
