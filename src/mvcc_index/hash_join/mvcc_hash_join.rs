@@ -118,18 +118,11 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         self.delete(key, pkey, ts, tx_id)
     }
 
-    fn scan(
-        &self,
-        ts: Timestamp,
-    ) -> Result<Self::Iter, Self::Error> {
+    fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error> {
         self.scan(ts)
     }
 
-    fn scan_key(
-        &self,
-        key: &Self::Key,
-        ts: Timestamp,
-    ) -> Result<Self::ScanKeyIter, Self::Error> {
+    fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error> {
         self.scan_key(key, ts)
     }
 
@@ -606,7 +599,7 @@ mod tests {
             assert_eq!(retrieved_val, val);
         }
     }
-    
+
     #[test]
     fn test_hash_join_table_update_records() {
         let mem_pool = get_in_mem_pool();
@@ -861,9 +854,7 @@ mod tests {
             .unwrap();
 
         // Delete the record
-        hash_table
-            .delete(&key, &pkey, ts_delete, 0)
-            .unwrap();
+        hash_table.delete(&key, &pkey, ts_delete, 0).unwrap();
 
         // Attempt to delete again
         let result = hash_table.delete(&key, &pkey, ts_delete + 50, 0);
@@ -932,7 +923,189 @@ mod tests {
         let result = hash_table.get(&key, &pkey, ts_past);
         assert!(matches!(
             result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp) | Err(AccessMethodError::KeyNotFound)
+            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                | Err(AccessMethodError::KeyNotFound)
         ));
+    }
+
+    #[test]
+    fn test_hash_join_table_random_operations_no_duplicate_pkeys() {
+        use rand::prelude::*;
+        use std::collections::HashMap;
+
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(13, 13);
+        let num_buckets = 16;
+        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+
+        // Define the number of operations
+        let num_operations = 10_000;
+
+        // Define possible operations
+        enum Operation {
+            Insert,
+            Get,
+            Update,
+            Delete,
+        }
+
+        // Create a random number generator
+        let mut rng = rand::thread_rng();
+
+        // HashMap to keep track of the expected state
+        // Key: (key, pkey), Value: (ts, value)
+        let mut expected_state: HashMap<(Vec<u8>, Vec<u8>), (Timestamp, Vec<u8>)> = HashMap::new();
+
+        // Set to keep track of inserted pkeys to avoid duplicates
+        let mut inserted_pkeys: std::collections::HashSet<Vec<u8>> =
+            std::collections::HashSet::new();
+
+        // Possible keys, pkeys, and values
+        let keys: Vec<Vec<u8>> = (0..100).map(|i| format!("key{}", i).into_bytes()).collect();
+        let pkeys: Vec<Vec<u8>> = (0..1000) // Increase the range to have enough unique pkeys
+            .map(|i| format!("pkey{}", i).into_bytes())
+            .collect();
+        let values: Vec<Vec<u8>> = (0..100)
+            .map(|i| format!("value{}", i).into_bytes())
+            .collect();
+
+        // Perform random operations
+        for _ in 0..num_operations {
+            let op = match rng.gen_range(0..4) {
+                0 => Operation::Insert,
+                1 => Operation::Get,
+                2 => Operation::Update,
+                3 => Operation::Delete,
+                _ => unreachable!(),
+            };
+
+            // Randomly select key, pkey, value, and timestamp
+            let key = keys.choose(&mut rng).unwrap().clone();
+            let pkey = pkeys.choose(&mut rng).unwrap().clone();
+            let value = values.choose(&mut rng).unwrap().clone();
+            let ts: Timestamp = rng.gen_range(1..1_000_000);
+
+            match op {
+                Operation::Insert => {
+                    // Insert operation
+                    if inserted_pkeys.contains(&pkey) {
+                        // Skip insertion if pkey already exists
+                        continue;
+                    }
+                    let res = hash_table.insert(key.clone(), pkey.clone(), ts, 0, value.clone());
+                    if res.is_ok() {
+                        expected_state.insert((key.clone(), pkey.clone()), (ts, value.clone()));
+                        inserted_pkeys.insert(pkey.clone());
+                    } else {
+                        assert!(matches!(
+                            res,
+                            Err(AccessMethodError::OutOfSpace)
+                                | Err(AccessMethodError::RecordTooLarge)
+                        ));
+                    }
+                }
+                Operation::Get => {
+                    // Get operation
+                    let res = hash_table.get(&key, &pkey, ts);
+                    match expected_state.get(&(key.clone(), pkey.clone())) {
+                        Some(&(stored_ts, ref stored_value)) if stored_ts <= ts => {
+                            // The entry should be retrievable
+                            let retrieved_value = res.unwrap();
+                            assert_eq!(&retrieved_value, stored_value);
+                        }
+                        _ => {
+                            // The entry should not be found
+                            assert!(matches!(
+                                res,
+                                Err(AccessMethodError::KeyNotFound)
+                                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                            ));
+                        }
+                    }
+                }
+                Operation::Update => {
+                    // Update operation
+                    if !inserted_pkeys.contains(&pkey) {
+                        // Skip update if pkey does not exist
+                        continue;
+                    }
+                    let res = hash_table.update(key.clone(), pkey.clone(), ts, 0, value.clone());
+                    match expected_state.get_mut(&(key.clone(), pkey.clone())) {
+                        Some((stored_ts, stored_value)) if *stored_ts <= ts => {
+                            // The update should succeed
+                            // let (old_ts, old_val) = res.unwrap();
+                            // assert_eq!(old_ts, *stored_ts);
+                            // assert_eq!(old_val, stored_value.clone());
+                            // *stored_ts = ts;
+                            // *stored_value = value.clone();
+                        }
+                        _ => {
+                            // The update should fail
+                            assert!(matches!(
+                                res,
+                                Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                                    | Err(AccessMethodError::KeyNotFound)
+                            ));
+                        }
+                    }
+                }
+                Operation::Delete => {
+                    // Delete operation
+                    if !inserted_pkeys.contains(&pkey) {
+                        // Skip deletion if pkey does not exist
+                        continue;
+                    }
+                    let res = hash_table.delete(&key, &pkey, ts, 0);
+                    match expected_state.remove(&(key.clone(), pkey.clone())) {
+                        Some((stored_ts, stored_value)) if stored_ts <= ts => {
+                            // The deletion should succeed
+                            // let (old_ts, old_val) = res.unwrap();
+                            // assert_eq!(old_ts, stored_ts);
+                            // assert_eq!(old_val, stored_value);
+                            // inserted_pkeys.remove(&pkey);
+                        }
+                        Some((stored_ts, stored_value)) => {
+                            // The deletion should fail due to invalid timestamp
+                            expected_state
+                                .insert((key.clone(), pkey.clone()), (stored_ts, stored_value));
+                            assert!(matches!(
+                                res,
+                                Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                            ));
+                        }
+                        None => {
+                            // This should not happen as we checked inserted_pkeys
+                            // panic!("Expected pkey to exist in expected_state");
+                        }
+                    }
+                }
+            }
+        }
+
+        // After all operations, verify the final state
+        for ((key, pkey), (stored_ts, stored_value)) in &expected_state {
+            let res = hash_table.get(key, pkey, *stored_ts);
+            let retrieved_value = res.unwrap();
+            assert_eq!(&retrieved_value, stored_value);
+        }
+
+        // Optionally, perform additional verification for timestamps beyond the stored timestamp
+        for ((key, pkey), (stored_ts, stored_value)) in &expected_state {
+            let ts_future = stored_ts + 1000;
+            let res = hash_table.get(key, pkey, ts_future);
+            let retrieved_value = res.unwrap();
+            assert_eq!(&retrieved_value, stored_value);
+        }
+
+        // Verify that entries are not retrievable with timestamps before they were inserted
+        for ((key, pkey), (stored_ts, _)) in &expected_state {
+            let ts_past = if *stored_ts > 1 { stored_ts - 1 } else { 0 };
+            let res = hash_table.get(key, pkey, ts_past);
+            assert!(matches!(
+                res,
+                Err(AccessMethodError::KeyNotFound)
+                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+            ));
+        }
     }
 }

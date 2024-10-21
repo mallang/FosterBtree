@@ -615,7 +615,9 @@ mod tests {
         let pkey_to_delete = b"pkey25";
         let ts_delete: Timestamp = 100;
 
-        let (old_ts, old_val) = chain.delete(key_to_delete, pkey_to_delete, ts_delete).unwrap();
+        let (old_ts, old_val) = chain
+            .delete(key_to_delete, pkey_to_delete, ts_delete)
+            .unwrap();
 
         // Verify old timestamp and value
         assert_eq!(old_ts, 25u64);
@@ -667,7 +669,10 @@ mod tests {
 
         // Attempt to get the old entry with an earlier timestamp
         let result = chain.get(key, pkey, ts_insert1);
-        assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+        assert!(matches!(
+            result,
+            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+        ));
     }
 
     #[test]
@@ -834,12 +839,11 @@ mod tests {
         let mut expected_state: HashMap<(Vec<u8>, Vec<u8>), (Timestamp, Vec<u8>)> = HashMap::new();
 
         // Set to keep track of inserted pkeys to avoid duplicates
-        let mut inserted_pkeys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut inserted_pkeys: std::collections::HashSet<Vec<u8>> =
+            std::collections::HashSet::new();
 
         // Possible keys, pkeys, and values
-        let keys: Vec<Vec<u8>> = (0..100)
-            .map(|i| format!("key{}", i).into_bytes())
-            .collect();
+        let keys: Vec<Vec<u8>> = (0..100).map(|i| format!("key{}", i).into_bytes()).collect();
         let pkeys: Vec<Vec<u8>> = (0..1000) // Increase the range to have enough unique pkeys
             .map(|i| format!("pkey{}", i).into_bytes())
             .collect();
@@ -875,7 +879,11 @@ mod tests {
                         expected_state.insert((key.clone(), pkey.clone()), (ts, value.clone()));
                         inserted_pkeys.insert(pkey.clone());
                     } else {
-                        assert!(matches!(res, Err(AccessMethodError::OutOfSpace) | Err(AccessMethodError::RecordTooLarge)));
+                        assert!(matches!(
+                            res,
+                            Err(AccessMethodError::OutOfSpace)
+                                | Err(AccessMethodError::RecordTooLarge)
+                        ));
                     }
                 }
                 Operation::Get => {
@@ -889,7 +897,11 @@ mod tests {
                         }
                         _ => {
                             // The entry should not be found
-                            assert!(matches!(res, Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+                            assert!(matches!(
+                                res,
+                                Err(AccessMethodError::KeyNotFound)
+                                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                            ));
                         }
                     }
                 }
@@ -911,8 +923,12 @@ mod tests {
                         }
                         _ => {
                             // The update should fail
-                             
-                             assert!(matches!(res, Err(AccessMethodError::KeyFoundButInvalidTimestamp) | Err(AccessMethodError::KeyNotFound)));
+
+                            assert!(matches!(
+                                res,
+                                Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                                    | Err(AccessMethodError::KeyNotFound)
+                            ));
                         }
                     }
                 }
@@ -933,8 +949,13 @@ mod tests {
                         }
                         Some((stored_ts, stored_value)) => {
                             // The deletion should fail due to invalid timestamp
-                            expected_state.insert((key.clone(), pkey.clone()), (stored_ts, stored_value));
-                            assert!(matches!(res, Err(AccessMethodError::KeyFoundButInvalidTimestamp) | Err(AccessMethodError::KeyNotFound)));
+                            expected_state
+                                .insert((key.clone(), pkey.clone()), (stored_ts, stored_value));
+                            assert!(matches!(
+                                res,
+                                Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                                    | Err(AccessMethodError::KeyNotFound)
+                            ));
                         }
                         None => {
                             // pkey is inseterd but (key, pkey) is inserted. actually its weird case
@@ -963,7 +984,11 @@ mod tests {
         for ((key, pkey), (stored_ts, _)) in &expected_state {
             let ts_past = if *stored_ts > 1 { stored_ts - 1 } else { 0 };
             let res = chain.get(key, pkey, ts_past);
-            assert!(matches!(res, Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+            assert!(matches!(
+                res,
+                Err(AccessMethodError::KeyNotFound)
+                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+            ));
         }
     }
 }

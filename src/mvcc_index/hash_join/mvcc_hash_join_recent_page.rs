@@ -470,7 +470,7 @@ pub trait MvccHashJoinRecentPage {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError>;
-    
+
     fn next_page(&self) -> Option<(PageId, u32)>;
     fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32);
 
@@ -711,7 +711,7 @@ impl MvccHashJoinRecentPage for Page {
         let mut header = self.header();
         let slot_count = header.slot_count();
         let mut slot_offset = PAGE_HEADER_SIZE;
-        
+
         for i in 0..slot_count {
             let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
             let slot = Slot::from_bytes(slot_bytes).unwrap();
@@ -726,7 +726,9 @@ impl MvccHashJoinRecentPage for Page {
                 let rec_offset = slot.offset() as usize;
                 let rec_size = slot.val_size()
                     + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot.pkey_size().saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
                 let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
                 let record = Record::from_bytes(
                     record_bytes,
@@ -753,12 +755,14 @@ impl MvccHashJoinRecentPage for Page {
 
                         // Adjust rec_start_offset if necessary
                         if rec_offset as u32 == header.rec_start_offset() {
-                            header.set_rec_start_offset(header.rec_start_offset() + rec_size);    
+                            header.set_rec_start_offset(header.rec_start_offset() + rec_size);
                         }
 
                         // Update header
                         header.decrement_slot_count();
-                        header.set_total_bytes_used(header.total_bytes_used() - (SLOT_SIZE as u32 + rec_size));
+                        header.set_total_bytes_used(
+                            header.total_bytes_used() - (SLOT_SIZE as u32 + rec_size),
+                        );
                         self.set_header(&header);
 
                         // found = true;
@@ -1282,10 +1286,10 @@ mod tests {
         page.insert(key1, pkey1, ts1, val1).unwrap();
         page.insert(key2, pkey2, ts2, val2).unwrap();
         let rec_start_offset_before = page.header().rec_start_offset();
-        
+
         // Delete the record at rec_start_offset
         let (old_ts, old_val) = page.delete(key2, pkey2, ts2 + 50).unwrap();
-        
+
         // Verify old timestamp and value
         assert_eq!(old_ts, ts2);
         assert_eq!(old_val, val2);
@@ -1390,7 +1394,10 @@ mod tests {
 
         // Attempt to get the old entry with an earlier timestamp
         let result = page.get(key, pkey, ts_insert1);
-        assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+        assert!(matches!(
+            result,
+            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+        ));
     }
 
     #[test]

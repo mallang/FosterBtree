@@ -752,7 +752,9 @@ impl MvccHashJoinHistoryPage for Page {
                 let rec_offset = slot.offset() as usize;
                 let rec_size = slot.val_size()
                     + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot.pkey_size().saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
                 let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
                 let record = Record::from_bytes(
                     record_bytes,
@@ -778,8 +780,7 @@ impl MvccHashJoinHistoryPage for Page {
                         slot.set_end_ts(ts);
                         // Write back the updated slot
                         let slot_bytes_new = slot.to_bytes();
-                        self[slot_offset..slot_offset + SLOT_SIZE]
-                            .copy_from_slice(&slot_bytes_new);
+                        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot_bytes_new);
 
                         return Ok((old_start_ts, old_end_ts, old_val));
                     } else {
@@ -1031,7 +1032,8 @@ mod tests {
         let result = page.delete(key, pkey, ts_delete);
         assert!(matches!(
             result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp) | Err(AccessMethodError::KeyNotFound)
+            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                | Err(AccessMethodError::KeyNotFound)
         ));
 
         // Attempt to delete with a timestamp after the end_ts
@@ -1039,7 +1041,8 @@ mod tests {
         let result = page.delete(key, pkey, ts_delete);
         assert!(matches!(
             result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp) | Err(AccessMethodError::KeyNotFound)
+            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                | Err(AccessMethodError::KeyNotFound)
         ));
     }
 
@@ -1062,7 +1065,8 @@ mod tests {
         let result = page.delete(key, pkey, ts_delete);
         assert!(matches!(
             result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp) | Err(AccessMethodError::KeyNotFound)
+            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+                | Err(AccessMethodError::KeyNotFound)
         ));
     }
 
@@ -1120,7 +1124,8 @@ mod tests {
         // Re-insert the entry with a new start_ts
         let new_start_ts = 200;
         let new_val = b"value2";
-        page.insert(key, pkey, new_start_ts, u64::MAX, new_val).unwrap();
+        page.insert(key, pkey, new_start_ts, u64::MAX, new_val)
+            .unwrap();
 
         // Verify that the record is not accessible between ts_delete and new_start_ts
         let result = page.get(key, pkey, 175);

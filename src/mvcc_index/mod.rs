@@ -18,10 +18,7 @@ pub trait MvccIndex {
     type ScanKeyIter: Iterator<Item = (Self::PKey, Self::Value)> + Send;
 
     /// Creates a new instance of the index.
-    fn create(
-        c_key: ContainerKey,
-        mem_pool: Arc<Self::MemPoolType>,
-    ) -> Result<Self, Self::Error>
+    fn create(c_key: ContainerKey, mem_pool: Arc<Self::MemPoolType>) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
@@ -73,18 +70,11 @@ pub trait MvccIndex {
     ) -> Result<(), Self::Error>;
 
     /// Scans the index and returns an iterator over key-primary key-value tuples valid at the given timestamp.
-    fn scan(
-        &self,
-        ts: Timestamp,
-    ) -> Result<Self::Iter, Self::Error>;
+    fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error>;
 
     /// Scans all entries with the given key at the specified timestamp.
     /// Returns an iterator over primary key and value pairs.
-    fn scan_key(
-        &self,
-        key: &Self::Key,
-        ts: Timestamp,
-    ) -> Result<Self::ScanKeyIter, Self::Error>;
+    fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error>;
 
     /// Delta scan between two timestamps.
     /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.
@@ -96,10 +86,7 @@ pub trait MvccIndex {
 
     /// Performs garbage collection for entries up to the specified timestamp.
     /// This should remove entries that are no longer needed due to transaction commits.
-    fn garbage_collect(
-        &self,
-        safe_ts: Timestamp,
-    ) -> Result<(), Self::Error>;
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error>;
 }
 
 /// Represents a change (delta) in the value of a key-primary key tuple.
