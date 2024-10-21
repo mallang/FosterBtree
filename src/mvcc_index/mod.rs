@@ -1,5 +1,5 @@
 pub mod hash_join;
-
+pub mod hashtable_mu;
 pub type Timestamp = u64;
 pub type TxId = u64; // Transaction ID
 

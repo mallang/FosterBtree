@@ -1,6 +1,118 @@
 use core::fmt;
+use std::{hash::{Hash, Hasher, SipHasher}, sync::atomic::AtomicU32};
 
-use crate::bp::MemPoolStatus;
+use crate::{bp::MemPoolStatus, page::PageId};
+
+use super::mvcc_hash_join_cuckoo::HASHER_KEYS;
+
+pub const MAX_CUCKOO_ITERATE_COUNT: usize = 3;
+
+pub struct BucketEntry {
+    pub page_id: PageId,  
+    pub frame_id: AtomicU32, // changed when normal case, except REHASH
+}
+
+impl BucketEntry {
+    pub fn new(pid: PageId) -> Self {
+        Self {
+            page_id: pid,
+            frame_id: AtomicU32::new(u32::MAX),
+        }
+    }
+    pub fn new_with_frame_id(pid: PageId, frame_id: u32) -> Self {
+        Self {
+            page_id: pid,
+            frame_id: AtomicU32::new(frame_id),
+        }
+    }
+    pub fn page_id(&self) -> PageId {
+        self.page_id
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SwapChainStatus {
+    Swap((u32, Vec<u8>, u32, )), // swap at slot: $1, swapped key: $2, swapped space_need: $3 
+    Insert(u32), // can be inserted with space_need: $2
+}
+
+#[derive(Debug, Clone)]
+pub struct ChainStatusEntry(pub usize, pub SwapChainStatus);
+
+pub struct Buckets {
+    pub num_buckets: u32,
+    // with length = `num_buckets`
+    pub buckets: Vec<BucketEntry>,
+}
+
+impl Buckets {
+    pub fn new(num_buckets: u32, buckets: Vec<BucketEntry>) -> Self {
+        Self {
+            num_buckets,
+            buckets,
+        }
+    }
+    pub fn get_bucket_num(&self) -> u32 {
+        self.num_buckets
+    }
+
+    pub fn get_bucket_entry(&self, entry_idx: usize) -> &BucketEntry {
+        &self.buckets[entry_idx]
+    }
+
+    // assert have had a latch
+    pub fn get_bucket_index(&self, key: &[u8], hasher_idx: usize) ->  usize {
+        let num_buckets = self.num_buckets;
+        let mut hasher = SipHasher::new_with_keys(
+            HASHER_KEYS[hasher_idx].0, 
+            HASHER_KEYS[hasher_idx].1,
+        );
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % num_buckets as usize
+    }
+
+    // maybe NOT exist -> None
+    pub fn get_a_second_bucket_index(&self, key: &[u8], first_idx: usize) -> Option<usize> {
+        let num_buckets = self.num_buckets;
+        let bucket_idxs = HASHER_KEYS.iter()
+            .map(|(key0, key1)| {
+                let mut hasher = SipHasher::new_with_keys(
+                    *key0, 
+                    *key1,
+                );
+                key.hash(&mut hasher);
+                (hasher.finish() as usize) % num_buckets as usize
+            })
+            .collect::<Vec<_>>();
+
+        for idx in bucket_idxs {
+            if idx != first_idx {
+                return Some(idx);
+            }
+        }
+        
+        None
+    }
+
+    pub fn get_all_bucket_index(&self, key: &[u8]) -> Vec<usize> {
+        let num_buckets = self.num_buckets;
+        let mut bucket_idxs = HASHER_KEYS.iter()
+            .map(|(key0, key1)| {
+                let mut hasher = SipHasher::new_with_keys(
+                    *key0, 
+                    *key1,
+                );
+                key.hash(&mut hasher);
+                (hasher.finish() as usize) % num_buckets as usize
+            })
+            .collect::<Vec<_>>();
+
+        bucket_idxs.sort();
+        bucket_idxs.dedup();
+        bucket_idxs
+    }
+}
+
 
 #[derive(Debug, PartialEq)]
 pub enum CuckooAccessMethodError {

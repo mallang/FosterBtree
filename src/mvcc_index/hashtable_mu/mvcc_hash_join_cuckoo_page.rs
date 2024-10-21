@@ -165,7 +165,7 @@ mod slot {
             let ts = u64::from_be_bytes(
                 bytes[current_pos..current_pos + 8].try_into().map_err(|_| "Failed to parse timestamp")?,
             );
-            current_pos += 8;
+            current_pos += std::mem::size_of::<Timestamp>();
 
             let val_size = u32::from_be_bytes(
                 bytes[current_pos..current_pos + 4].try_into().map_err(|_| "Failed to parse val_size")?,
@@ -482,21 +482,6 @@ pub trait MvccHashJoinCuckooPage {
         ts: Timestamp,
     ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
 
-
-    // /// try to delete at slot_id \
-    // /// If find and match key,pkey,ts -> delete and return Ok(old_ts, old_val) \
-    // /// still find and match, but space not enough -> Err(OutOfSpace) 
-    // /// If find but ts mismatch -> Err(InvalidTimestamp) \
-    // /// if not find -> Err(KeyNotFound) (re-do delete again) \
-    // /// 
-    // fn check_and_delete_at_slot_id(
-    //     &mut self,
-    //     slot_id: u32,        
-    //     key: &[u8],
-    //     pkey: &[u8],
-    //     ts: Timestamp,
-    // ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
-
     /// return the slot index if exist \
     /// or return None.
     fn check_larger_record(
@@ -514,19 +499,6 @@ pub trait MvccHashJoinCuckooPage {
         val: &[u8],
         ts: Timestamp,
     ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Timestamp), CuckooAccessMethodError>;
-
-    // /// check whether update is okay \
-    // /// assert pair is valid in that page. \
-    // /// if space not enough -> Err(OutOfSpace) \
-    // /// if key not found -> Err(KeyNotFound) \
-    // /// if key invalid ts -> Err(InvalidTimestamp)
-    // fn check_update_valid(
-    //     &self,
-    //     key: &[u8],
-    //     pkey: &[u8],
-    //     ts: Timestamp,
-    //     val: &[u8],
-    // ) -> Result<(), CuckooAccessMethodError>;
 
     /// return slot_id if find \
     /// Err(notfound) \
@@ -547,15 +519,7 @@ pub trait MvccHashJoinCuckooPage {
         space_want: u32,
     ) -> bool;
 
-    // fn rehash(
-    //     &mut self,
-    //     the_other_rehash_page: &mut FrameWriteGuard,
-    //     old_entry_idx: usize,
-    //     new_hash_size: usize,
-    // );
-
     fn get_key_pkey_val_with_slot_id(&self, slot_id: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>);
-
 
     fn get_key_pkey_val_with_slot(&self, slot: &Slot) -> (Vec<u8>, Vec<u8>, Vec<u8>);
 
@@ -856,7 +820,7 @@ impl MvccHashJoinCuckooPage for Page {
     }
 
     /// delete slot at specific id \
-    /// used in delete().
+    /// used in delete() and re-hash.
     fn delete_slot_at_id(&mut self, slot_id: u32)
         -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
         // check if rec_start_offset should change 
@@ -1055,13 +1019,15 @@ impl MvccHashJoinCuckooPage for Page {
     }
 
 
-    fn rec_start_offset(&self) -> u32 {
-        self.header().rec_start_offset()
-    }
+   
 
     fn write_record(&mut self, offset: u32, record: &Record) {
         let bytes = record.to_bytes();
         self.write_bytes(offset as usize, &bytes);
+    }
+
+    fn rec_start_offset(&self) -> u32 {
+        self.header().rec_start_offset()
     }
 
     fn set_rec_start_offset(&mut self, rec_start_offset: u32) {

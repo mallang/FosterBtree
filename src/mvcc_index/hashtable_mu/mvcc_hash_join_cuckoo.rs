@@ -3,7 +3,7 @@ use std::{hash::{DefaultHasher, Hash, Hasher, SipHasher}, sync::{atomic::AtomicU
 
 use crate::{bp::{ContainerKey, MemPool}, mvcc_index::MvccIndex, page::{Page, PageId, AVAILABLE_PAGE_SIZE}, prelude::AccessMethodError, rwlatch::RwLatch};
 
-use super::{mvcc_hash_join_cuckoo_common::CuckooAccessMethodError, mvcc_hash_join_cuckoo_table::{BucketEntry, CuckooHashTable}};
+use super::{mvcc_hash_join_cuckoo_common::CuckooAccessMethodError, mvcc_hash_join_cuckoo_history_table::CuckooHistoryHashTable, mvcc_hash_join_cuckoo_table:: CuckooHashTable};
 
 pub const HASHER_KEYS: [(u64, u64); 2] = [(0, 0), (1, 1)];
 pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
@@ -19,7 +19,7 @@ pub struct HashJoinTable<T: MemPool> {
     meta_frame_id: AtomicU32,
     
     recent_hash_table: CuckooHashTable<T>,
-    history_hash_table: CuckooHashTable<T>,
+    history_hash_table: CuckooHistoryHashTable<T>,
 
 }
 
@@ -57,7 +57,14 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
             pkey: &Self::PKey,
             ts: crate::mvcc_index::Timestamp,
         ) -> Result<Option<Self::Value>, Self::Error> {
-        todo!()
+        let recent_val = self.recent_hash_table.get(key, pkey, ts);
+        match recent_val {
+            Ok(val) => Ok(Some(val)),
+            Err(CuckooAccessMethodError::KeyNotFound) => {
+                Ok(None)
+            },
+            Err(e) => Err(e),
+        }
     }
 
     fn get_all(
@@ -83,7 +90,14 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
             tx_id: crate::mvcc_index::TxId,
             value: Self::Value,
         ) -> Result<(), Self::Error> {
-        todo!()
+        let old_result = self.recent_hash_table.update(&key, &pkey, ts, &value);
+        match old_result {
+            Ok((old_ts, old_val)) => {
+                // insert to history table
+                self.history_hash_table.insert(&key, &pkey, old_ts, ts, &old_val)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn delete(
@@ -93,7 +107,14 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
             ts: crate::mvcc_index::Timestamp,
             tx_id: crate::mvcc_index::TxId,
         ) -> Result<(), Self::Error> {
-        todo!()
+            let old_result = self.recent_hash_table.delete(&key, &pkey, ts);
+            match old_result {
+                Ok((old_ts, old_val)) => {
+                    // insert to history table
+                    self.history_hash_table.insert(&key, &pkey, old_ts, ts, &old_val)
+                }
+                Err(e) => Err(e),
+            }
     }
 
     fn delta_scan(
@@ -127,7 +148,7 @@ impl<T: MemPool> HashJoinTable<T> {
         MvccHashJoinCuckooMetaPage::init(&mut *meta_page, num_buckets);
 
         let recent_table = CuckooHashTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
-        let history_table = CuckooHashTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let history_table = CuckooHistoryHashTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
         
         let recent_pages = recent_table.get_all_bucket_pages_for_init();
         let history_pages = history_table.get_all_bucket_pages_for_init();
@@ -300,36 +321,3 @@ impl MvccHashJoinCuckooMetaPage for Page {
 }
 
 
-#[test]
-fn test_hasher() {
-    let mut hasher = DefaultHasher::new();
-    let mut hasher2 = DefaultHasher::new();
-    let key = [1,2,3];
-    key.hash(&mut hasher);
-    println!("result1 is {} ", hasher.finish() as usize);
-
-    key.hash(&mut hasher2);
-    println!("result2 is {} ", hasher2.finish() as usize);
-
-}
-
-
-#[test]
-fn test_hasher_ahash() {
-
-    let mut hasher = SipHasher::new_with_keys(1, 1);
-    let mut hasher2 = SipHasher::new_with_keys(1, 1);
-    
-
-    fn f(mut hasher: impl Hasher) {
-        let key = [1,2,3];
-        key.hash(&mut hasher);
-        println!("result1 is {} ", hasher.finish() as usize);
-
-    }
-
-    f(hasher);
-    f(hasher2);
-    
-
-}
