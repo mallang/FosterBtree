@@ -23,7 +23,7 @@ pub enum AccessMethodError {
     OutOfSpace, // For ReadOptimizedPage
     OutOfSpaceForUpdate(Vec<u8>),
     NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
-    InvalidTimestamp, // For MVCC
+    InvalidTimestamp,               // For MVCC
     Other(String),
 }
 
@@ -81,7 +81,9 @@ impl fmt::Display for AccessMethodError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AccessMethodError::KeyNotFound => write!(f, "Key not found"),
-            AccessMethodError::KeyFoundButInvalidTimestamp => write!(f, "Key found but invalid timestamp"),
+            AccessMethodError::KeyFoundButInvalidTimestamp => {
+                write!(f, "Key found but invalid timestamp")
+            }
             AccessMethodError::KeyDuplicate => write!(f, "Key duplicate"),
             AccessMethodError::KeyNotInPageRange => write!(f, "Key not in page range"),
             AccessMethodError::PageReadLatchFailed => write!(f, "Page read latch failed"),
@@ -89,8 +91,12 @@ impl fmt::Display for AccessMethodError {
             AccessMethodError::RecordTooLarge => write!(f, "Record too large"),
             AccessMethodError::MemPoolStatus(status) => write!(f, "MemPool status: {:?}", status),
             AccessMethodError::OutOfSpace => write!(f, "Out of space"),
-            AccessMethodError::OutOfSpaceForUpdate(key) => write!(f, "Out of space for update: {:?}", key),
-            AccessMethodError::NeedToUpdateMVCC(ts, val) => write!(f, "Need to update MVCC: ts: {}, val: {:?}", ts, val),
+            AccessMethodError::OutOfSpaceForUpdate(key) => {
+                write!(f, "Out of space for update: {:?}", key)
+            }
+            AccessMethodError::NeedToUpdateMVCC(ts, val) => {
+                write!(f, "Need to update MVCC: ts: {}, val: {:?}", ts, val)
+            }
             AccessMethodError::InvalidTimestamp => write!(f, "Invalid timestamp"),
             AccessMethodError::Other(msg) => write!(f, "{}", msg),
         }

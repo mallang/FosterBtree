@@ -1,10 +1,9 @@
-use std::sync::Arc;
-use crate::bp::{ContainerKey, MemPool};
 use super::{
-    Timestamp,
-    mvcc_hash_join_recent_chain::MvccHashJoinRecentChain,
     mvcc_hash_join_history_chain::MvccHashJoinHistoryChain,
+    mvcc_hash_join_recent_chain::MvccHashJoinRecentChain, Timestamp,
 };
+use crate::bp::{ContainerKey, MemPool};
+use std::sync::Arc;
 
 pub struct MvccHashBucket<T: MemPool> {
     c_key: ContainerKey,
@@ -28,15 +27,13 @@ impl<T: MemPool> MvccHashBucket<T> {
 
     // Implement methods to insert, get, and update entries
     // which delegate to the appropriate chain
-    pub fn insert(&self, key: Vec<u8>, pkey: Vec<u8>, ts: Timestamp, val: Vec<u8>) {
-    }
+    pub fn insert(&self, key: Vec<u8>, pkey: Vec<u8>, ts: Timestamp, val: Vec<u8>) {}
 
     pub fn get(&self, key: &[u8], ts: Timestamp) -> Option<Vec<Vec<u8>>> {
         todo!()
     }
 
-    pub fn update(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) {
-    }
+    pub fn update(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) {}
 
     // Additional methods as needed...
 }

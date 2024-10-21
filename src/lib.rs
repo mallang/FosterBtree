@@ -1,7 +1,7 @@
-pub mod mvcc_index;
 pub mod access_method;
 pub mod bench_utils;
 pub mod bp;
+pub mod mvcc_index;
 pub mod random;
 pub mod txn_storage;
 pub mod write_ahead_log;

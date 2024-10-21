@@ -9,13 +9,14 @@ echo "Script directory: $SCRIPT_DIR"
 
 # Remove existing CSV files
 echo "Deleting existing CSV files..."
-rm -f "$SCRIPT_DIR/data.csv" "$SCRIPT_DIR/txs.csv" "$SCRIPT_DIR/ops.csv"
+rm -f "$SCRIPT_DIR/data.csv" "$SCRIPT_DIR/txs.csv" "$SCRIPT_DIR/ops.csv" "$SCRIPT_DIR/final_data.csv"
 
 # Parameters for gen_data.py and gen_txs.py
-# DATA_PARAMS="-n 1000 -k 16 -p 8"
-# TXS_PARAMS="-n 500 -minc 50 -maxc 150 -ro 0.2 -i 0.5 -u 0.3 -d 0.2"
-DATA_PARAMS="-n 100"
-TXS_PARAMS="-n 10 -minc 5 -maxc 10 -ro 0.5 -i 1.0 -u 0.0 -d 0.0"
+# You can adjust these parameters as needed
+# DATA_PARAMS="-n 100"
+# TXS_PARAMS="-n 10 -minc 5 -maxc 10 -ro 0.5 -i 1.0 -u 0.0 -d 0.0"
+DATA_PARAMS="-n 10"
+TXS_PARAMS="-n 5 -minc 2 -maxc 4 -ro 0.5 -i 1.0 -u 0.0 -d 0.0"
 
 # Run gen_data.py with parameters
 echo "Running gen_data.py with parameters: $DATA_PARAMS"
@@ -42,6 +43,20 @@ else
 fi
 
 echo "Data and transactions generated successfully."
+
+# Run gen_final_data.py to generate final_data.csv
+echo "Running gen_final_data.py..."
+python3 "$SCRIPT_DIR/gen_data_after_txs.py"
+
+# Check if final_data.csv was generated
+if [ -f "$SCRIPT_DIR/data_after_txs.csv" ]; then
+    echo "data_after_txs.csv generated successfully."
+else
+    echo "Error: data_after_txs.csv not found. gen_data_after_txs.py may have failed."
+    exit 1
+fi
+
+echo "Final data generated successfully."
 
 # Run the Rust benchmark
 echo "Running Rust benchmark..."

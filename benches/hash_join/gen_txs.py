@@ -197,7 +197,7 @@ def generate_transactions_and_operations(
     for op in all_operations:
         pkey_ops[op['pkey']].append(op)
 
-    # For each pkey, sort operations by ts and add edges
+    # For each pkey, sort operations by ts and add edges to enforce pkey dependencies
     for pkey, ops in pkey_ops.items():
         ops.sort(key=lambda x: x['ts'])
         for i in range(len(ops) - 1):
@@ -206,19 +206,42 @@ def generate_transactions_and_operations(
             graph[from_op].add(to_op)
             in_degree[to_op] += 1
 
+    # Add edges to enforce intra-transaction order
+    tx_ops = defaultdict(list)
+    for op in all_operations:
+        tx_ops[op['tx_id']].append(op)
+
+    for tx_id, ops in tx_ops.items():
+        ops.sort(key=lambda x: x['ts'])
+        for i in range(len(ops) - 1):
+            from_op = ops[i]['id']
+            to_op = ops[i + 1]['id']
+            if to_op not in graph[from_op]:
+                graph[from_op].add(to_op)
+                in_degree[to_op] += 1
+
     # Perform randomized topological sort
     zero_in_degree = [op['id'] for op in all_operations if in_degree[op['id']] == 0]
     random.shuffle(zero_in_degree)
     sorted_ops = []
+    visited = set()
+
     while zero_in_degree:
         op_id = zero_in_degree.pop()
+        if op_id in visited:
+            continue
         op = all_operations[op_id]
         sorted_ops.append(op)
-        for neighbor in graph[op_id]:
+        visited.add(op_id)
+
+        neighbors = list(graph[op_id])
+        random.shuffle(neighbors)  # Shuffle to introduce randomness
+        for neighbor in neighbors:
             in_degree[neighbor] -= 1
             if in_degree[neighbor] == 0:
                 zero_in_degree.append(neighbor)
                 random.shuffle(zero_in_degree)
+
 
     if len(sorted_ops) != len(all_operations):
         raise ValueError("Cycle detected in operations; cannot perform topological sort.")

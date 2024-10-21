@@ -3,9 +3,7 @@ pub mod hash_join;
 pub type Timestamp = u64;
 pub type TxId = u64; // Transaction ID
 
-use std::{
-    error::Error, fmt::Debug, sync::Arc
-};
+use std::{error::Error, fmt::Debug, sync::Arc};
 
 use crate::bp::{ContainerKey, MemPool};
 
@@ -15,6 +13,9 @@ pub trait MvccIndex {
     type Value: Clone + Debug + Send + Sync;
     type Error: Error + Debug + Send + Sync;
     type MemPoolType: MemPool;
+    type Iter: Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send;
+    type DeltaIter: Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send;
+    type ScanKeyIter: Iterator<Item = (Self::PKey, Self::Value)> + Send;
 
     /// Creates a new instance of the index.
     fn create(
@@ -34,8 +35,8 @@ pub trait MvccIndex {
         value: Self::Value,
     ) -> Result<(), Self::Error>;
 
-    /// Retrieves the value(s) associated with the key and primary key at the given timestamp.
-    /// Returns an empty vector if no matching records are found at that timestamp.
+    /// Retrieves the value associated with the key and primary key at the given timestamp.
+    /// Returns `None` if no matching record is found at that timestamp.
     fn get(
         &self,
         key: &Self::Key,
@@ -45,7 +46,7 @@ pub trait MvccIndex {
 
     /// Retrieves all values associated with the key at the given timestamp.
     /// Useful when multiple rows share the same key.
-    fn get_all(
+    fn get_key(
         &self,
         key: &Self::Key,
         ts: Timestamp,
@@ -75,7 +76,15 @@ pub trait MvccIndex {
     fn scan(
         &self,
         ts: Timestamp,
-    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>;
+    ) -> Result<Self::Iter, Self::Error>;
+
+    /// Scans all entries with the given key at the specified timestamp.
+    /// Returns an iterator over primary key and value pairs.
+    fn scan_key(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Self::ScanKeyIter, Self::Error>;
 
     /// Delta scan between two timestamps.
     /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.
@@ -83,10 +92,7 @@ pub trait MvccIndex {
         &self,
         from_ts: Timestamp,
         to_ts: Timestamp,
-    ) -> Result<
-        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
-        Self::Error,
-    >;
+    ) -> Result<Self::DeltaIter, Self::Error>;
 
     /// Performs garbage collection for entries up to the specified timestamp.
     /// This should remove entries that are no longer needed due to transaction commits.

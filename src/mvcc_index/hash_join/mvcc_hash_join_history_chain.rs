@@ -13,10 +13,7 @@ use crate::{
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::{
-    mvcc_hash_join_history_page::MvccHashJoinHistoryPage,
-    Timestamp,
-};
+use super::{mvcc_hash_join_history_page::MvccHashJoinHistoryPage, Timestamp};
 
 pub struct MvccHashJoinHistoryChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -44,11 +41,7 @@ impl<T: MemPool> MvccHashJoinHistoryChain<T> {
         }
     }
 
-    pub fn new_from_page(
-        c_key: ContainerKey,
-        mem_pool: Arc<T>,
-        pid: PageId,
-    ) -> Self {
+    pub fn new_from_page(c_key: ContainerKey, mem_pool: Arc<T>, pid: PageId) -> Self {
         let page_key = PageFrameKey::new(c_key, pid);
         let page = mem_pool.get_page_for_read(page_key).unwrap();
         let first_frame_id = page.frame_id();
@@ -123,7 +116,8 @@ impl<T: MemPool> MvccHashJoinHistoryChain<T> {
                         // Need to allocate a new page
                         match page.try_upgrade(true) {
                             Ok(mut upgraded_page) => {
-                                let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
+                                let mut new_page =
+                                    self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
                                 let new_pid = new_page.get_id();
                                 let new_fid = new_page.frame_id();
                                 MvccHashJoinHistoryPage::init(&mut *new_page);
@@ -136,7 +130,11 @@ impl<T: MemPool> MvccHashJoinHistoryChain<T> {
                                     val,
                                 )?;
 
-                                MvccHashJoinHistoryPage::set_next_page(&mut *upgraded_page, new_pid, new_fid);
+                                MvccHashJoinHistoryPage::set_next_page(
+                                    &mut *upgraded_page,
+                                    new_pid,
+                                    new_fid,
+                                );
                                 drop(new_page);
                                 return Ok(());
                             }
@@ -364,12 +362,20 @@ mod tests {
             // Attempt to retrieve at a timestamp before the range
             let ts_before_range = start_ts - 1;
             let result = chain.get(key, pkey, ts_before_range);
-            assert!(matches!(result, Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+            assert!(matches!(
+                result,
+                Err(AccessMethodError::KeyNotFound)
+                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+            ));
 
             // Attempt to retrieve at a timestamp after the range
             let ts_after_range = end_ts;
             let result = chain.get(key, pkey, *ts_after_range);
-            assert!(matches!(result, Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+            assert!(matches!(
+                result,
+                Err(AccessMethodError::KeyNotFound)
+                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+            ));
         }
     }
 
@@ -381,7 +387,9 @@ mod tests {
         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
 
         // Insert an entry with minimal timestamp range
-        chain.insert(b"key_edge", b"pkey_edge", 0u64, 1u64, b"value_edge").unwrap();
+        chain
+            .insert(b"key_edge", b"pkey_edge", 0u64, 1u64, b"value_edge")
+            .unwrap();
 
         // Retrieve at start_ts
         let retrieved_val = chain.get(b"key_edge", b"pkey_edge", 0u64).unwrap();
@@ -389,7 +397,11 @@ mod tests {
 
         // Attempt to retrieve at end_ts (should fail)
         let result = chain.get(b"key_edge", b"pkey_edge", 1u64);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+        assert!(matches!(
+            result,
+            Err(AccessMethodError::KeyNotFound)
+                | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+        ));
     }
 
     #[test]
@@ -407,23 +419,27 @@ mod tests {
         ];
 
         for (start_ts, end_ts, val) in &versions {
-            chain.insert(b"key_multi", b"pkey_multi", *start_ts, *end_ts, *val).unwrap();
+            chain
+                .insert(b"key_multi", b"pkey_multi", *start_ts, *end_ts, *val)
+                .unwrap();
         }
 
         // Retrieve each version at different timestamps
         for (i, (start_ts, end_ts, val)) in versions.iter().enumerate() {
             let ts_within_range = (*start_ts + *end_ts) / 2;
-            let retrieved_val = chain.get(b"key_multi", b"pkey_multi", ts_within_range).unwrap();
+            let retrieved_val = chain
+                .get(b"key_multi", b"pkey_multi", ts_within_range)
+                .unwrap();
             assert_eq!(retrieved_val, *val);
 
             // Attempt to retrieve at a timestamp outside the range
-            let ts_out_of_range = if i == 0 {
-                start_ts - 1
-            } else {
-                41 
-            };
+            let ts_out_of_range = if i == 0 { start_ts - 1 } else { 41 };
             let result = chain.get(b"key_multi", b"pkey_multi", ts_out_of_range);
-            assert!(matches!(result, Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+            assert!(matches!(
+                result,
+                Err(AccessMethodError::KeyNotFound)
+                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+            ));
         }
     }
 
@@ -444,7 +460,9 @@ mod tests {
             let pkey = format!("pkey_page_split_{}", i).into_bytes();
             let start_ts = i * 10;
             let end_ts = start_ts + 10;
-            chain.insert(&key, &pkey, start_ts, end_ts, &large_val).unwrap();
+            chain
+                .insert(&key, &pkey, start_ts, end_ts, &large_val)
+                .unwrap();
             inserted_entries.push((key, pkey, start_ts, end_ts, large_val.clone()));
         }
 
@@ -464,7 +482,9 @@ mod tests {
         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
 
         // Insert some entries
-        chain.insert(b"key_exist", b"pkey_exist", 10u64, 20u64, b"value_exist").unwrap();
+        chain
+            .insert(b"key_exist", b"pkey_exist", 10u64, 20u64, b"value_exist")
+            .unwrap();
 
         // Attempt to retrieve a key that was never inserted
         let result = chain.get(b"key_nonexistent", b"pkey_nonexistent", 15u64);
@@ -476,50 +496,58 @@ mod tests {
 
         // Attempt to retrieve with a timestamp outside the range
         let result = chain.get(b"key_exist", b"pkey_exist", 25u64);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound) | Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+        assert!(matches!(
+            result,
+            Err(AccessMethodError::KeyNotFound)
+                | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+        ));
     }
 
     #[test]
     fn test_history_chain_insert_overlapping_timestamps() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-    
+
         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-    
+
         // Insert entries with overlapping timestamp ranges for different keys
-        chain.insert(b"key_overlap1", b"pkey1", 10u64, 30u64, b"value1").unwrap();
-        chain.insert(b"key_overlap2", b"pkey2", 20u64, 40u64, b"value2").unwrap();
-    
+        chain
+            .insert(b"key_overlap1", b"pkey1", 10u64, 30u64, b"value1")
+            .unwrap();
+        chain
+            .insert(b"key_overlap2", b"pkey2", 20u64, 40u64, b"value2")
+            .unwrap();
+
         // Retrieve entries at timestamps where ranges overlap
         let retrieved_val1 = chain.get(b"key_overlap1", b"pkey1", 25u64).unwrap();
         assert_eq!(retrieved_val1, b"value1");
-    
+
         let retrieved_val2 = chain.get(b"key_overlap2", b"pkey2", 25u64).unwrap();
         assert_eq!(retrieved_val2, b"value2");
     }
-    
+
     // #[test]
     // fn test_history_chain_insert_same_key_overlapping_ranges() {
     //     let mem_pool = get_in_mem_pool();
     //     let c_key = ContainerKey::new(0, 0);
-    
+
     //     let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-    
+
     //     // Insert entries with overlapping timestamp ranges for the same key-pkey
     //     chain.insert(b"key_same", b"pkey_same", 10u64, 30u64, b"value1").unwrap();
     //     chain.insert(b"key_same", b"pkey_same", 20u64, 40u64, b"value2").unwrap();
-    
+
     //     // Retrieve at timestamps covered by both ranges
     //     let retrieved_val = chain.get(b"key_same", b"pkey_same", 25u64).unwrap();
     //     // Depending on the implementation, the chain might return the first or the last inserted value
     //     // Let's assume it returns the value with the latest start_ts less than or equal to ts
     //     assert_eq!(retrieved_val, b"value2");
-    
+
     //     // Retrieve at timestamps covered by only one range
     //     let retrieved_val = chain.get(b"key_same", b"pkey_same", 15u64).unwrap();
     //     assert_eq!(retrieved_val, b"value1");
     // }
-    
+
     // #[test]
     // fn test_history_chain_insert_with_max_timestamps() {
     //     let mem_pool = get_in_mem_pool();
@@ -561,7 +589,8 @@ mod tests {
         let start_ts = 10u64;
         let end_ts = 20u64;
 
-        let space_per_entry = <Page as MvccHashJoinHistoryPage>::space_need(key, pkey, val) as usize;
+        let space_per_entry =
+            <Page as MvccHashJoinHistoryPage>::space_need(key, pkey, val) as usize;
 
         // Calculate the number of entries to exceed one page
         let available_space = AVAILABLE_PAGE_SIZE;
@@ -594,6 +623,4 @@ mod tests {
         let result = chain.get(&key_base.to_vec(), &pkey_base.to_vec(), invalid_ts);
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
     }
-
-
 }

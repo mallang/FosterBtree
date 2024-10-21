@@ -197,7 +197,7 @@ mod slot {
 
             bytes
         }
-        
+
         pub fn from_bytes(bytes: &[u8; SLOT_SIZE]) -> Self {
             let mut current_pos = 0;
 
@@ -932,7 +932,9 @@ impl ReadOptimizedPage for Page {
                 return Err(AccessMethodError::OutOfSpaceForUpdate(old_val.to_vec()));
                 // return Err(AccessMethodError::OutOfSpace);
             }
-            if new_rec_size > old_rec_size && self.total_free_space() != self.total_free_space_before_compaction() {
+            if new_rec_size > old_rec_size
+                && self.total_free_space() != self.total_free_space_before_compaction()
+            {
                 self.compact_update(slot_id)?;
             }
         }

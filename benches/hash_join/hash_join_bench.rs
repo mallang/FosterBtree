@@ -1,11 +1,8 @@
-use std::time::Instant;
-use std::sync::Arc;
-use std::error::Error;
 use fbtree::mvcc_index::MvccIndex;
-use fbtree::{
-    prelude::*,
-    mvcc_index::hash_join::mvcc_hash_join::HashJoinTable,
-};
+use fbtree::{mvcc_index::hash_join::mvcc_hash_join::HashJoinTable, prelude::*};
+use std::error::Error;
+use std::sync::Arc;
+use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
@@ -18,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ops_file = &args[2];
     println!("{}", data_file);
     println!("{}", ops_file);
-    
+
     // Read data and operations
     let data = read_data_file(data_file)?;
     let ops = read_ops_file(ops_file)?;
