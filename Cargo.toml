@@ -52,6 +52,8 @@ libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
 fastbloom = "0.7"
 csv = "1.1.6"
+parking_lot = { version = "0.12", features = ["send_guard"] }
+lock_api = {version = "0.4.12", features = ["arc_lock"]} 
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}

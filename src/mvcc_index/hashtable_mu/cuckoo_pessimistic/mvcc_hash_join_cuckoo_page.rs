@@ -1,14 +1,13 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo_common::CuckooAccessMethodError;
+use super::mvcc_hash_join_cuckoo_common::CuckooAccessMethodError;
 use crate::{
-    bp::FrameWriteGuard,
     log_debug,
     mvcc_index::Timestamp,
-    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+    page::{Page, AVAILABLE_PAGE_SIZE},
 };
 mod header {
-    use crate::page::{PageId, AVAILABLE_PAGE_SIZE, PAGE_SIZE};
+    use crate::page::AVAILABLE_PAGE_SIZE;
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
 
     #[derive(Debug)]
@@ -416,8 +415,6 @@ mod record {
 }
 use record::*;
 
-use super::mvcc_hash_join_cuckoo::MvccHashJoinCuckooMetaPage;
-
 pub trait MvccHashJoinCuckooPage {
     fn init(&mut self);
     fn insert(
@@ -526,7 +523,7 @@ pub trait MvccHashJoinCuckooPage {
 
     /// return slot_id if find \
     /// Err(notfound) \
-    /// Err(invalidTimestamp)
+    /// Err(KeyFoundButInvalidTimestamp)
     fn get_slot_id(
         &self,
         key: &[u8],

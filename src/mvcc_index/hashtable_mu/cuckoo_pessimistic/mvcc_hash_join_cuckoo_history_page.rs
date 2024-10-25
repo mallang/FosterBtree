@@ -117,7 +117,8 @@ mod header {
 use header::*;
 
 mod slot {
-    use super::super::Timestamp;
+    use crate::mvcc_index::Timestamp;
+
     pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
     pub const SLOT_KEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
     pub const SLOT_PKEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();

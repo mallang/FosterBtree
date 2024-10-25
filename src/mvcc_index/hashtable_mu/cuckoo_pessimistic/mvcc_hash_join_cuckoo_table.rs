@@ -60,6 +60,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
     }
 
+    /// init or re-hash
     pub fn get_all_bucket_pages_for_init(&self) -> Vec<PageId> {
         let buckets = self.rwlock.read().unwrap();
         let ret = buckets
@@ -199,7 +200,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     /*
        if search both hasher_idx
        if find -> return value
-       if find but invalid timestamp -> return Err(InvalidTimestamp)
+       if find but invalid timestamp -> return Err(KeyFoundButInvalidTimestamp)
        return Err(keynotfound)
 
 
@@ -228,7 +229,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 Err(CuckooAccessMethodError::KeyNotFound) => {
                     continue;
                 }
-                Err(CuckooAccessMethodError::InvalidTimestamp) => {
+                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
                     return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
                 Err(_) => {
@@ -241,7 +242,7 @@ impl<T: MemPool> CuckooHashTable<T> {
 
     /*
         if not find => Err(KeyNotFound)
-        if invalid ts => Err(InvalidTimestamp)
+        if invalid ts => Err(KeyFoundButInvalidTimestamp)
         else {
             if update succ => return (old_ts, old_val)
             if out of space => return Err(OutOfSpace) => Rehash
@@ -301,7 +302,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                     Err(CuckooAccessMethodError::KeyNotFound) => {
                         continue;
                     }
-                    Err(CuckooAccessMethodError::InvalidTimestamp) => {
+                    Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
                         return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
                     }
                     Err(_) => {
@@ -359,7 +360,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                     Err(CuckooAccessMethodError::KeyNotFound) => {
                         continue;
                     }
-                    Err(CuckooAccessMethodError::InvalidTimestamp) => {
+                    Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
                         return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
                     }
                     Err(_) => {

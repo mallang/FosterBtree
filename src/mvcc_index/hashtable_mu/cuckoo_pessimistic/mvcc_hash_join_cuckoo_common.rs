@@ -4,9 +4,9 @@ use std::{
     sync::atomic::AtomicU32,
 };
 
-use crate::{bp::MemPoolStatus, page::PageId};
-
-use super::mvcc_hash_join_cuckoo::HASHER_KEYS;
+use crate::{
+    bp::MemPoolStatus, mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HASHER_KEYS, page::PageId,
+};
 
 pub const MAX_CUCKOO_ITERATE_COUNT: usize = 3;
 

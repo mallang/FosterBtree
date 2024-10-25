@@ -5,17 +5,17 @@ use std::{
 };
 
 use crate::{
-    bp::{ContainerKey, MemPool},
-    mvcc_index::MvccIndex,
-    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
-    prelude::AccessMethodError,
-    rwlatch::RwLatch,
+    bp::{ContainerKey, MemPool, PageFrameKey}, lockmanager::TransactionId, mvcc_index::MvccIndex, page::{Page, PageId, AVAILABLE_PAGE_SIZE}, prelude::AccessMethodError, rwlatch::RwLatch
 };
 
 use super::{
-    mvcc_hash_join_cuckoo_common::CuckooAccessMethodError,
-    mvcc_hash_join_cuckoo_history_table::CuckooHistoryHashTable,
-    mvcc_hash_join_cuckoo_table::CuckooHashTable,
+//     cuckoo_pessimistic::mvcc_hash_join_cuckoo_common::CuckooAccessMethodError,
+    cuckoo_pessimistic::mvcc_hash_join_cuckoo_history_table::CuckooHistoryHashTable,
+//     cuckoo_pessimistic::mvcc_hash_join_cuckoo_table::CuckooHashTable,
+};
+
+use super:: {
+    cuckoo_optimistic::{mvcc_hash_join_cuckoo_common::CuckooAccessMethodError, mvcc_hash_join_cuckoo_recent_table::CuckooHashTable, mvcc_hash_join_cuckoo_recent_page::MvccHashJoinCuckooPage}
 };
 
 pub const HASHER_KEYS: [(u64, u64); 2] = [(0, 0), (1, 1)];
@@ -90,7 +90,7 @@ pub struct HashJoinTable<T: MemPool> {
 //             &self,
 //             ts: crate::mvcc_index::Timestamp,
 //         ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error> {
-//         todo!()
+//     todo!()
 //     }
 
 //     fn update(
@@ -148,6 +148,13 @@ pub struct HashJoinTable<T: MemPool> {
 // }
 
 impl<T: MemPool> HashJoinTable<T> {
+    fn scan_inner(
+        &self,
+        ts: crate::mvcc_index::Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, CuckooAccessMethodError> {
+        Ok(self.recent_hash_table.scan(ts))
+    }
+
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEFAULT_NUM_BUCKETS)
     }
