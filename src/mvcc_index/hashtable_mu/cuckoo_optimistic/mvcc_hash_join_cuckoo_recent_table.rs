@@ -336,8 +336,8 @@ impl<T: MemPool> CuckooHashRecentTable<T> {
         tid: TransactionId,
         ts: Timestamp,
         buckets_read_guard: ArcRwlockReadGuard<Buckets>,
-    // ) -> Box<impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send> {
-        ) -> RecentScanTsWithBucketsReadGuard<T> {
+        // ) -> Box<impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send> {
+    ) -> RecentScanTsWithBucketsReadGuard<T> {
         let scan_guard = RecentScanTsWithBucketsReadGuard::new(
             &self.lock_manager,
             tid,
@@ -356,8 +356,8 @@ impl<T: MemPool> CuckooHashRecentTable<T> {
         ts: Timestamp,
         buckets_read_guard: ArcRwlockReadGuard<Buckets>,
         scan_key: Option<Vec<u8>>,
-    // ) -> Box<impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send> {
-        ) -> RecentScanTsWithBucketsReadGuard<T> {
+        // ) -> Box<impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send> {
+    ) -> RecentScanTsWithBucketsReadGuard<T> {
         let scan_guard = RecentScanTsWithBucketsReadGuard::new(
             &self.lock_manager,
             tid,
@@ -370,24 +370,17 @@ impl<T: MemPool> CuckooHashRecentTable<T> {
         scan_guard
     }
 
-    pub fn scan(
-        &self,
-        ts: Timestamp,
-    ) -> RecentScanTsWithBucketsReadGuard<T> {
+    pub fn scan(&self, ts: Timestamp) -> RecentScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
         self.gen_scan_iterator(TransactionId::new(), ts, buckets)
     }
 
-    pub fn scan_key(
-        &self,
-        ts: Timestamp,
-        key: &[u8],
-    ) -> RecentScanTsWithBucketsReadGuard<T> {
+    pub fn scan_key(&self, ts: Timestamp, key: &[u8]) -> RecentScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
         self.gen_scan_key_iterator(TransactionId::new(), ts, buckets, Some(key.to_vec()))
     }
 
-    /*
+    /* OLD
         if have free space -> insert
         if free space after compaction -> compaction
 
@@ -401,6 +394,21 @@ impl<T: MemPool> CuckooHashRecentTable<T> {
         4. check space
             if failed -> Err(CuckooOutOfSpace(new_rehash_size: u32))
         5. do insert or compaction-and-insert or re-hash
+    */
+
+    /* NEW
+       if have free space -> insert
+       if free space after compaction -> compact
+       else -> rehash(Err(CuckooOutOfSpace))
+
+       1. get buckets' read lock
+       2. access buckets, get 2 buckets from 2 hash functions;
+       3. get write lock of pages
+           if failed -> Err(AckLockFailed)
+       4. try find delete mark of key, if find -> add to history and delete
+       5. randomly choose one page to insert and check space
+           if failed -> Err(CuckooOutOfSpace(new_hash_size))
+       5. do insert or compact-and-insert
     */
     fn insert_inner(
         &self,

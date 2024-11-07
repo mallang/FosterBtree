@@ -167,7 +167,7 @@ impl<T: MemPool> Iterator for HistoryScanTsWithBucketsReadGuard<T> {
                                 // simple scan
                                 ret = Some((slot_key, slot_pkey, slot_val));
                                 break;
-                            }            
+                            }
                             break;
                         } else {
                             current_slot_id += 1;
@@ -361,24 +361,15 @@ impl<T: MemPool> CuckooHashHistoryTable<T> {
         scan_guard.into_iter()
     }
 
-    pub fn scan(
-        &self,
-        ts: Timestamp,
-    ) -> HistoryScanTsWithBucketsReadGuard<T> {
+    pub fn scan(&self, ts: Timestamp) -> HistoryScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
         self.gen_scan_iterator(TransactionId::new(), ts, buckets)
     }
 
-    pub fn scan_key(
-        &self,
-        ts: Timestamp,
-        key: &[u8],
-    ) -> HistoryScanTsWithBucketsReadGuard<T> {
+    pub fn scan_key(&self, ts: Timestamp, key: &[u8]) -> HistoryScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
         self.gen_scan_key_iterator(TransactionId::new(), ts, buckets, Some(key.to_vec()))
     }
-
-    
 
     /*
         if have free space -> insert
@@ -728,11 +719,8 @@ impl<T: MemPool> CuckooHashHistoryTable<T> {
         }
     }
 
-    pub fn garbage_collect(
-        &self,
-        safe_ts: Timestamp,
-    ) -> Result<(), CuckooAccessMethodError> {
-        todo!()        
+    pub fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError> {
+        todo!()
     }
 
     // helper function

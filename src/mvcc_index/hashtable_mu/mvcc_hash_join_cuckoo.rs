@@ -1,6 +1,10 @@
 use core::{num, str};
 use std::{
-    fs::File, hash::{DefaultHasher, Hash, Hasher, SipHasher}, io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write}, sync::{atomic::AtomicU32, Arc}, time::Duration
+    fs::File,
+    hash::{DefaultHasher, Hash, Hasher, SipHasher},
+    io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write},
+    sync::{atomic::AtomicU32, Arc},
+    time::Duration,
 };
 
 use tempfile::tempfile;
@@ -15,10 +19,12 @@ use crate::{
 };
 
 use super::cuckoo_optimistic::{
-        mvcc_hash_join_cuckoo_common::CuckooAccessMethodError,
-        mvcc_hash_join_cuckoo_history_table::{CuckooHashHistoryTable, HistoryScanTsWithBucketsReadGuard},
-        mvcc_hash_join_cuckoo_recent_table::{CuckooHashRecentTable, RecentScanTsWithBucketsReadGuard},
-    };
+    mvcc_hash_join_cuckoo_common::CuckooAccessMethodError,
+    mvcc_hash_join_cuckoo_history_table::{
+        CuckooHashHistoryTable, HistoryScanTsWithBucketsReadGuard,
+    },
+    mvcc_hash_join_cuckoo_recent_table::{CuckooHashRecentTable, RecentScanTsWithBucketsReadGuard},
+};
 
 pub const HASHER_KEYS: [(u64, u64); 2] = [(0, 0), (1, 1)];
 pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
@@ -46,23 +52,21 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
     type DeltaIter = MyDeltaScanIter<T>;
     type Iter = MyScanIter<T>;
     type ScanKeyIter = MyScanKeyIter<T>;
-    fn create(
-            c_key: ContainerKey,
-            mem_pool: Arc<Self::MemPoolType>,
-        ) -> Result<Self, Self::Error>
-        where
-            Self: Sized {
+    fn create(c_key: ContainerKey, mem_pool: Arc<Self::MemPoolType>) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
         Ok(Self::new(c_key, mem_pool))
     }
 
     fn insert(
-            &self,
-            key: Self::Key,
-            pkey: Self::PKey,
-            ts: crate::mvcc_index::Timestamp,
-            tx_id: crate::mvcc_index::TxId,
-            value: Self::Value,
-        ) -> Result<(), Self::Error> {
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: crate::mvcc_index::Timestamp,
+        tx_id: crate::mvcc_index::TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
         self.insert_inner(key, pkey, ts, tx_id, value)
     }
 
@@ -76,10 +80,10 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
     }
 
     fn get_key(
-            &self,
-            key: &Self::Key,
-            ts: Timestamp,
-        ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         let mut ret = vec![];
         let recent_ret = self.recent_hash_table.get_all(key, ts)?;
         ret.extend(recent_ret);
@@ -88,40 +92,37 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         Ok(ret)
     }
 
- 
-
     fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error> {
         let ret = self.scan_inner(ts);
         Ok(ret)
-        
     }
 
     fn update(
-            &self,
-            key: Self::Key,
-            pkey: Self::PKey,
-            ts: crate::mvcc_index::Timestamp,
-            tx_id: crate::mvcc_index::TxId,
-            value: Self::Value,
-        ) -> Result<(), Self::Error> {
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: crate::mvcc_index::Timestamp,
+        tx_id: crate::mvcc_index::TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
         self.update_inner(key, pkey, ts, tx_id, value)
     }
 
     fn delete(
-            &self,
-            key: &Self::Key,
-            pkey: &Self::PKey,
-            ts: crate::mvcc_index::Timestamp,
-            tx_id: crate::mvcc_index::TxId,
-        ) -> Result<(), Self::Error> {
+        &self,
+        key: &Self::Key,
+        pkey: &Self::PKey,
+        ts: crate::mvcc_index::Timestamp,
+        tx_id: crate::mvcc_index::TxId,
+    ) -> Result<(), Self::Error> {
         self.delete_inner(key, pkey, ts, tx_id)
     }
 
     fn delta_scan(
-            &self,
-            from_ts: Timestamp,
-            to_ts: Timestamp,
-        ) -> Result<Self::DeltaIter, Self::Error> {
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<Self::DeltaIter, Self::Error> {
         Ok(self.delta_scan_inner(from_ts, to_ts))
     }
 
@@ -129,14 +130,10 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         Ok(self.scan_key_inner(ts, key))
     }
 
-    fn garbage_collect(
-            &self,
-            safe_ts: crate::mvcc_index::Timestamp,
-        ) -> Result<(), Self::Error> {
+    fn garbage_collect(&self, safe_ts: crate::mvcc_index::Timestamp) -> Result<(), Self::Error> {
         todo!()
     }
 }
-
 
 pub struct MyScanIter<T: MemPool> {
     history: HistoryScanTsWithBucketsReadGuard<T>,
@@ -148,10 +145,7 @@ impl<T: MemPool> MyScanIter<T> {
         history: HistoryScanTsWithBucketsReadGuard<T>,
         recent: RecentScanTsWithBucketsReadGuard<T>,
     ) -> Self {
-        Self {
-            history, 
-            recent,
-        }
+        Self { history, recent }
     }
 }
 
@@ -176,10 +170,7 @@ impl<T: MemPool> MyScanKeyIter<T> {
         history: HistoryScanTsWithBucketsReadGuard<T>,
         recent: RecentScanTsWithBucketsReadGuard<T>,
     ) -> Self {
-        Self {
-            history, 
-            recent,
-        }
+        Self { history, recent }
     }
 }
 
@@ -234,7 +225,8 @@ impl<T: MemPool> MyDeltaScanIter<T> {
             encode_bytes.resize(space_need_pair, 0);
             encode_bytes[0..size_of::<u32>()].copy_from_slice(&((key.len() as u32).to_be_bytes()));
             encode_bytes[0..size_of::<u32>()].copy_from_slice(&((pkey.len() as u32).to_be_bytes()));
-            encode_bytes[0..size_of::<u32>()].copy_from_slice(&((value.len() as u32).to_be_bytes()));
+            encode_bytes[0..size_of::<u32>()]
+                .copy_from_slice(&((value.len() as u32).to_be_bytes()));
             encode_bytes.extend(key);
             encode_bytes.extend(pkey);
             encode_bytes.extend(value);
@@ -269,22 +261,20 @@ impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
                     match self.to_ts_file.read_exact(&mut len_meta_buffer) {
                         Err(_e) => {
                             panic!("should not occur!");
-                        },
+                        }
                         Ok(_) => {
                             let key_len = u32::from_be_bytes(
-                                len_meta_buffer[0..size_of::<u32>()]
-                                    .try_into()
-                                    .unwrap()
+                                len_meta_buffer[0..size_of::<u32>()].try_into().unwrap(),
                             );
                             let pkey_len = u32::from_be_bytes(
                                 len_meta_buffer[size_of::<u32>()..size_of::<u32>() * 2]
                                     .try_into()
-                                    .unwrap()
+                                    .unwrap(),
                             );
                             let val_len = u32::from_be_bytes(
                                 len_meta_buffer[size_of::<u32>() * 2..size_of::<u32>() * 3]
                                     .try_into()
-                                    .unwrap()
+                                    .unwrap(),
                             );
                             let mut k_buffer = Vec::<u8>::new();
                             let mut pk_buffer = Vec::<u8>::new();
@@ -298,8 +288,7 @@ impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
                             self.to_ts_file.read_exact(&mut v_buffer).unwrap();
 
                             Some((k_buffer, pk_buffer, v_buffer))
-                        },
-
+                        }
                     }
                 }
             };
@@ -310,16 +299,17 @@ impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
                     Ok(None) => {
                         // inserted
                         return Some((key, pkey, crate::mvcc_index::Delta::Inserted(to_ts_val)));
-                    },
+                    }
                     Ok(Some(from_ts_val)) => {
                         // check if updated
-                        
-                        if &to_ts_val != &from_ts_val { // updated 
+
+                        if &to_ts_val != &from_ts_val {
+                            // updated
                             return Some((key, pkey, crate::mvcc_index::Delta::Updated(to_ts_val)));
                         }
                         // not updated
                         continue;
-                    },
+                    }
                     Err(_) => {
                         panic!("should not occur!");
                     }
@@ -344,22 +334,20 @@ impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
                     match self.from_ts_file.read_exact(&mut len_meta_buffer) {
                         Err(_e) => {
                             panic!("should not occur!");
-                        },
+                        }
                         Ok(_) => {
                             let key_len = u32::from_be_bytes(
-                                len_meta_buffer[0..size_of::<u32>()]
-                                    .try_into()
-                                    .unwrap()
+                                len_meta_buffer[0..size_of::<u32>()].try_into().unwrap(),
                             );
                             let pkey_len = u32::from_be_bytes(
                                 len_meta_buffer[size_of::<u32>()..size_of::<u32>() * 2]
                                     .try_into()
-                                    .unwrap()
+                                    .unwrap(),
                             );
                             let val_len = u32::from_be_bytes(
                                 len_meta_buffer[size_of::<u32>() * 2..size_of::<u32>() * 3]
                                     .try_into()
-                                    .unwrap()
+                                    .unwrap(),
                             );
                             let mut k_buffer = Vec::<u8>::new();
                             let mut pk_buffer = Vec::<u8>::new();
@@ -373,8 +361,7 @@ impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
                             self.from_ts_file.read_exact(&mut v_buffer).unwrap();
 
                             Some((k_buffer, pk_buffer, v_buffer))
-                        },
-
+                        }
                     }
                 }
             };
@@ -385,10 +372,10 @@ impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
                     Ok(None) => {
                         // deleted
                         return Some((key, pkey, crate::mvcc_index::Delta::Deleted));
-                    },
+                    }
                     Ok(_) => {
                         continue;
-                    },
+                    }
                     Err(_) => {
                         panic!("should not occur!");
                     }
@@ -506,9 +493,7 @@ impl<T: MemPool> HashJoinTable<T> {
                 // log_warn!("try to find in history");
                 match history_val {
                     Ok(val) => Ok(Some(val)),
-                    Err(CuckooAccessMethodError::KeyNotFound) => {
-                        Ok(None)
-                    }
+                    Err(CuckooAccessMethodError::KeyNotFound) => Ok(None),
                     Err(e) => Err(e),
                 }
             }
@@ -528,7 +513,8 @@ impl<T: MemPool> HashJoinTable<T> {
         match old_result {
             Ok((old_ts, old_val, recent_rehash_flag)) => {
                 if old_ts < ts {
-                    let history_insert_res = self.history_hash_table
+                    let history_insert_res = self
+                        .history_hash_table
                         .insert(&key, &pkey, old_ts, ts, &old_val);
                     match history_insert_res {
                         Ok(rehash_flag) => {
@@ -541,13 +527,19 @@ impl<T: MemPool> HashJoinTable<T> {
                                             .load(std::sync::atomic::Ordering::Acquire),
                                     )
                                 };
-                                let page_frame_key =
-                                    PageFrameKey::new_with_frame_id(self.c_key, meta_page_id, meta_frame_id);
+                                let page_frame_key = PageFrameKey::new_with_frame_id(
+                                    self.c_key,
+                                    meta_page_id,
+                                    meta_frame_id,
+                                );
                                 let mut meta_page = self.write_page(page_frame_key);
-            
-                                let entries = self.history_hash_table.get_all_bucket_pages_for_init();
+
+                                let entries =
+                                    self.history_hash_table.get_all_bucket_pages_for_init();
                                 let old_history_entries_num =
-                                    <Page as MvccHashJoinCuckooMetaPage>::get_history_bucket_num(&*&meta_page);
+                                    <Page as MvccHashJoinCuckooMetaPage>::get_history_bucket_num(
+                                        &*&meta_page,
+                                    );
                                 if old_history_entries_num < entries.len() {
                                     assert_eq!(old_history_entries_num * 2, entries.len());
                                     <Page as MvccHashJoinCuckooMetaPage>::set_history_bucket_num(
@@ -561,7 +553,7 @@ impl<T: MemPool> HashJoinTable<T> {
                                 }
                                 drop(meta_page);
                             }
-                        },
+                        }
                         Err(e) => {
                             panic!("should not happen! err: {:?}", e);
                         }
@@ -622,7 +614,8 @@ impl<T: MemPool> HashJoinTable<T> {
                 );
                 // self.history_hash_table
                 //     .insert(&key, &pkey, old_ts, ts, &old_val)
-                let history_insert_res = self.history_hash_table
+                let history_insert_res = self
+                    .history_hash_table
                     .insert(&key, &pkey, old_ts, ts, &old_val);
                 match history_insert_res {
                     Ok(rehash_flag) => {
@@ -634,13 +627,18 @@ impl<T: MemPool> HashJoinTable<T> {
                                         .load(std::sync::atomic::Ordering::Acquire),
                                 )
                             };
-                            let page_frame_key =
-                                PageFrameKey::new_with_frame_id(self.c_key, meta_page_id, meta_frame_id);
+                            let page_frame_key = PageFrameKey::new_with_frame_id(
+                                self.c_key,
+                                meta_page_id,
+                                meta_frame_id,
+                            );
                             let mut meta_page = self.write_page(page_frame_key);
-        
+
                             let entries = self.history_hash_table.get_all_bucket_pages_for_init();
                             let old_history_entries_num =
-                                <Page as MvccHashJoinCuckooMetaPage>::get_history_bucket_num(&*&meta_page);
+                                <Page as MvccHashJoinCuckooMetaPage>::get_history_bucket_num(
+                                    &*&meta_page,
+                                );
                             if old_history_entries_num < entries.len() {
                                 assert_eq!(old_history_entries_num * 2, entries.len());
                                 <Page as MvccHashJoinCuckooMetaPage>::set_history_bucket_num(
@@ -655,7 +653,7 @@ impl<T: MemPool> HashJoinTable<T> {
                             drop(meta_page);
                         }
                         Ok(())
-                    },
+                    }
                     Err(e) => {
                         panic!("should not happen! err: {:?}", e);
                     }
@@ -665,45 +663,28 @@ impl<T: MemPool> HashJoinTable<T> {
         }
     }
 
-    pub fn scan_inner(
-        &self,
-        ts: Timestamp,
-    ) -> MyScanIter<T> {
+    pub fn scan_inner(&self, ts: Timestamp) -> MyScanIter<T> {
         let recent_scan_iter = self.recent_hash_table.scan(ts);
         let history_scan_iter = self.history_hash_table.scan(ts);
-        let scan_iter= MyScanIter::new(
-            history_scan_iter,
-            recent_scan_iter,
-        );
+        let scan_iter = MyScanIter::new(history_scan_iter, recent_scan_iter);
         scan_iter
     }
 
-    pub fn scan_key_inner(
-        &self,
-        ts: Timestamp,
-        key: &[u8],
-    ) -> MyScanKeyIter<T>  {
+    pub fn scan_key_inner(&self, ts: Timestamp, key: &[u8]) -> MyScanKeyIter<T> {
         let recent_scan_iter = self.recent_hash_table.scan_key(ts, key);
         let history_scan_iter = self.history_hash_table.scan_key(ts, key);
-        let scan_iter= MyScanKeyIter::new(
-            history_scan_iter,
-            recent_scan_iter,
-        );
+        let scan_iter = MyScanKeyIter::new(history_scan_iter, recent_scan_iter);
         scan_iter
     }
 
-    pub fn delta_scan_inner(
-        &self,
-        from_ts: Timestamp,
-        to_ts: Timestamp,
-    ) -> MyDeltaScanIter<T> {
+    pub fn delta_scan_inner(&self, from_ts: Timestamp, to_ts: Timestamp) -> MyDeltaScanIter<T> {
         let from_ts_scanner = self.scan_inner(from_ts);
         let to_ts_scanner = self.scan_inner(to_ts);
         // MyDeltaScanIter::new(
-        //     from_ts_scanner, 
-        //     to_ts_scanner, 
-        //     self.clone(), 
-        //     to_ts, 
+        //     from_ts_scanner,
+        //     to_ts_scanner,
+        //     self.clone(),
+        //     to_ts,
         //     from_ts,
         // )
         todo!()
@@ -1004,10 +985,10 @@ mod tests {
             .insert_inner(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
         let get_result = hash_join_table.get_inner(&[2], &[1], 1);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 0);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 2);
         assert_eq!(get_result.unwrap().unwrap(), &[1]);
@@ -1115,10 +1096,10 @@ mod tests {
             .unwrap();
 
         let get_result = hash_join_table.get_inner(&[2], &[1], 1);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 0);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 2);
         assert_eq!(get_result.unwrap().unwrap(), &[2]);
@@ -1141,10 +1122,10 @@ mod tests {
             .unwrap();
 
         let get_result = hash_join_table.get_inner(&[2], &[1], 1);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 0);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 2);
         assert_eq!(get_result.unwrap().unwrap(), &[2]);
@@ -1259,16 +1240,16 @@ mod tests {
             .unwrap();
 
         let get_result = hash_join_table.get_inner(&[2], &[1], 1);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 0);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 2);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 1);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         // duplicate delete
         let del_result = hash_join_table.delete_inner(&(vec![1])[..], &(vec![1])[..], 1, 1);
@@ -1289,13 +1270,13 @@ mod tests {
             .unwrap();
 
         let get_result = hash_join_table.get_inner(&[2], &[1], 1);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 0);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 2);
-        assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get_inner(&[1], &[1], 1);
         assert_eq!(get_result.unwrap().unwrap(), &[1]);
@@ -1361,7 +1342,7 @@ mod tests {
                 let pkey = format!("pkey{}", i).into_bytes();
                 // let expected_value = format!("value{}", i * 2).into_bytes();
                 let get_result = hash_join_table_clone.get_inner(&key, &pkey, 2);
-                assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+                assert_eq!(get_result.unwrap(), None);
             }
         });
         // Verify all entries after insertions are complete
@@ -1370,7 +1351,7 @@ mod tests {
             let pkey = format!("pkey{}", i).into_bytes();
             // let expected_value = format!("value{}", i * 2).into_bytes();
             let get_result = hash_join_table.get_inner(&key, &pkey, 2);
-            assert_eq!(get_result.err(), Some(CuckooAccessMethodError::KeyNotFound));
+            assert_eq!(get_result.unwrap(), None);
         }
 
         handle.join().unwrap();
