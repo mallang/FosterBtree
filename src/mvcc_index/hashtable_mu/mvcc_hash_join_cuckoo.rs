@@ -32,8 +32,9 @@ pub struct HashJoinTable<T: MemPool> {
     mem_pool: Arc<T>, // TODO: check may be deleted
     c_key: ContainerKey,
 
-    meta_page_id: PageId, // fixed
-    meta_frame_id: AtomicU32,
+    meta: Arc<(PageId, AtomicU32)>,
+    // meta_page_id: PageId, // fixed
+    // meta_frame_id: AtomicU32,
 
     recent_hash_table: CuckooHashTable<T>,
     history_hash_table: CuckooHashTable<T>,
@@ -408,12 +409,14 @@ impl<T: MemPool> HashJoinTable<T> {
         let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
         let meta_page_id = meta_page.get_id();
         let meta_frame_id = AtomicU32::new(meta_page.frame_id());
+        let meta = Arc::new((meta_page_id, meta_frame_id));
+
         MvccHashJoinCuckooMetaPage::init(&mut *meta_page, num_buckets);
 
         let recent_table =
-            <CuckooHashTable<T> as CuckooRecentHashTable<T>>::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+            <CuckooHashTable<T> as CuckooRecentHashTable<T>>::new_with_bucket_num(c_key, mem_pool.clone(), &meta, num_buckets);
         let history_table =
-            <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+            <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::new_with_bucket_num(c_key, mem_pool.clone(), &meta, num_buckets);
 
         let recent_page_ids = <CuckooHashTable<T> as CuckooRecentHashTable<T>>::get_all_bucket_page_ids(&recent_table);
         let history_page_ids = <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::get_all_bucket_page_ids(&history_table);
@@ -432,8 +435,7 @@ impl<T: MemPool> HashJoinTable<T> {
         Self {
             mem_pool,
             c_key,
-            meta_page_id,
-            meta_frame_id,
+            meta,
             recent_hash_table: recent_table,
             history_hash_table: history_table,
         }
@@ -449,38 +451,9 @@ impl<T: MemPool> HashJoinTable<T> {
     ) -> Result<(), CuckooAccessMethodError> {
         let insert_res = self.recent().insert(&key, &pkey, ts, &value);
         match insert_res {
-            Ok((rehash_flag, old_delete_marker)) => {
-                if rehash_flag {
-                    let (meta_page_id, meta_frame_id) = {
-                        (
-                            self.meta_page_id,
-                            self.meta_frame_id
-                                .load(std::sync::atomic::Ordering::Acquire),
-                        )
-                    };
-                    let page_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, meta_page_id, meta_frame_id);
-                    let mut meta_page = self.write_page(page_frame_key);
-
-                    let entries = self.recent().get_all_bucket_page_ids();
-                    let old_recent_entries_num =
-                        <Page as MvccHashJoinCuckooMetaPage>::get_recent_bucket_num(&meta_page);
-                    if old_recent_entries_num < entries.len() {
-                        assert_eq!(old_recent_entries_num * 2, entries.len());
-                        <Page as MvccHashJoinCuckooMetaPage>::set_recent_bucket_num(
-                            &mut *meta_page,
-                            old_recent_entries_num * 2,
-                        );
-                        <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_recent(
-                            &mut *meta_page,
-                            &entries,
-                        );
-                    }
-                    drop(meta_page);
-                }
+            Ok(old_delete_marker) => {
                 if let Some(old_delete_start_ts) = old_delete_marker {
-                    let _todo = self.history().insert_deleted(&key, &pkey, old_delete_start_ts, ts);
-                    todo!("check rehash and update meta page");
+                    self.history().insert_deleted(&key, &pkey, old_delete_start_ts, ts).unwrap();
                 }
                 Ok(())
             }
@@ -526,49 +499,13 @@ impl<T: MemPool> HashJoinTable<T> {
     ) -> Result<(), CuckooAccessMethodError> {
         let old_result = self.recent().update(&key, &pkey, ts, &val);
         match old_result {
-            Ok((old_ts, old_val, recent_rehash_flag)) => {
+            Ok((old_ts, old_val)) => {
                 if old_ts < ts {
                     let history_insert_res = self
                         .history()
                         .insert(&key, &pkey, old_ts, ts, &old_val);
                     match history_insert_res {
-                        Ok(rehash_flag) => {
-                            if rehash_flag {
-                                // rehash into meta page
-                                let (meta_page_id, meta_frame_id) = {
-                                    (
-                                        self.meta_page_id,
-                                        self.meta_frame_id
-                                            .load(std::sync::atomic::Ordering::Acquire),
-                                    )
-                                };
-                                let page_frame_key = PageFrameKey::new_with_frame_id(
-                                    self.c_key,
-                                    meta_page_id,
-                                    meta_frame_id,
-                                );
-                                let mut meta_page = self.write_page(page_frame_key);
-
-                                let entries =
-                                    self.history().get_all_bucket_page_ids();
-                                let old_history_entries_num =
-                                    <Page as MvccHashJoinCuckooMetaPage>::get_history_bucket_num(
-                                        &*&meta_page,
-                                    );
-                                if old_history_entries_num < entries.len() {
-                                    assert_eq!(old_history_entries_num * 2, entries.len());
-                                    <Page as MvccHashJoinCuckooMetaPage>::set_history_bucket_num(
-                                        &mut *meta_page,
-                                        old_history_entries_num * 2,
-                                    );
-                                    <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_history(
-                                        &mut *meta_page,
-                                        &entries,
-                                    );
-                                }
-                                drop(meta_page);
-                            }
-                        }
+                        Ok(()) => {}
                         Err(e) => {
                             panic!("should not happen! err: {:?}", e);
                         }
@@ -577,34 +514,6 @@ impl<T: MemPool> HashJoinTable<T> {
                     // update in the same ts => need not insert in history
                     // DO NOTHING HERE
                 }
-                if recent_rehash_flag {
-                    let (meta_page_id, meta_frame_id) = {
-                        (
-                            self.meta_page_id,
-                            self.meta_frame_id
-                                .load(std::sync::atomic::Ordering::Acquire),
-                        )
-                    };
-                    let page_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, meta_page_id, meta_frame_id);
-                    let mut meta_page = self.write_page(page_frame_key);
-
-                    let entries = self.recent().get_all_bucket_page_ids();
-                    let old_recent_entries_num =
-                        <Page as MvccHashJoinCuckooMetaPage>::get_recent_bucket_num(&*&meta_page);
-                    assert_eq!(old_recent_entries_num * 2, entries.len());
-
-                    <Page as MvccHashJoinCuckooMetaPage>::set_recent_bucket_num(
-                        &mut *meta_page,
-                        old_recent_entries_num * 2,
-                    );
-                    <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_recent(
-                        &mut *meta_page,
-                        &entries,
-                    );
-                    drop(meta_page);
-                }
-
                 Ok(())
             }
             Err(e) => Err(e),
@@ -633,40 +542,7 @@ impl<T: MemPool> HashJoinTable<T> {
                     .history()
                     .insert(&key, &pkey, old_ts, ts, &old_val);
                 match history_insert_res {
-                    Ok(rehash_flag) => {
-                        if rehash_flag {
-                            let (meta_page_id, meta_frame_id) = {
-                                (
-                                    self.meta_page_id,
-                                    self.meta_frame_id
-                                        .load(std::sync::atomic::Ordering::Acquire),
-                                )
-                            };
-                            let page_frame_key = PageFrameKey::new_with_frame_id(
-                                self.c_key,
-                                meta_page_id,
-                                meta_frame_id,
-                            );
-                            let mut meta_page = self.write_page(page_frame_key);
-
-                            let entries = self.history().get_all_bucket_page_ids();
-                            let old_history_entries_num =
-                                <Page as MvccHashJoinCuckooMetaPage>::get_history_bucket_num(
-                                    &*&meta_page,
-                                );
-                            if old_history_entries_num < entries.len() {
-                                assert_eq!(old_history_entries_num * 2, entries.len());
-                                <Page as MvccHashJoinCuckooMetaPage>::set_history_bucket_num(
-                                    &mut *meta_page,
-                                    old_history_entries_num * 2,
-                                );
-                                <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_history(
-                                    &mut *meta_page,
-                                    &entries,
-                                );
-                            }
-                            drop(meta_page);
-                        }
+                    Ok(()) => {
                         Ok(())
                     }
                     Err(e) => {
@@ -744,6 +620,9 @@ pub trait MvccHashJoinCuckooMetaPage {
 
     fn read_all_entries_history(&self) -> Vec<PageId>;
     fn write_all_entries_history(&mut self, entries: &[PageId]);
+
+    fn rehash_update_recent(&mut self, entries: &[PageId]);
+    fn rehash_update_history(&mut self, entries: &[PageId]);
 }
 
 impl MvccHashJoinCuckooMetaPage for Page {
@@ -862,6 +741,26 @@ impl MvccHashJoinCuckooMetaPage for Page {
         );
         for (index, entry) in entries.iter().enumerate() {
             self.set_history_bucket_entry(index, entry);
+        }
+    }
+
+    fn rehash_update_history(&mut self, entries: &[PageId]) {
+        // rehash into meta page
+        let old_history_entries_num = self.get_history_bucket_num();
+        if old_history_entries_num < entries.len() {
+            assert_eq!(old_history_entries_num * 2, entries.len());
+            self.set_history_bucket_num(old_history_entries_num * 2);
+            self.write_all_entries_history(&entries);
+        }
+    }
+
+    fn rehash_update_recent(&mut self, entries: &[PageId]) {
+        // rehash into meta page
+        let old_recent_entries_num = self.get_recent_bucket_num();
+        if old_recent_entries_num < entries.len() {
+            assert_eq!(old_recent_entries_num * 2, entries.len());
+            self.set_recent_bucket_num(old_recent_entries_num * 2);
+            self.write_all_entries_recent(&entries);
         }
     }
 }
@@ -1395,22 +1294,4 @@ mod tests {
         }
         assert_eq!(cnt, 100);
     }
-}
-
-#[test]
-fn haa() {
-    let f = tempfile().unwrap();
-    let mut bufw = BufWriter::new(&f);
-    bufw.write_all(&format!("hahaha").into_bytes()).unwrap();
-    bufw.flush().unwrap();
-    drop(bufw);
-    let mut bufr = BufReader::new(f);
-    bufr.seek(std::io::SeekFrom::Start(0)).unwrap();
-    let mut by = Vec::new();
-    let a = bufr.fill_buf().unwrap().is_empty();
-    assert_eq!(a, false);
-    bufr.read_to_end(&mut by).unwrap();
-    log_warn!("read {:?}", String::from_utf8(by).unwrap());
-    let a = bufr.fill_buf().unwrap().is_empty();
-    assert_eq!(a, true);
 }

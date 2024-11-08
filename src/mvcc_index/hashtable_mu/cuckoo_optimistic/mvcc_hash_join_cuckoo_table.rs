@@ -1,11 +1,11 @@
 use core::str;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicU32, Arc, Mutex},
     time::Duration,
 };
 
 use crate::{
-    bp::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey}, lockmanager::{LockManager, Permissions, TransactionId, ValueId}, log_debug, log_warn, mvcc_index::Timestamp, page::{Page, PageId}
+    bp::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey}, lockmanager::{LockManager, Permissions, TransactionId, ValueId}, log_debug, log_warn, mvcc_index::{hashtable_mu::mvcc_hash_join_cuckoo::MvccHashJoinCuckooMetaPage, Timestamp}, page::{Page, PageId}
 };
 
 /* --------------------------- Scanner START ---------------------------------- */
@@ -195,6 +195,8 @@ pub struct CuckooHashTable<T: MemPool> {
 
     mem_pool: Arc<T>,
 
+    meta: Arc<(PageId, AtomicU32)>,
+
     /// shared: read & update (rehash) & insert & delete & get \
     /// exclusive: rehash \
     /// ensure atomic of (num_buckets, BucketEntry.page_id, BucketEntry.frame_id)
@@ -206,8 +208,8 @@ pub struct CuckooHashTable<T: MemPool> {
 }
 
 pub trait CuckooRecentHashTable<T: MemPool> {
-    fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self;
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, bucket_nums: usize) -> Self;
+    fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self;
+    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self;
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
@@ -217,7 +219,7 @@ pub trait CuckooRecentHashTable<T: MemPool> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(bool, Option<Timestamp>), CuckooAccessMethodError>;
+    ) -> Result<Option<Timestamp>, CuckooAccessMethodError>;
     fn get(
         &self,
         key: &[u8],
@@ -235,7 +237,7 @@ pub trait CuckooRecentHashTable<T: MemPool> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>, bool), CuckooAccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
     fn delete(
         &self,
         key: &[u8],
@@ -245,9 +247,9 @@ pub trait CuckooRecentHashTable<T: MemPool> {
 }
 
 pub trait CuckooHistoryHashTable<T: MemPool> {
-    fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self;
+    fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self;
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, bucket_nums: usize) -> Self;
+    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
     fn insert(
@@ -257,7 +259,7 @@ pub trait CuckooHistoryHashTable<T: MemPool> {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<bool, CuckooAccessMethodError>;
+    ) -> Result<(), CuckooAccessMethodError>;
     fn get(
         &self,
         key: &[u8],
@@ -276,7 +278,7 @@ pub trait CuckooHistoryHashTable<T: MemPool> {
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<bool, CuckooAccessMethodError>;
+    ) -> Result<(), CuckooAccessMethodError>;
 }
 
 /// Recent & History basic functions
@@ -284,7 +286,8 @@ impl<T: MemPool> CuckooHashTable<T> {
     fn new_with_bucket_num_inner(
         c_key: ContainerKey,
         mem_pool: Arc<T>, 
-        num_buckets: usize
+        num_buckets: usize,
+        meta: &Arc<(PageId, AtomicU32)>,
     ) -> Self {
         let mut bucket_entry_vec = vec![];
         for _ in 0..num_buckets {
@@ -307,6 +310,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             rwlock: new_arc_rw_lock(buckets),
             rehash_mutex: Mutex::new(()),
             lock_manager: Arc::new(Mutex::new(LockManager::new())),
+            meta: meta.clone(),
         }
     }
     /// used to provide an interface for lock_manager::valueid \
@@ -661,7 +665,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
     }
 
-    fn rehash(&self, hash_size: u32) -> bool {
+    fn rehash_recent(&self, hash_size: u32) -> bool {
         // ensure that re-hash only does once
         let _rehash_guard = self.rehash_mutex.lock().unwrap();
 
@@ -738,6 +742,110 @@ impl<T: MemPool> CuckooHashTable<T> {
             // );
         }
         buckets.num_buckets = old_entry_num * 2;
+        let meta_page_key = PageFrameKey::new_with_frame_id(
+            self.c_key, 
+            self.meta.0, 
+            self.meta.1.load(std::sync::atomic::Ordering::Acquire),
+        );
+        let mut meta_page = self.write_page(meta_page_key);
+        let new_page_ids = buckets
+            .buckets
+            .iter()
+            .map(|x| x.page_id())
+            .collect::<Vec<_>>();
+        <Page as MvccHashJoinCuckooMetaPage>::rehash_update_recent(&mut *meta_page, &new_page_ids);
+        return true;
+    }
+
+    fn rehash_history(&self, hash_size: u32) -> bool {
+        // ensure that re-hash only does once
+        let _rehash_guard = self.rehash_mutex.lock().unwrap();
+
+        {
+            let buckets = self.rwlock.read();
+            // may have duplicate rehash call
+            // check if hash re-hashed before
+            {
+                if buckets.get_bucket_num() >= hash_size {
+                    // log_warn!("[rehash abort]");
+                    return false;
+                }
+                assert_eq!(buckets.get_bucket_num() * 2, hash_size);
+            }
+        }
+
+        // we need to rehash
+        let mut buckets = self.rwlock.write();
+        let old_entry_num = buckets.get_bucket_num();
+        for _ in 0..old_entry_num {
+            buckets.buckets.push(BucketEntry::new(
+                0, // dummy
+            ));
+        }
+
+        // log_warn!("[re-hash] old_entry_num: {:?}", old_entry_num);
+
+        for hashed_bucket_idx in 0..old_entry_num {
+            let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
+            let new_pid = new_page.get_id();
+            let new_fid = new_page.frame_id();
+            MvccHashJoinCuckooPage::init(&mut *new_page);
+            buckets.buckets[(hashed_bucket_idx + old_entry_num) as usize] =
+                BucketEntry::new_with_frame_id(new_pid, new_fid);
+
+            let bucket_entry = buckets.get_bucket_entry(hashed_bucket_idx as usize);
+            let page_frame_k = PageFrameKey::new_with_frame_id(
+                self.c_key,
+                bucket_entry.page_id(),
+                bucket_entry.frame_id(),
+            );
+
+            let mut hashed_page = self.write_page(page_frame_k);
+            let slot_count = hashed_page.slot_count();
+
+            for slot_idx in (0..slot_count).rev() {
+                let (key, pkey, val, start_ts, end_ts) =
+                    hashed_page.get_key_pkey_val_ts_with_slot_id(slot_idx);
+                if let Some(idx) =
+                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize, true)
+                {
+                    // log_warn!("we can get a second idx!!!");
+                    assert_eq!(idx as u32, (hashed_bucket_idx + old_entry_num));
+                    match new_page.insert(&key, &pkey, start_ts, end_ts, &val) {
+                        Ok(_) => {}
+                        Err(_) => {
+                            panic!("should not happen in re-hash!");
+                        }
+                    }
+                    hashed_page.delete_slot_at_id(slot_idx).unwrap();
+                }
+            }
+            // log_warn!(
+            //     "rehashed_page_id: {:?}, rec_start_offset: {:?} slot_end {:?}",
+            //     hashed_page.page_key().unwrap().page_id,
+            //     hashed_page.header().rec_start_offset(),
+            //     hashed_page.header().slot_end_offset()
+            // );
+            // log_warn!(
+            //     "new_page_id: {:?}, rec_start_offset: {:?}, slot_end {:?}",
+            //     new_page.page_key().unwrap().page_id,
+            //     new_page.header().rec_start_offset(),
+            //     new_page.header().slot_end_offset()
+            // );
+        }
+        buckets.num_buckets = old_entry_num * 2;
+        let meta_page_key = PageFrameKey::new_with_frame_id(
+            self.c_key, 
+            self.meta.0, 
+            self.meta.1.load(std::sync::atomic::Ordering::Acquire),
+        );
+        let mut meta_page = self.write_page(meta_page_key);
+        let new_page_ids = buckets
+            .buckets
+            .iter()
+            .map(|x| x.page_id())
+            .collect::<Vec<_>>();
+        <Page as MvccHashJoinCuckooMetaPage>::rehash_update_history(&mut *meta_page, &new_page_ids);
         return true;
     }
 
@@ -1090,11 +1198,11 @@ impl<T: MemPool> CuckooHashTable<T> {
 }
 
 impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
-    fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
-        Self::new_with_bucket_num_inner(c_key, mem_pool, 1)
+    fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
+        Self::new_with_bucket_num_inner(c_key, mem_pool, 1, meta)
     }
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, bucket_nums: usize) -> Self {
-        Self::new_with_bucket_num_inner(c_key, mem_pool, bucket_nums)
+    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self {
+        Self::new_with_bucket_num_inner(c_key, mem_pool, bucket_nums, meta)
     }
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
         let buckets = self.rwlock.read();
@@ -1111,18 +1219,17 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(bool, Option<Timestamp>), CuckooAccessMethodError> {
+    ) -> Result<Option<Timestamp>, CuckooAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
-        let mut rehash_flag = false;
         loop {
             match self.recent_insert_inner(key, pkey, ts, val) {
                 Ok(delete_marker) => {
-                    return Ok((rehash_flag, delete_marker));
+                    return Ok(delete_marker);
                 }
                 Err(CuckooAccessMethodError::CuckooOutOfSpace(new_hash_size)) => {
                     // rehash
-                    rehash_flag = self.rehash(new_hash_size);
+                    self.rehash_recent(new_hash_size);
                     log_debug!("Page insert out of space, re-hash");
                     // attempts += 1;
                     // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1213,19 +1320,18 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>, bool), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
-        let mut rehash_flag = false;
         loop {
             log_warn!("start update loop");
             match self.recent_update_inner(key, pkey, ts, val) {
                 Ok((old_ts, old_val)) => {
-                    return Ok((old_ts, old_val, rehash_flag));
+                    return Ok((old_ts, old_val));
                 }
                 Err(CuckooAccessMethodError::CuckooOutOfSpace(new_hash_size)) => {
                     // rehash
-                    rehash_flag = self.rehash(new_hash_size);
+                    self.rehash_recent(new_hash_size);
                     log_warn!("Page insert out of space, re-hash");
                     // attempts += 1;
                     // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1296,11 +1402,11 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
 
 
 impl<T:MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
-    fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
-        Self::new_with_bucket_num_inner(c_key, mem_pool, 1)
+    fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
+        Self::new_with_bucket_num_inner(c_key, mem_pool, 1, meta)
     }
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, bucket_nums: usize) -> Self {
-        Self::new_with_bucket_num_inner(c_key, mem_pool, bucket_nums)
+    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self {
+        Self::new_with_bucket_num_inner(c_key, mem_pool, bucket_nums, meta)
     }
     fn insert(
         &self,
@@ -1309,19 +1415,18 @@ impl<T:MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<bool, CuckooAccessMethodError> {
+    ) -> Result<(), CuckooAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
-        let mut rehash_flag = false;
         loop {
             match self.history_insert_inner(key, pkey, start_ts, end_ts, val) {
                 Ok(()) => {
                     // log_warn!("history table insert ok!");
-                    return Ok(rehash_flag);
+                    return Ok(());
                 }
                 Err(CuckooAccessMethodError::CuckooOutOfSpace(new_hash_size)) => {
                     // rehash
-                    rehash_flag = self.rehash(new_hash_size);
+                    self.rehash_history(new_hash_size);
                     // log_warn!("Page insert out of space, re-hash");
                     log_debug!("Page insert out of space, re-hash");
                     // attempts += 1;
@@ -1435,19 +1540,18 @@ impl<T:MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<bool, CuckooAccessMethodError> {
+    ) -> Result<(), CuckooAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
-        let mut rehash_flag = false;
         loop {
             match self.history_insert_deleted_inner(key, pkey, start_ts, end_ts) {
                 Ok(()) => {
                     // log_warn!("history table insert ok!");
-                    return Ok(rehash_flag);
+                    return Ok(());
                 }
                 Err(CuckooAccessMethodError::CuckooOutOfSpace(new_hash_size)) => {
                     // rehash
-                    rehash_flag = self.rehash(new_hash_size);
+                    self.rehash_recent(new_hash_size);
                     // log_warn!("Page insert out of space, re-hash");
                     log_debug!("Page insert out of space, re-hash");
                     // attempts += 1;
