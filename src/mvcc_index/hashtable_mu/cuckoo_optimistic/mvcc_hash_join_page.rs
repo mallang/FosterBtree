@@ -1,9 +1,3 @@
-use super::mvcc_hash_join_cuckoo_common::CuckooAccessMethodError;
-use crate::{
-    log_debug, log_warn,
-    mvcc_index::Timestamp,
-    page::{Page, AVAILABLE_PAGE_SIZE},
-};
 mod header {
     use crate::page::AVAILABLE_PAGE_SIZE;
 
@@ -131,6 +125,7 @@ use header::*;
 mod slot {
     use crate::mvcc_index::Timestamp;
 
+    pub const DELETE_MARKER_IN_VAL_SIZE: u32 = u32::MAX;
     pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
     pub const SLOT_KEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
     pub const SLOT_PKEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
@@ -144,13 +139,21 @@ mod slot {
         pkey_size: u32,
         pkey_prefix: [u8; SLOT_PKEY_PREFIX_SIZE],
         // timestamp
-        ts: Timestamp,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
         // value
         val_size: u32,
         offset: u32,
     }
 
     impl Slot {
+        pub fn is_mark_deleted(&self) -> bool {
+            self.val_size == DELETE_MARKER_IN_VAL_SIZE
+        }
+
+        pub fn mark_deleted(&mut self) {
+            self.val_size = DELETE_MARKER_IN_VAL_SIZE
+        }
         pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
             if bytes.len() < SLOT_SIZE {
                 return Err("Insufficient bytes to form Slot".into());
@@ -180,8 +183,15 @@ mod slot {
             pkey_prefix.copy_from_slice(&bytes[current_pos..current_pos + SLOT_PKEY_PREFIX_SIZE]);
             current_pos += SLOT_PKEY_PREFIX_SIZE;
 
-            let ts = u64::from_be_bytes(
-                bytes[current_pos..current_pos + 8]
+            let start_ts = u64::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
+                    .try_into()
+                    .map_err(|_| "Failed to parse timestamp")?,
+            );
+            current_pos += std::mem::size_of::<Timestamp>();
+
+            let end_ts = u64::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
                     .try_into()
                     .map_err(|_| "Failed to parse timestamp")?,
             );
@@ -205,7 +215,8 @@ mod slot {
                 key_prefix,
                 pkey_size,
                 pkey_prefix,
-                ts,
+                start_ts,
+                end_ts,
                 val_size,
                 offset,
             })
@@ -229,8 +240,13 @@ mod slot {
                 .copy_from_slice(&self.pkey_prefix);
             current_pos += SLOT_PKEY_PREFIX_SIZE;
 
-            bytes[current_pos..current_pos + 8].copy_from_slice(&self.ts.to_be_bytes());
-            current_pos += 8;
+            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
+                .copy_from_slice(&self.start_ts.to_be_bytes());
+            current_pos += std::mem::size_of::<Timestamp>();
+
+            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
+                .copy_from_slice(&self.end_ts.to_be_bytes());
+            current_pos += std::mem::size_of::<Timestamp>();
 
             bytes[current_pos..current_pos + 4].copy_from_slice(&self.val_size.to_be_bytes());
             current_pos += 4;
@@ -240,7 +256,14 @@ mod slot {
             bytes
         }
 
-        pub fn new(key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8], offset: usize) -> Self {
+        pub fn new(
+            key: &[u8],
+            pkey: &[u8],
+            start_ts: Timestamp,
+            end_ts: Timestamp,
+            val: &[u8],
+            offset: usize,
+        ) -> Self {
             let key_size = key.len() as u32;
             let pkey_size = pkey.len() as u32;
             let val_size = val.len() as u32;
@@ -258,7 +281,8 @@ mod slot {
                 key_prefix,
                 pkey_size,
                 pkey_prefix,
-                ts,
+                start_ts,
+                end_ts,
                 val_size,
                 offset: offset as u32,
             }
@@ -288,16 +312,28 @@ mod slot {
             }
         }
 
-        pub fn ts(&self) -> Timestamp {
-            self.ts
+        pub fn start_ts(&self) -> Timestamp {
+            self.start_ts
         }
 
-        pub fn set_ts(&mut self, ts: Timestamp) {
-            self.ts = ts;
+        pub fn set_start_ts(&mut self, ts: Timestamp) {
+            self.start_ts = ts;
+        }
+
+        pub fn end_ts(&self) -> Timestamp {
+            self.end_ts
+        }
+
+        pub fn set_end_ts(&mut self, ts: Timestamp) {
+            self.end_ts = ts;
         }
 
         pub fn val_size(&self) -> u32 {
-            self.val_size
+            if self.val_size == DELETE_MARKER_IN_VAL_SIZE {
+                0
+            } else {
+                self.val_size
+            }
         }
 
         pub fn set_val_size(&mut self, val_size: usize) {
@@ -418,32 +454,121 @@ mod record {
 }
 use record::*;
 
-pub trait MvccHashJoinCuckooRecentPage {
-    fn init(&mut self);
+use crate::{log_debug, log_warn, mvcc_index::Timestamp, page::{Page, AVAILABLE_PAGE_SIZE}};
+
+use super::mvcc_hash_join_cuckoo_common::CuckooAccessMethodError;
+
+pub trait MvccHashJoinCuckooPage {
+    fn init(&mut self) {
+        let header = Header::new();
+        self.set_header(&header);
+    }
+
     fn insert(
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
         val: &[u8],
     ) -> Result<(), CuckooAccessMethodError>;
+
+    /// used both in recent and history \
+    /// if recent => find one matched(key, pkey) and either return OK or return Err(Ts) \
+    /// if history => find if ts not match, then continue;
     fn get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
+        is_recent_get: bool,
     ) -> Result<Vec<u8>, CuckooAccessMethodError>;
     /// return the free space after compaction.
     fn compact(&mut self) -> u32;
 
-    // helper function
-    fn header(&self) -> Header;
-    fn set_header(&mut self, header: &Header);
+    fn delete_slot_at_id(
+        &mut self,
+        slot_id: u32,
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
 
-    fn space_need(key: &[u8], pkey: &[u8], val: &[u8]) -> u32;
+    fn get_all(
+        &self,
+        key: &[u8],
+        ts: Timestamp,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError>;
+
+/* -----------------only recent------------------- */
+    /// calculate to find whether the record size is okay or not \
+    /// if compaction is not enough -> OutOfSpace \
+    /// ONLY RECENT
+    fn check_and_update_at_slot_id(
+        &mut self,
+        slot_id: u32,
+        key: &[u8],
+        pkey: &[u8],
+        val: &[u8],
+        ts: Timestamp,
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+
+    /// return slot_id if find \
+    /// Err(notfound) \
+    /// Err(KeyFoundButInvalidTimestamp) \
+    /// ONLY RECENT
+    fn get_slot_id(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<u32, CuckooAccessMethodError>;
+
+    
+    /// ONLY RECENT
+    fn mark_delete_slot_at_id(
+        &mut self,
+        slot_id: u32,
+        end_ts: Timestamp,
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+
+    // ONLY RECENT
+    fn get_delete_mark_slot_id(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<u32, CuckooAccessMethodError>;
+ /* -----------------only history------------------- */
+    /// ONLY HISTORY
+    fn garbage_collect(&mut self, safe_ts: Timestamp);
+    /// ONLY HISTORY
+    fn insert_deleted(
+        &mut self, 
+        key: &[u8],
+        pkey: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), CuckooAccessMethodError>;
+
+
+/* ------------------helper function------------------------ */
+    fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
+    fn read_bytes(&self, offset: usize, length:usize) -> &[u8];
+    fn header(&self) -> Header {
+        let header_bytes = self.read_bytes(0, PAGE_HEADER_SIZE);
+        Header::from_bytes(header_bytes).unwrap()
+    }
+    fn set_header(&mut self, header: &Header) {
+        let header_bytes = header.to_bytes();
+        self.write_bytes(0, &header_bytes);
+    }
+
+    fn space_need(key: &[u8], pkey: &[u8], val: &[u8]) -> u32 {
+        let remain_key_size = key.len().saturating_sub(SLOT_KEY_PREFIX_SIZE);
+        let remain_pkey_size = pkey.len().saturating_sub(SLOT_PKEY_PREFIX_SIZE);
+        SLOT_SIZE as u32 + remain_key_size as u32 + remain_pkey_size as u32 + val.len() as u32
+    }
     fn free_space_without_compaction(&self) -> u32 {
         let header = self.header();
-        header.rec_start_offset() - header.slot_count() * SLOT_SIZE as u32
+        header.rec_start_offset() - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE as u32)
     }
     fn free_space_with_compaction(&self) -> u32 {
         let header = self.header();
@@ -458,54 +583,533 @@ pub trait MvccHashJoinCuckooRecentPage {
     fn slot_offset(&self, slot_id: u32) -> u32 {
         PAGE_HEADER_SIZE as u32 + slot_id as u32 * SLOT_SIZE as u32
     }
-    fn set_slot(&mut self, slot_id: u32, slot: &Slot);
+    fn set_slot(&mut self, slot_id: u32, slot: &Slot) {
+        let slot_offset = self.slot_offset(slot_id);
+        self.write_bytes(slot_offset as usize, &slot.to_bytes());
+    }
 
     fn write_record(&mut self, offset: u32, record: &Record) {
         let bytes = record.to_bytes();
         self.write_bytes(offset as usize, &bytes);
     }
 
-    fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
+    fn slot(&self, slot_id: u32) -> Option<Slot> {
+        if slot_id < self.slot_count() {
+            let offset = self.slot_offset(slot_id) as usize;
+            let slot_bytes = self.read_bytes(offset, SLOT_SIZE);
+            Some(Slot::from_bytes(&slot_bytes).unwrap())
+        } else {
+            None
+        }
+    }
 
-    fn slot(&self, slot_id: u32) -> Option<Slot>;
+    fn get_value_with_slot_id(&self, slot_id: u32) -> Vec<u8> {
+        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        self.get_value_with_slot(&slot)
+    }
 
-    fn get_value_with_slot_id(&self, slot_id: u32) -> Vec<u8>;
+    fn get_value_with_slot(&self, slot: &Slot) -> Vec<u8> {
+        let offset = slot.offset() as usize;
+        let key_size = slot.key_size() as usize;
+        let pkey_size = slot.pkey_size() as usize;
+        let val_size = slot.val_size() as usize;
 
-    fn get_value_with_slot(&self, slot: &Slot) -> Vec<u8>;
-    fn get_key_pkey_val_with_slot_id(&self, slot_id: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>);
+        let remain_key_size = key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE);
+        let remain_pkey_size = pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE);
+        let val_offset = offset + remain_key_size + remain_pkey_size;
+        self.read_bytes(val_offset, val_size).to_vec()
+    }
 
-    fn get_key_pkey_val_with_slot(&self, slot: &Slot) -> (Vec<u8>, Vec<u8>, Vec<u8>);
+    fn get_key_pkey_val_with_slot_id(&self, slot_id: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        self.get_key_pkey_val_with_slot(&slot)
+    }
 
+    fn get_key_pkey_val_with_slot(&self, slot: &Slot) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let rec_offset = slot.offset();
+        let key_size = slot.key_size();
+        let pkey_size = slot.pkey_size();
+        let val_size = slot.val_size();
+
+        let rec_size = val_size
+            + key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+            + pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+        let rec_bytes = self.read_bytes(rec_offset as usize, rec_size as usize);
+        let record = Record::from_bytes(rec_bytes, key_size, pkey_size, val_size);
+
+        let mut full_key = slot.key_prefix().to_vec();
+        full_key.extend_from_slice(record.remain_key());
+
+        let mut full_pkey = slot.pkey_prefix().to_vec();
+        full_pkey.extend_from_slice(record.remain_pkey());
+
+        let val = record.val().to_vec();
+        (full_key, full_pkey, val)
+    }
+
+    /// return: key, pkey, value, start_ts, end_ts
     fn get_key_pkey_val_ts_with_slot_id(
         &self,
         slot_id: u32,
-    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Timestamp);
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Timestamp, Timestamp) {
+        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        self.get_key_pkey_val_ts_with_slot(&slot)
+    }
 
-    fn get_key_pkey_val_ts_with_slot(&self, slot: &Slot) -> (Vec<u8>, Vec<u8>, Vec<u8>, Timestamp);
+    fn get_key_pkey_val_ts_with_slot(
+        &self,
+        slot: &Slot,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Timestamp, Timestamp) {
+        let rec_offset = slot.offset();
+        let key_size = slot.key_size();
+        let pkey_size = slot.pkey_size();
+        let val_size = slot.val_size();
 
-    fn rec_start_offset(&self) -> u32;
+        let rec_size = val_size
+            + key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+            + pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+        let rec_bytes = self.read_bytes(rec_offset as usize, rec_size as usize);
+        let record = Record::from_bytes(rec_bytes, key_size, pkey_size, val_size);
 
-    fn set_rec_start_offset(&mut self, rec_start_offset: u32);
+        let mut full_key = slot.key_prefix().to_vec();
+        full_key.extend_from_slice(record.remain_key());
 
-    fn increase_total_bytes_used(&mut self, bytes: u32);
+        let mut full_pkey = slot.pkey_prefix().to_vec();
+        full_pkey.extend_from_slice(record.remain_pkey());
 
-    fn decrement_slot_count(&mut self);
+        let val = record.val().to_vec();
+        (full_key, full_pkey, val, slot.start_ts(), slot.end_ts())
+    }
 
-    fn decrease_total_bytes_used(&mut self, num_bytes: u32);
+    fn rec_start_offset(&self) -> u32 {
+        self.header().rec_start_offset()
+    }
 
-    fn delete_slot_at_id(
+    fn set_rec_start_offset(&mut self, rec_start_offset: u32) {
+        let mut header = self.header();
+        header.set_rec_start_offset(rec_start_offset);
+        self.set_header(&header);
+    }
+
+    fn increase_total_bytes_used(&mut self, bytes: u32) {
+        let mut header = self.header();
+        header.set_total_bytes_used(header.total_bytes_used() + bytes);
+        self.set_header(&header);
+    }
+
+    fn decrement_slot_count(&mut self) {
+        let mut header = self.header();
+        header.decrement_slot_count();
+        self.set_header(&header);
+    }
+
+    fn decrease_total_bytes_used(&mut self, num_bytes: u32) {
+        let mut header = self.header();
+        header.set_total_bytes_used(header.total_bytes_used() - num_bytes);
+        self.set_header(&header);
+    }
+}
+
+impl MvccHashJoinCuckooPage for Page {
+    fn insert(
         &mut self,
-        slot_id: u32,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+        key: &[u8],
+        pkey: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+        val: &[u8],
+    ) -> Result<(), CuckooAccessMethodError> {
+        let space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
+        if space_need > self.free_space_with_compaction() {
+            log_debug!("should not happen, detect before calling cuckoopage::insert");
+            return Err(CuckooAccessMethodError::OutOfSpace);
+        }
 
+        if space_need > self.free_space_without_compaction() {
+            // DO COMPACT
+            let want_free_with_compaction_space = self.free_space_with_compaction();
+            let actual_free_with_compaction_space = self.compact();
+            assert_eq!(
+                want_free_with_compaction_space,
+                actual_free_with_compaction_space
+            );
+        }
+
+        let mut header = self.header();
+        let record_size = space_need - SLOT_SIZE as u32;
+        let rec_offset = header.rec_start_offset() - record_size;
+        let slot_id = self.slot_count();
+        let slot_offset = self.slot_offset(self.slot_count());
+
+        if rec_offset < slot_offset + SLOT_SIZE as u32 {
+            log_debug!("should not happen, detect before calling cuckoopage::insert");
+            return Err(CuckooAccessMethodError::OutOfSpace);
+        }
+
+        let slot = Slot::new(key, pkey, start_ts, end_ts, val, rec_offset as usize);
+        let record = Record::new(key, pkey, val);
+
+        self.set_slot(slot_id, &slot);
+        self.write_record(rec_offset, &record);
+
+        header.increment_slot_count();
+        header.increase_total_bytes_used(space_need);
+        header.set_rec_start_offset(rec_offset);
+        self.set_header(&header);
+
+        Ok(())
+    }
+    fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        is_recent_get: bool,
+    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+        let header = self.header();
+        let slot_count = header.slot_count();
+        let mut slot_offset = PAGE_HEADER_SIZE;
+
+        for _ in 0..slot_count {
+            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
+            let slot = Slot::from_bytes(slot_bytes).unwrap();
+            if slot.key_size() == key.len() as u32
+                && slot.pkey_size() == pkey.len() as u32
+                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+            {
+                let rec_offset = slot.offset() as usize;
+                let rec_size = slot.val_size()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                let record = Record::from_bytes(
+                    record_bytes,
+                    slot.key_size(),
+                    slot.pkey_size(),
+                    slot.val_size(),
+                );
+
+                let mut full_key = slot.key_prefix().to_vec();
+                full_key.extend_from_slice(record.remain_key());
+
+                let mut full_pkey = slot.pkey_prefix().to_vec();
+                full_pkey.extend_from_slice(record.remain_pkey());
+
+                if full_key == key && full_pkey == pkey {
+                    // check recent or history get
+                    if is_recent_get 
+                    {
+                        // only find once
+                        if ts >= slot.start_ts() 
+                        {
+                            log_warn!("ts: {:?}, slot_start_ts: {:?}", ts, slot.start_ts());
+                            if !slot.is_mark_deleted()  {
+                                // find and not deleted
+                                return Ok(record.val().to_vec())
+                            } else {
+                                // slot deleted
+                                return Err(CuckooAccessMethodError::KeyNotFound)
+                            }
+                        } 
+                        else 
+                        {
+                            // find but mismatch ts
+                            return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+                        }
+                    } 
+                    else  /* history get */
+                    {
+                        // history get
+                        if slot.start_ts() <= ts && ts < slot.end_ts() {
+                            if !slot.is_mark_deleted() {
+                                return Ok(record.val().to_vec());
+                            } else {
+                                // deleted during [start_ts, end_ts)
+                                return Err(CuckooAccessMethodError::KeyNotFound);
+                            }
+                        } else {
+                            // return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                        }
+                    }
+                }
+            }
+            slot_offset += SLOT_SIZE;
+        }
+        Err(CuckooAccessMethodError::KeyNotFound)
+    }
+
+    /// get all pair matching `key` and `ts` \
+    /// return (pkey, val) \
+    /// ignore deleted \
+    /// 
     fn get_all(
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError>;
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+        let header = self.header();
+        let slot_count = header.slot_count();
+        let mut slot_offset = PAGE_HEADER_SIZE;
 
-    /// calculate to find whether the record size is okay or not \
-    /// if compaction is not enough -> OutOfSpace
+        let mut ret = vec![];
+        for _ in 0..slot_count {
+            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
+            let slot = Slot::from_bytes(slot_bytes).unwrap();
+            if slot.key_size() == key.len() as u32
+                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+            {
+                let rec_offset = slot.offset() as usize;
+                let rec_size = slot.val_size()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                let record = Record::from_bytes(
+                    record_bytes,
+                    slot.key_size(),
+                    slot.pkey_size(),
+                    slot.val_size(),
+                );
+
+                let mut full_key = slot.key_prefix().to_vec();
+                full_key.extend_from_slice(record.remain_key());
+
+                let mut full_pkey = slot.pkey_prefix().to_vec();
+                full_pkey.extend_from_slice(record.remain_pkey());
+
+                let val = record.val();
+
+                if full_key == key 
+                {
+                    if slot.start_ts() <= ts && ts < slot.end_ts() 
+                        && !slot.is_mark_deleted()    
+                    {
+                        ret.push((full_pkey, val.to_vec()));
+                    }
+                }
+            }
+            slot_offset += SLOT_SIZE;
+        }
+        return Ok(ret);
+    }
+
+    /// delete slot at specific id \
+    /// used in recent::delete() and both::re-hash \
+    /// and history::garbage_collect() \
+    /// returns the old ts and old val
+    fn delete_slot_at_id(
+        &mut self,
+        slot_id: u32,
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+        // check if rec_start_offset should change
+        let slot = self.slot(slot_id).expect("Invalid slot_id");
+
+        let old_ts = slot.start_ts();
+        let old_val = self.get_value_with_slot(&slot);
+
+        if slot.offset() == self.rec_start_offset() {
+            self.set_rec_start_offset(
+                slot.offset()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
+                    + slot.val_size(),
+            );
+        }
+        self.decrease_total_bytes_used(
+            slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                + slot
+                    .pkey_size()
+                    .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
+                + slot.val_size(),
+        );
+        // move afterward slots forward
+        if slot_id < self.slot_count() {
+            let start_offset = self.slot_offset(slot_id + 1) as usize;
+            let end_offset = self.slot_offset(self.slot_count()) as usize;
+            self.copy_within(start_offset..end_offset, start_offset - SLOT_SIZE);
+        }
+        self.decrement_slot_count();
+        self.decrease_total_bytes_used(SLOT_SIZE as u32);
+        self.write_bytes(
+            self.slot_offset(self.slot_count()) as usize,
+            [0u8; SLOT_SIZE].as_ref(),
+        );
+        log_warn!(
+            "total_bytes_used for deleted slot page: {:?}",
+            self.header().total_bytes_used()
+        );
+        Ok((old_ts, old_val))
+    }
+
+    /// mark delete slot at specific id \
+    /// ONLY used in recent delete
+    fn mark_delete_slot_at_id(
+        &mut self,
+        slot_id: u32,
+        end_ts: Timestamp,
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+        // check if rec_start_offset should change
+        let mut slot = self.slot(slot_id).expect("Invalid slot_id");
+
+        let old_ts = slot.start_ts();
+        let old_val = self.get_value_with_slot(&slot);
+
+        // remove record of the slot
+        if slot.offset() == self.rec_start_offset() {
+            self.set_rec_start_offset(
+                slot.offset()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
+                    + slot.val_size(),
+            );
+        }
+        self.decrease_total_bytes_used(
+            slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                + slot
+                    .pkey_size()
+                    .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
+                + slot.val_size(),
+        );
+
+        // mark delete at slot
+        slot.mark_deleted();
+        slot.set_start_ts(end_ts);
+        self.set_slot(slot_id, &slot);
+
+        log_warn!(
+            "[mark delete] total_bytes_used for deleted slot page: {:?}",
+            self.header().total_bytes_used()
+        );
+        Ok((old_ts, old_val))
+    }
+
+    // only recent
+    fn get_delete_mark_slot_id(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<u32, CuckooAccessMethodError> {
+        let header = self.header();
+        let slot_count = header.slot_count();
+        let mut slot_offset = PAGE_HEADER_SIZE;
+
+        for slot_idx in 0..slot_count {
+            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
+            let slot = Slot::from_bytes(slot_bytes).unwrap();
+            if slot.key_size() == key.len() as u32
+                && slot.pkey_size() == pkey.len() as u32
+                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+            {
+                let rec_offset = slot.offset() as usize;
+                let rec_size = slot.val_size()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                let record = Record::from_bytes(
+                    record_bytes,
+                    slot.key_size(),
+                    slot.pkey_size(),
+                    slot.val_size(),
+                );
+
+                let mut full_key = slot.key_prefix().to_vec();
+                full_key.extend_from_slice(record.remain_key());
+
+                let mut full_pkey = slot.pkey_prefix().to_vec();
+                full_pkey.extend_from_slice(record.remain_pkey());
+
+                if full_key == key && full_pkey == pkey {
+                    if slot.start_ts() <= ts && slot.is_mark_deleted() {
+                        return Ok(slot_idx);
+                    } else {
+                        return Err(CuckooAccessMethodError::KeyNotFound);
+                    }
+                }
+            }
+            slot_offset += SLOT_SIZE;
+        }
+        Err(CuckooAccessMethodError::KeyNotFound)
+    }
+
+    // only recent
+    /// used in recent::update and recent::delete
+    fn get_slot_id(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<u32, CuckooAccessMethodError> {
+        let header = self.header();
+        let slot_count = header.slot_count();
+        let mut slot_offset = PAGE_HEADER_SIZE;
+        log_warn!("enter get_slot_id");
+
+        for slot_idx in 0..slot_count {
+            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
+            let slot = Slot::from_bytes(slot_bytes).unwrap();
+            if slot.key_size() == key.len() as u32
+                && slot.pkey_size() == pkey.len() as u32
+                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+            {
+                let rec_offset = slot.offset() as usize;
+                let rec_size = slot.val_size()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                let record = Record::from_bytes(
+                    record_bytes,
+                    slot.key_size(),
+                    slot.pkey_size(),
+                    slot.val_size(),
+                );
+
+                let mut full_key = slot.key_prefix().to_vec();
+                full_key.extend_from_slice(record.remain_key());
+
+                let mut full_pkey = slot.pkey_prefix().to_vec();
+                full_pkey.extend_from_slice(record.remain_pkey());
+
+                if full_key == key && full_pkey == pkey {
+                    if slot.is_mark_deleted() {
+                        return Err(CuckooAccessMethodError::KeyNotFound)
+                    } else if ts < slot.start_ts() {
+                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+                    } else {
+                        return Ok(slot_idx)
+                    }
+                    // if slot.start_ts() <= ts 
+                    //     && !slot.is_mark_deleted() {
+                    //     return Ok(slot_idx);
+                    // } else {
+                    //     return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                    // }
+                }
+            }
+            slot_offset += SLOT_SIZE;
+        }
+        Err(CuckooAccessMethodError::KeyNotFound)
+    }
+
+    // only recent
+    /*
+       calculate to find whether the record size is okay or not
+       if compaction is not enough -> OutOfSpace
+    */
     fn check_and_update_at_slot_id(
         &mut self,
         slot_id: u32,
@@ -513,56 +1117,106 @@ pub trait MvccHashJoinCuckooRecentPage {
         pkey: &[u8],
         val: &[u8],
         ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+        let new_rec_size = Self::space_need(key, pkey, val) - SLOT_SIZE as u32;
 
-    /// return slot_id if find \
-    /// Err(notfound) \
-    /// Err(KeyFoundButInvalidTimestamp)
-    fn get_slot_id(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<u32, CuckooAccessMethodError>;
+        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        let old_val = self.get_value_with_slot(&slot);
+        let old_ts = slot.start_ts();
+        let old_record_offset = slot.offset();
+        let old_val_size = slot.val_size();
+        let old_rec_size = slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+            + slot
+                .pkey_size()
+                .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
+            + old_val_size;
 
-    // /// check whether slot of id: slot_id has the same key and space as arguments
-    // fn check_slot_key_and_space_of_id(&self, slot_id: u32, key: &[u8], space_want: u32) -> bool;
+        if self.free_space_without_compaction() < new_rec_size {
+            if (self.free_space_with_compaction() as i32)
+                < (new_rec_size as i32) - (old_rec_size as i32)
+            {
+                return Err(CuckooAccessMethodError::OutOfSpace);
+            }
+            if new_rec_size > old_rec_size
+                && self.free_space_with_compaction() != self.free_space_without_compaction()
+            {
+                // log_warn!("new rec size: {:?}, old: {:?}", new_rec_size, old_rec_size);
+                // delete old record and compaction
+                let dummy_slot = Slot::new(b"", b"", 0, 0, b"", old_record_offset as usize);
+                self.set_slot(slot_id, &dummy_slot);
+                let want_free_space = self.free_space_with_compaction() + old_rec_size;
+                let actual_free_space = self.compact();
+                assert_eq!(want_free_space, actual_free_space);
+            }
+        }
+        // log_warn!(
+        //     "new rec size: {:?}, old rec size: {:?} ",
+        //     new_rec_size,
+        //     old_rec_size
+        // );
+        let new_record = Record::new(key, pkey, val);
+        let new_rec_offset = {
+            if new_rec_size <= old_rec_size || old_record_offset == self.rec_start_offset() {
+                // Case 1: New value size is smaller or equal (or) Case 2: Offset matches `rec_start_offset`
+               
+                // log_warn!(
+                //     "[case 1 PAGEID: {:?}]<OLD>, old_rec offset:{:?} rec start offset: {:?}",
+                //     self.get_id(),
+                //     old_record_offset,
+                //     self.rec_start_offset()
+                // );
 
-    fn update(
-        &mut self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-        val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
-    fn delete(
-        &mut self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
-}
+                let new_rec_offset = old_record_offset + old_rec_size - new_rec_size;
+                self.write_record(new_rec_offset, &new_record);
+                if new_rec_size < old_rec_size {
+                    self.write_bytes(
+                        old_record_offset as usize,
+                        &vec![0; old_rec_size as usize - new_rec_size as usize],
+                    );
+                }
+                if old_record_offset == self.rec_start_offset() {
+                    self.set_rec_start_offset(new_rec_offset as u32);
+                }
 
-impl MvccHashJoinCuckooRecentPage for Page {
-    fn init(&mut self) {
-        let header = Header::new();
-        self.set_header(&header);
-    }
+                // log_warn!(
+                //     "[case 1 PAGEID: {:?}]<NEW>, new_rec offset:{:?} new rec start offset: {:?}",
+                //     self.get_id(),
+                //     new_rec_offset,
+                //     self.rec_start_offset()
+                // );
 
-    fn header(&self) -> Header {
-        let header_bytes = &self[0..PAGE_HEADER_SIZE];
-        Header::from_bytes(&header_bytes).unwrap()
-    }
+                new_rec_offset
+            } else {
+                // log_warn!(
+                //     "[case 3 PAGEID: {:?}]<OLD>, old_rec offset:{:?} rec start offset: {:?}",
+                //     self.get_id(),
+                //     old_record_offset,
+                //     self.rec_start_offset()
+                // );
 
-    fn set_header(&mut self, header: &Header) {
-        let header_bytes = header.to_bytes();
-        self[0..PAGE_HEADER_SIZE].copy_from_slice(&header_bytes);
-    }
+                // Case 3: New value is larger and offset doesn't match `rec_start_offset`
+                let new_rec_offset = self.rec_start_offset() - new_rec_size;
+                self.write_record(new_rec_offset, &new_record);
+                self.set_rec_start_offset(new_rec_offset as u32);
+                log_warn!(
+                    "[case 3 PAGEID: {:?}]<NEW>, new_rec offset:{:?} new rec start offset: {:?}",
+                    self.get_id(),
+                    new_rec_offset,
+                    self.rec_start_offset()
+                );
 
-    fn set_slot(&mut self, slot_id: u32, slot: &Slot) {
-        let slot_offset = self.slot_offset(slot_id);
-        self[slot_offset as usize..slot_offset as usize + SLOT_SIZE]
-            .copy_from_slice(&slot.to_bytes());
+                new_rec_offset
+            }
+        };
+
+        let new_slot = Slot::new(key, pkey, ts, Timestamp::MAX, val, new_rec_offset as usize);
+
+        self.set_slot(slot_id, &new_slot);
+
+        self.increase_total_bytes_used(new_rec_size as u32);
+        self.decrease_total_bytes_used(old_rec_size as u32);
+
+        Ok((old_ts, old_val))
     }
 
     fn compact(&mut self) -> u32 {
@@ -613,21 +1267,30 @@ impl MvccHashJoinCuckooRecentPage for Page {
         self.free_space_without_compaction()
     }
 
-    fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
-        self[offset..offset + bytes.len()].copy_from_slice(bytes);
-    }
+    // only history
+    /// delete all record with end_ts <= safe_ts
+    fn garbage_collect(&mut self, safe_ts: Timestamp) {
+        let slot_count = self.slot_count();
 
-    /// insert into a Page without checking duplicate \
-    /// if full -> OutOfSpace \
-    /// else -> return Ok
-    fn insert(
-        &mut self,
+        for slot_id in 0..slot_count {
+            let slot = self.slot(slot_id).unwrap();
+            if slot.end_ts() <= safe_ts {
+                // delete slot
+                self.delete_slot_at_id(slot_id).unwrap();
+            }
+        }
+    }
+    // only history
+    /// when deleted is inserted again in recent table \
+    /// insert deleted pair in history table
+    fn insert_deleted(
+        &mut self, 
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
-        val: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
     ) -> Result<(), CuckooAccessMethodError> {
-        let space_need = <Page as MvccHashJoinCuckooRecentPage>::space_need(key, pkey, val);
+        let space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, &vec![]);
         if space_need > self.free_space_with_compaction() {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
             return Err(CuckooAccessMethodError::OutOfSpace);
@@ -654,8 +1317,9 @@ impl MvccHashJoinCuckooRecentPage for Page {
             return Err(CuckooAccessMethodError::OutOfSpace);
         }
 
-        let slot = Slot::new(key, pkey, ts, val, rec_offset as usize);
-        let record = Record::new(key, pkey, val);
+        let mut slot = Slot::new(key, pkey, start_ts, end_ts, &vec![], rec_offset as usize);
+        slot.mark_deleted();
+        let record = Record::new(key, pkey, &vec![]);
 
         self.set_slot(slot_id, &slot);
         self.write_record(rec_offset, &record);
@@ -668,598 +1332,14 @@ impl MvccHashJoinCuckooRecentPage for Page {
         Ok(())
     }
 
-    /// get the value corresponding to the (key, pkey, ts <= given `ts`) \
-    /// if does not find -> KeyNotFound \
-    /// if find ts > given `ts` -> KeyFoundButInvalidTimestamp
-    ///
-    fn get(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count();
-        let mut slot_offset = PAGE_HEADER_SIZE;
-
-        for _ in 0..slot_count {
-            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-            let slot = Slot::from_bytes(slot_bytes).unwrap();
-            if slot.key_size() == key.len() as u32
-                && slot.pkey_size() == pkey.len() as u32
-                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
-            {
-                let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
-                let record = Record::from_bytes(
-                    record_bytes,
-                    slot.key_size(),
-                    slot.pkey_size(),
-                    slot.val_size(),
-                );
-
-                let mut full_key = slot.key_prefix().to_vec();
-                full_key.extend_from_slice(record.remain_key());
-
-                let mut full_pkey = slot.pkey_prefix().to_vec();
-                full_pkey.extend_from_slice(record.remain_pkey());
-
-                if full_key == key && full_pkey == pkey {
-                    if slot.ts() <= ts {
-                        return Ok(record.val().to_vec());
-                    } else {
-                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                    }
-                }
-            }
-            slot_offset += SLOT_SIZE;
-        }
-        Err(CuckooAccessMethodError::KeyNotFound)
+    fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
+        self[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
-    fn get_all(
-        &self,
-        key: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count();
-        let mut slot_offset = PAGE_HEADER_SIZE;
-
-        let mut ret = vec![];
-        for _ in 0..slot_count {
-            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-            let slot = Slot::from_bytes(slot_bytes).unwrap();
-            if slot.key_size() == key.len() as u32
-                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-            {
-                let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
-                let record = Record::from_bytes(
-                    record_bytes,
-                    slot.key_size(),
-                    slot.pkey_size(),
-                    slot.val_size(),
-                );
-
-                let mut full_key = slot.key_prefix().to_vec();
-                full_key.extend_from_slice(record.remain_key());
-
-                let mut full_pkey = slot.pkey_prefix().to_vec();
-                full_pkey.extend_from_slice(record.remain_pkey());
-
-                let val = record.val();
-
-                if full_key == key {
-                    if slot.ts() <= ts {
-                        ret.push((full_pkey, val.to_vec()));
-                    }
-                }
-            }
-            slot_offset += SLOT_SIZE;
-        }
-        return Ok(ret);
+    fn read_bytes(&self, offset: usize, length:usize) -> &[u8] {
+        &self[offset..offset + length]
     }
 
-    fn space_need(key: &[u8], pkey: &[u8], val: &[u8]) -> u32 {
-        let remain_key_size = key.len().saturating_sub(SLOT_KEY_PREFIX_SIZE);
-        let remain_pkey_size = pkey.len().saturating_sub(SLOT_PKEY_PREFIX_SIZE);
-        SLOT_SIZE as u32 + remain_key_size as u32 + remain_pkey_size as u32 + val.len() as u32
-    }
-
-    fn decrease_total_bytes_used(&mut self, num_bytes: u32) {
-        let mut header = self.header();
-        header.set_total_bytes_used(header.total_bytes_used() - num_bytes);
-        self.set_header(&header);
-    }
-
-    /// delete slot at specific id \
-    /// used in delete() and re-hash.
-    fn delete_slot_at_id(
-        &mut self,
-        slot_id: u32,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
-        // check if rec_start_offset should change
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
-
-        let old_ts = slot.ts();
-        let old_val = self.get_value_with_slot(&slot);
-
-        if slot.offset() == self.rec_start_offset() {
-            self.set_rec_start_offset(
-                slot.offset()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
-                    + slot.val_size(),
-            );
-        }
-        self.decrease_total_bytes_used(
-            slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                + slot
-                    .pkey_size()
-                    .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
-                + slot.val_size(),
-        );
-        // move afterward slots forward
-        if slot_id < self.slot_count() {
-            let start_offset = self.slot_offset(slot_id + 1) as usize;
-            let end_offset = self.slot_offset(self.slot_count()) as usize;
-            self.copy_within(start_offset..end_offset, start_offset - SLOT_SIZE);
-        }
-        self.decrement_slot_count();
-        self.decrease_total_bytes_used(SLOT_SIZE as u32);
-        self.write_bytes(
-            self.slot_offset(self.slot_count()) as usize,
-            [0u8; SLOT_SIZE].as_ref(),
-        );
-        log_warn!(
-            "total_bytes_used for deleted slot page: {:?}",
-            self.header().total_bytes_used()
-        );
-        Ok((old_ts, old_val))
-    }
-
-    fn slot(&self, slot_id: u32) -> Option<Slot> {
-        if slot_id < self.slot_count() {
-            let offset = self.slot_offset(slot_id) as usize;
-            let slot_bytes = &self[offset..offset + SLOT_SIZE];
-            Some(Slot::from_bytes(slot_bytes).unwrap())
-        } else {
-            None
-        }
-    }
-
-    fn get_value_with_slot_id(&self, slot_id: u32) -> Vec<u8> {
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
-        self.get_value_with_slot(&slot)
-    }
-
-    fn get_value_with_slot(&self, slot: &Slot) -> Vec<u8> {
-        let offset = slot.offset() as usize;
-        let key_size = slot.key_size() as usize;
-        let pkey_size = slot.pkey_size() as usize;
-        let val_size = slot.val_size() as usize;
-
-        let remain_key_size = key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE);
-        let remain_pkey_size = pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE);
-        let val_offset = offset + remain_key_size + remain_pkey_size;
-        (&self[val_offset..val_offset + val_size]).to_vec()
-    }
-
-    fn get_key_pkey_val_with_slot_id(&self, slot_id: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
-        self.get_key_pkey_val_with_slot(&slot)
-    }
-
-    fn get_key_pkey_val_with_slot(&self, slot: &Slot) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let rec_offset = slot.offset();
-        let key_size = slot.key_size();
-        let pkey_size = slot.pkey_size();
-        let val_size = slot.val_size();
-
-        let rec_size = val_size
-            + key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-            + pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-        let rec_bytes = &self[rec_offset as usize..rec_offset as usize + rec_size as usize];
-        let record = Record::from_bytes(rec_bytes, key_size, pkey_size, val_size);
-
-        let mut full_key = slot.key_prefix().to_vec();
-        full_key.extend_from_slice(record.remain_key());
-
-        let mut full_pkey = slot.pkey_prefix().to_vec();
-        full_pkey.extend_from_slice(record.remain_pkey());
-
-        let remain_key_size = key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE as u32);
-        let remain_pkey_size = pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-        let val_offset = (rec_offset + remain_key_size + remain_pkey_size) as usize;
-        let val = (&self[val_offset..val_offset + val_size as usize]).to_vec();
-        (full_key, full_pkey, val)
-    }
-
-    /// return: key, pkey, value, start_ts, end_ts
-    fn get_key_pkey_val_ts_with_slot_id(
-        &self,
-        slot_id: u32,
-    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Timestamp) {
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
-        self.get_key_pkey_val_ts_with_slot(&slot)
-    }
-
-    fn get_key_pkey_val_ts_with_slot(&self, slot: &Slot) -> (Vec<u8>, Vec<u8>, Vec<u8>, Timestamp) {
-        let rec_offset = slot.offset();
-        let key_size = slot.key_size();
-        let pkey_size = slot.pkey_size();
-        let val_size = slot.val_size();
-
-        let rec_size = val_size
-            + key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-            + pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-        let rec_bytes = &self[rec_offset as usize..rec_offset as usize + rec_size as usize];
-        let record = Record::from_bytes(rec_bytes, key_size, pkey_size, val_size);
-
-        let mut full_key = slot.key_prefix().to_vec();
-        full_key.extend_from_slice(record.remain_key());
-
-        let mut full_pkey = slot.pkey_prefix().to_vec();
-        full_pkey.extend_from_slice(record.remain_pkey());
-
-        let remain_key_size = key_size.saturating_sub(SLOT_KEY_PREFIX_SIZE as u32);
-        let remain_pkey_size = pkey_size.saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-        let val_offset = (rec_offset + remain_key_size + remain_pkey_size) as usize;
-        let val = (&self[val_offset..val_offset + val_size as usize]).to_vec();
-        (full_key, full_pkey, val, slot.ts())
-    }
-
-    fn write_record(&mut self, offset: u32, record: &Record) {
-        let bytes = record.to_bytes();
-        self.write_bytes(offset as usize, &bytes);
-    }
-
-    fn rec_start_offset(&self) -> u32 {
-        self.header().rec_start_offset()
-    }
-
-    fn set_rec_start_offset(&mut self, rec_start_offset: u32) {
-        let mut header = self.header();
-        header.set_rec_start_offset(rec_start_offset);
-        self.set_header(&header);
-    }
-
-    fn increase_total_bytes_used(&mut self, bytes: u32) {
-        let mut header = self.header();
-        header.set_total_bytes_used(header.total_bytes_used() + bytes);
-        self.set_header(&header);
-    }
-
-    fn decrement_slot_count(&mut self) {
-        let mut header = self.header();
-        header.decrement_slot_count();
-        self.set_header(&header);
-    }
-
-    // only recent
-    fn get_slot_id(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<u32, CuckooAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count();
-        let mut slot_offset = PAGE_HEADER_SIZE;
-        log_warn!("enter get_slot_id");
-
-        for slot_idx in 0..slot_count {
-            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-            let slot = Slot::from_bytes(slot_bytes).unwrap();
-            if slot.key_size() == key.len() as u32
-                && slot.pkey_size() == pkey.len() as u32
-                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
-            {
-                let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
-                let record = Record::from_bytes(
-                    record_bytes,
-                    slot.key_size(),
-                    slot.pkey_size(),
-                    slot.val_size(),
-                );
-
-                let mut full_key = slot.key_prefix().to_vec();
-                full_key.extend_from_slice(record.remain_key());
-
-                let mut full_pkey = slot.pkey_prefix().to_vec();
-                full_pkey.extend_from_slice(record.remain_pkey());
-
-                if full_key == key && full_pkey == pkey {
-                    if slot.ts() <= ts {
-                        return Ok(slot_idx);
-                    } else {
-                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                    }
-                }
-            }
-            slot_offset += SLOT_SIZE;
-        }
-        Err(CuckooAccessMethodError::KeyNotFound)
-    }
-
-    // only recent
-    /*
-       calculate to find whether the record size is okay or not
-       if compaction is not enough -> OutOfSpace
-    */
-    fn check_and_update_at_slot_id(
-        &mut self,
-        slot_id: u32,
-        key: &[u8],
-        pkey: &[u8],
-        val: &[u8],
-        ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
-        let new_rec_size = Self::space_need(key, pkey, val) - SLOT_SIZE as u32;
-
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
-        let old_val = self.get_value_with_slot(&slot);
-        let old_ts = slot.ts();
-        let old_record_offset = slot.offset();
-        let old_val_size = slot.val_size();
-        let old_rec_size = slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-            + slot
-                .pkey_size()
-                .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
-            + old_val_size;
-
-        if self.free_space_without_compaction() < new_rec_size {
-            if (self.free_space_with_compaction() as i32)
-                < (new_rec_size as i32) - (old_rec_size as i32)
-            {
-                return Err(CuckooAccessMethodError::OutOfSpace);
-            }
-            if new_rec_size > old_rec_size
-                && self.free_space_with_compaction() != self.free_space_without_compaction()
-            {
-                log_warn!("new rec size: {:?}, old: {:?}", new_rec_size, old_rec_size);
-                // delete old record and compaction
-                let dummy_slot = Slot::new(b"", b"", 0, b"", old_record_offset as usize);
-                self.set_slot(slot_id, &dummy_slot);
-                let want_free_space = self.free_space_with_compaction() + old_rec_size;
-                let actual_free_space = self.compact();
-                assert_eq!(want_free_space, actual_free_space);
-            }
-        }
-        log_warn!(
-            "new rec size: {:?}, old rec size: {:?} ",
-            new_rec_size,
-            old_rec_size
-        );
-        let new_record = Record::new(key, pkey, val);
-        let new_rec_offset = {
-            if new_rec_size <= old_rec_size || old_record_offset == self.rec_start_offset() {
-                // Case 1: New value size is smaller or equal (or) Case 2: Offset matches `rec_start_offset`
-                log_warn!(
-                    "[case 1 PAGEID: {:?}]<OLD>, old_rec offset:{:?} rec start offset: {:?}",
-                    self.get_id(),
-                    old_record_offset,
-                    self.rec_start_offset()
-                );
-
-                let new_rec_offset = old_record_offset + old_rec_size - new_rec_size;
-                self.write_record(new_rec_offset, &new_record);
-                if new_rec_size < old_rec_size {
-                    self.write_bytes(
-                        old_record_offset as usize,
-                        &vec![0; old_rec_size as usize - new_rec_size as usize],
-                    );
-                }
-                if old_record_offset == self.rec_start_offset() {
-                    self.set_rec_start_offset(new_rec_offset as u32);
-                }
-
-                log_warn!(
-                    "[case 1 PAGEID: {:?}]<NEW>, new_rec offset:{:?} new rec start offset: {:?}",
-                    self.get_id(),
-                    new_rec_offset,
-                    self.rec_start_offset()
-                );
-
-                new_rec_offset
-            } else {
-                log_warn!(
-                    "[case 3 PAGEID: {:?}]<OLD>, old_rec offset:{:?} rec start offset: {:?}",
-                    self.get_id(),
-                    old_record_offset,
-                    self.rec_start_offset()
-                );
-
-                // Case 3: New value is larger and offset doesn't match `rec_start_offset`
-                let new_rec_offset = self.rec_start_offset() - new_rec_size;
-                self.write_record(new_rec_offset, &new_record);
-                self.set_rec_start_offset(new_rec_offset as u32);
-                log_warn!(
-                    "[case 3 PAGEID: {:?}]<NEW>, new_rec offset:{:?} new rec start offset: {:?}",
-                    self.get_id(),
-                    new_rec_offset,
-                    self.rec_start_offset()
-                );
-
-                new_rec_offset
-            }
-        };
-
-        let new_slot = Slot::new(key, pkey, ts, val, new_rec_offset as usize);
-
-        self.set_slot(slot_id, &new_slot);
-
-        self.increase_total_bytes_used(new_rec_size as u32);
-        self.decrease_total_bytes_used(old_rec_size as u32);
-
-        Ok((old_ts, old_val))
-    }
-
-    // only recent
-    /// update a specific key with ts \
-    /// if not found -> key not found \
-    /// if space is not enough in current page -> Err(OutOfSpace) \
-    /// if record ts > ts -> Err(KeyFoundButInvalidTimestamp)
-    fn update(
-        &mut self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-        val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count() /* default value: slot_count */;
-        let mut slot_id_to_update = slot_count;
-        for slot_idx in 0..slot_count {
-            let slot = self.slot(slot_idx).unwrap();
-            if slot.key_size() == key.len() as u32
-                && slot.pkey_size() == pkey.len() as u32
-                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
-            {
-                let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
-                let record = Record::from_bytes(
-                    record_bytes,
-                    slot.key_size(),
-                    slot.pkey_size(),
-                    slot.val_size(),
-                );
-
-                let mut full_key = slot.key_prefix().to_vec();
-                full_key.extend_from_slice(record.remain_key());
-
-                let mut full_pkey = slot.pkey_prefix().to_vec();
-                full_pkey.extend_from_slice(record.remain_pkey());
-
-                if full_key == key && full_pkey == pkey {
-                    // find record we want to update
-                    if slot.ts() <= ts {
-                        slot_id_to_update = slot_idx;
-                        break;
-                    } else {
-                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                    }
-                }
-            }
-        }
-
-        if slot_id_to_update == slot_count {
-            // not find record to be update
-            return Err(CuckooAccessMethodError::KeyNotFound);
-        }
-
-        /*
-            we find the record to be update
-            1. insert new record at new offset
-            2. update slot
-            3. update header(metadata)
-        */
-        // only check RecordTooLarge
-        let space_need = <Page as MvccHashJoinCuckooRecentPage>::space_need(key, pkey, val);
-        if space_need > AVAILABLE_PAGE_SIZE as u32 {
-            panic!("should not happen!");
-        }
-        // we can now update record (record size check is inside)
-        self.check_and_update_at_slot_id(slot_id_to_update, key, pkey, val, ts)
-    }
-
-    // only recent
-    /// delete a specific key with ts \
-    /// if not found -> key not found \
-    /// if record ts > ts -> return CuckooAccessMethodError::KeyFoundButInvalidTimestamp
-    fn delete(
-        &mut self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count() /* default value: slot_count */;
-        let mut slot_id_to_delete = slot_count;
-        let mut old_val: Vec<u8> = Vec::new();
-        let mut old_ts: Timestamp = 0;
-        for slot_idx in (0..slot_count).rev() {
-            let slot = self.slot(slot_idx).unwrap();
-            if slot.key_size() == key.len() as u32
-                && slot.pkey_size() == pkey.len() as u32
-                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
-            {
-                let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-                let record_bytes: &[u8] = &self[rec_offset..rec_offset + rec_size as usize];
-                let record = Record::from_bytes(
-                    record_bytes,
-                    slot.key_size(),
-                    slot.pkey_size(),
-                    slot.val_size(),
-                );
-
-                let mut full_key = slot.key_prefix().to_vec();
-                full_key.extend_from_slice(record.remain_key());
-
-                let mut full_pkey = slot.pkey_prefix().to_vec();
-                full_pkey.extend_from_slice(record.remain_pkey());
-
-                if full_key == key && full_pkey == pkey {
-                    // find record we want to delete
-                    if slot.ts() <= ts {
-                        slot_id_to_delete = slot_idx;
-                        old_val.extend_from_slice(record.val());
-                        old_ts = slot.ts();
-                        break;
-                    } else {
-                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                    }
-                }
-            }
-        }
-
-        if slot_id_to_delete == slot_count {
-            // not find record to be delete
-            return Err(CuckooAccessMethodError::KeyNotFound);
-        }
-
-        /*
-        we find the record to be delete
-        1. move afterwards slots forward by one slot
-        2. update header(metadata)  (update offset if necessary?)
-        */
-        self.delete_slot_at_id(slot_id_to_delete);
-
-        return Ok((old_ts, old_val));
-    }
 }
 
 #[cfg(test)]
@@ -1276,13 +1356,13 @@ mod tests {
         let val = b"value1";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
+        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1295,13 +1375,13 @@ mod tests {
         let val = b"value2";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts,Timestamp::MAX,  val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
+        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1314,13 +1394,13 @@ mod tests {
         let val = b"value3";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts,Timestamp::MAX,  val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
+        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1333,13 +1413,13 @@ mod tests {
         let val = b"value4";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
+        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1354,16 +1434,16 @@ mod tests {
         ];
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert entries
         for (key, pkey, ts, val) in &entries {
-            page.insert(key, pkey, *ts, val).unwrap();
+            page.insert(key, pkey, *ts, Timestamp::MAX, val).unwrap();
         }
 
         // Retrieve and verify entries
         for (key, pkey, ts, val) in &entries {
-            let retrieved_val = page.get(key, pkey, *ts).unwrap();
+            let retrieved_val = page.get(key, pkey, *ts, true).unwrap();
             assert_eq!(retrieved_val, *val);
         }
     }
@@ -1378,20 +1458,20 @@ mod tests {
         let val = b"value_test";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val).unwrap();
 
         // Attempt to retrieve with earlier timestamp
-        let result = page.get(key, pkey, ts_query);
+        let result = page.get(key, pkey, ts_query, true);
         assert!(matches!(
             result,
             Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
         ));
 
         // Retrieve with correct timestamp
-        let retrieved_val = page.get(key, pkey, ts_insert).unwrap();
+        let retrieved_val = page.get(key, pkey, ts_insert, true).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1407,20 +1487,20 @@ mod tests {
         let ts2: Timestamp = 2;
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert first entry
-        page.insert(key, pkey1, ts1, val1).unwrap();
+        page.insert(key, pkey1, ts1, Timestamp::MAX, val1).unwrap();
 
         // Insert second entry with a newer timestamp
-        page.insert(key, pkey2, ts2, val2).unwrap();
+        page.insert(key, pkey2, ts2, Timestamp::MAX, val2).unwrap();
 
         // Retrieve with ts1
-        let retrieved_val = page.get(key, pkey1, ts1).unwrap();
+        let retrieved_val = page.get(key, pkey1, ts1, true).unwrap();
         assert_eq!(retrieved_val, val1);
 
         // Retrieve with ts2
-        let retrieved_val = page.get(key, pkey2, ts2).unwrap();
+        let retrieved_val = page.get(key, pkey2, ts2, true).unwrap();
         assert_eq!(retrieved_val, val2);
     }
 
@@ -1428,7 +1508,7 @@ mod tests {
     fn test_insert_when_page_full() {
         // Fill the page to capacity and attempt to insert another entry
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Use fixed-length keys and pkeys
         let key = b"key_full_full"; // Length 12 bytes
@@ -1442,11 +1522,11 @@ mod tests {
 
         // Insert entries until the page is full
         for _ in 0..page_capacity {
-            page.insert(key, pkey, ts, val).unwrap();
+            page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
         }
 
         // Attempt to insert one more entry
-        let result = page.insert(key, pkey, ts, val);
+        let result = page.insert(key, pkey, ts,Timestamp::MAX,  val);
         assert!(matches!(result, Err(CuckooAccessMethodError::OutOfSpace)));
     }
     #[test]
@@ -1459,20 +1539,22 @@ mod tests {
         let val_update = b"value2"; // Length 6 (same as val_insert)
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
 
         // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+        let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
+
+        let (old_ts, old_val) = page.check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update).unwrap();
 
         // Verify old timestamp and value
         assert_eq!(old_ts, ts_insert);
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+        let retrieved_val = page.get(key, pkey, ts_update,true).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -1486,20 +1568,23 @@ mod tests {
         let val_update = b"short"; // Length 5 (smaller than val_insert)
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
 
         // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+        let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
+
+        let (old_ts, old_val) = page.check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update).unwrap();
+
 
         // Verify old timestamp and value
         assert_eq!(old_ts, ts_insert);
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+        let retrieved_val = page.get(key, pkey, ts_update,true).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -1513,20 +1598,24 @@ mod tests {
         let val_update = b"value_is_longer"; // Length 14 (larger than val_insert)
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
 
         // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+        let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
+
+        let (old_ts, old_val) = page.check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update).unwrap();
+
+        // let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
 
         // Verify old timestamp and value
         assert_eq!(old_ts, ts_insert);
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+        let retrieved_val = page.get(key, pkey, ts_update, true).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -1540,22 +1629,27 @@ mod tests {
         let val_update = vec![b'a'; (AVAILABLE_PAGE_SIZE / 2) as usize]; // Large value
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Fill the page to limit the available space
         page.insert(
             b"key_dummy",
             b"pkey_dummy",
             50,
+            Timestamp::MAX, 
             &vec![b'b'; (AVAILABLE_PAGE_SIZE / 2) as usize],
         )
         .unwrap();
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
 
         // Attempt to update the entry with a larger value
-        let result = page.update(key, pkey, ts_update, &val_update);
+        let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
+
+        let result = page.check_and_update_at_slot_id(slot_id, key, pkey, &val_update, ts_update);
+
+        // let result = page.update(key, pkey, ts_update, &val_update);
         assert!(matches!(result, Err(CuckooAccessMethodError::OutOfSpace)));
     }
 
@@ -1567,11 +1661,15 @@ mod tests {
         let val_update = b"value";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Attempt to update a non-existent key
-        let result = page.update(key, pkey, ts_update, val_update);
-        assert!(matches!(result, Err(CuckooAccessMethodError::KeyNotFound)));
+        let slot_id = page.get_slot_id(key, pkey, ts_update);
+        assert_eq!(slot_id.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        // let result = page.check_and_update_at_slot_id(slot_id, key, pkey, &val_update, ts_update);
+
+        // let result = page.update(key, pkey, ts_update, val_update);
+ 
     }
 
     #[test]
@@ -1584,17 +1682,19 @@ mod tests {
         let val_update = b"value2";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
 
         // Attempt to update with an earlier timestamp
-        let result = page.update(key, pkey, ts_update, val_update);
-        assert!(matches!(
-            result,
-            Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
-        ));
+        let slot_id = page.get_slot_id(key, pkey, ts_update);
+        assert_eq!(slot_id.err(), Some(CuckooAccessMethodError::KeyFoundButInvalidTimestamp));
+        // let result = page.update(key, pkey, ts_update, val_update);
+        // assert!(matches!(
+        //     result,
+        //     Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+        // ));
     }
 
     #[test]
@@ -1606,13 +1706,15 @@ mod tests {
         let val = b"value1";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts + 1);
+        let slot_id = page.get_slot_id(key, pkey, ts).unwrap();
+        let del_result = page.delete_slot_at_id(slot_id);
+        // let del_result = page.delete(key, pkey, ts + 1);
 
         assert!(del_result.is_ok());
         assert_eq!(del_result.as_ref().unwrap().1, val);
@@ -1620,7 +1722,7 @@ mod tests {
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts);
+        let retrieved_res = page.get(key, pkey, ts, true);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -1637,20 +1739,22 @@ mod tests {
         let val = b"value2";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts + 1);
+        let slot_id = page.get_slot_id(key, pkey, ts + 1).unwrap();
+        let del_result = page.delete_slot_at_id(slot_id);
+        // let del_result = page.delete(key, pkey, ts + 1);
         assert!(del_result.is_ok());
         assert_eq!(del_result.as_ref().unwrap().1, val);
         assert_eq!(del_result.as_ref().unwrap().0, ts);
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts);
+        let retrieved_res = page.get(key, pkey, ts, true);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -1667,20 +1771,22 @@ mod tests {
         let val = b"value3";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts + 1);
+        let slot_id = page.get_slot_id(key, pkey, ts + 1).unwrap();
+        let del_result = page.delete_slot_at_id(slot_id);
+        // let del_result = page.delete(key, pkey, ts + 1);
         assert!(del_result.is_ok());
         assert_eq!(del_result.as_ref().unwrap().1, val);
         assert_eq!(del_result.as_ref().unwrap().0, ts);
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts);
+        let retrieved_res = page.get(key, pkey, ts, true);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -1697,20 +1803,22 @@ mod tests {
         let val = b"value4";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Delete the entry
-        let del_result = page.delete(key, pkey, ts + 1);
+        let slot_id = page.get_slot_id(key, pkey, ts + 1).unwrap();
+        let del_result = page.delete_slot_at_id(slot_id);
+        // let del_result = page.delete(key, pkey, ts + 1);
         assert!(del_result.is_ok());
         assert_eq!(del_result.as_ref().unwrap().1, val);
         assert_eq!(del_result.as_ref().unwrap().0, ts);
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts);
+        let retrieved_res = page.get(key, pkey, ts, true);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -1729,21 +1837,25 @@ mod tests {
         ];
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert entries
         for (key, pkey, ts, val) in &entries {
-            page.insert(key, pkey, *ts, val).unwrap();
+            page.insert(key, pkey, *ts, Timestamp::MAX, val).unwrap();
         }
 
         // Delete entries
         for (key, pkey, ts, val) in &entries {
-            assert_eq!(page.delete(key, pkey, *ts).unwrap().1, *val);
+            let slot_id = page.get_slot_id(key, pkey, *ts).unwrap();
+            let del_result = page.delete_slot_at_id(slot_id);
+            assert_eq!(del_result.unwrap().1, *val);
+            // assert_eq!(page.delete(key, pkey, *ts).unwrap().1, *val);
+            
         }
 
         // Retrieve and verify entries
         for (key, pkey, ts, _val) in &entries {
-            let retrieved_res = page.get(key, pkey, *ts);
+            let retrieved_res = page.get(key, pkey, *ts, true);
             assert_eq!(
                 retrieved_res.err(),
                 Some(CuckooAccessMethodError::KeyNotFound)
@@ -1761,15 +1873,16 @@ mod tests {
         let val = b"value_test";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val).unwrap();
 
         // Delete the entry
-        let delete_result = page.delete(key, pkey, ts_query);
+        let slot_id = page.get_slot_id(key, pkey, ts_query);
+        // let delete_result = page.delete(key, pkey, ts_query);
         assert_eq!(
-            delete_result.err(),
+            slot_id.err(),
             Some(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
         );
     }
@@ -1786,27 +1899,31 @@ mod tests {
         let ts2: Timestamp = 2;
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert first entry
-        page.insert(key, pkey1, ts1, val1).unwrap();
+        page.insert(key, pkey1, ts1, Timestamp::MAX, val1).unwrap();
 
         // Insert second entry with a newer timestamp
-        page.insert(key, pkey2, ts2, val2).unwrap();
+        page.insert(key, pkey2, ts2, Timestamp::MAX, val2).unwrap();
 
         // Delete the 2
-        page.delete(key, pkey1, ts1).unwrap();
-        page.delete(key, pkey2, ts2).unwrap();
+        let slot_id = page.get_slot_id(key, pkey1, ts1).unwrap();
+        let del_result = page.delete_slot_at_id(slot_id);
+        // page.delete(key, pkey1, ts1).unwrap();
+        let slot_id = page.get_slot_id(key, pkey2, ts2).unwrap();
+        let del_result = page.delete_slot_at_id(slot_id);
+        // page.delete(key, pkey2, ts2).unwrap();
 
         // Retrieve with ts1
-        let retrieved_res = page.get(key, pkey1, ts1);
+        let retrieved_res = page.get(key, pkey1, ts1, true);
         assert_eq!(
             retrieved_res.err(),
             Some(CuckooAccessMethodError::KeyNotFound)
         );
 
         // Retrieve with ts2
-        let retrieved_res = page.get(key, pkey2, ts2);
+        let retrieved_res = page.get(key, pkey2, ts2, true);
         assert_eq!(
             retrieved_res.err(),
             Some(CuckooAccessMethodError::KeyNotFound)
@@ -1817,7 +1934,7 @@ mod tests {
     fn test_insert_and_delete_when_page_full() {
         // Fill the page to capacity and attempt to insert another entry
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Use fixed-length keys and pkeys
         let key = b"key_full_full"; // Length 12 bytes
@@ -1831,42 +1948,46 @@ mod tests {
 
         // Insert entries until the page is full
         for _ in 0..page_capacity {
-            page.insert(key, pkey, ts, val).unwrap();
+            page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
         }
 
         let before_delete_pg_sz = page.header().total_bytes_used();
         // Attempt to insert one more entry
-        let _result = page.delete(key, pkey, ts);
+        let slot_id = page.get_slot_id(key, pkey, ts).unwrap();
+        let del_result = page.delete_slot_at_id(slot_id);
+        // let _result = page.delete(key, pkey, ts);
 
         assert_eq!(
             space_per_entry as u32,
             before_delete_pg_sz - page.header().total_bytes_used()
         );
-        assert!(page.insert(key, pkey, ts, val).is_ok());
+        assert!(page.insert(key, pkey, ts, Timestamp::MAX, val).is_ok());
     }
 
     // -------------UPDATE---------------
     #[test]
     fn test_update_with_smaller_value() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
         let initial_value = vec![10, 20, 30, 40];
-        page.insert(&key, &pkey, ts, &initial_value)
+        page.insert(&key, &pkey, ts, Timestamp::MAX, &initial_value)
             .expect("Failed to insert key-value pair");
 
         // Update the value with a smaller value
         let new_value = vec![50, 60];
-        page.update(&key, &pkey, ts, &new_value)
-            .expect("Failed to update value");
+        let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
+        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts);
+        // page.update(&key, &pkey, ts, &new_value)
+        //     .expect("Failed to update value");
 
         // Retrieve the updated value
         let updated_value = page
-            .get(&key, &pkey, ts)
+            .get(&key, &pkey, ts, true)
             .expect("Failed to get updated value");
 
         assert_eq!(updated_value, &[50, 60]);
@@ -1875,24 +1996,26 @@ mod tests {
     #[test]
     fn test_update_with_larger_value() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
         let initial_value = vec![10, 20];
-        page.insert(&key, &pkey, ts, &initial_value)
+        page.insert(&key, &pkey, ts, Timestamp::MAX, &initial_value)
             .expect("Failed to insert key-value pair");
 
         // Update the value with a larger value
         let new_value = vec![30, 40, 50, 60];
-        page.update(&key, &pkey, ts, &new_value)
-            .expect("Failed to update value");
+        let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
+        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts);
+        // page.update(&key, &pkey, ts, &new_value)
+        //     .expect("Failed to update value");
 
         // Retrieve the updated value
         let updated_value = page
-            .get(&key, &pkey, ts)
+            .get(&key, &pkey, ts, true)
             .expect("Failed to get updated value");
 
         // Assert that the value has been updated correctly
@@ -1902,24 +2025,26 @@ mod tests {
     #[test]
     fn test_update_with_equal_size_value() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
         let initial_value = vec![10, 20, 30];
-        page.insert(&key, &pkey, ts, &initial_value)
+        page.insert(&key, &pkey, ts, Timestamp::MAX, &initial_value)
             .expect("Failed to insert key-value pair");
 
         // Update the value with a value of equal size
         let new_value = vec![40, 50, 60];
-        page.update(&key, &pkey, ts, &new_value)
-            .expect("Failed to update value");
+        let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
+        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts);
+        // page.update(&key, &pkey, ts, &new_value)
+        //     .expect("Failed to update value");
 
         // Retrieve the updated value
         let updated_value = page
-            .get(&key, &pkey, ts)
+            .get(&key, &pkey, ts, true)
             .expect("Failed to get updated value");
 
         // Assert that the value has been updated correctly
@@ -1927,28 +2052,30 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_update_with_large_value_out_of_space() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
         let initial_value = vec![10, 20];
-        page.insert(&key, &pkey, ts, &initial_value)
+        page.insert(&key, &pkey, ts, Timestamp::MAX, &initial_value)
             .expect("Failed to insert key-value pair");
 
         // Attempt to update with a value that is too large
         let large_value = vec![0; AVAILABLE_PAGE_SIZE]; // Value larger than the remaining space
-        let result = page.update(&key, &pkey, ts, &large_value);
+        let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
+        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &large_value, ts);
+        assert_eq!(update_result.err(), Some(CuckooAccessMethodError::OutOfSpace))
+        // let result = page.update(&key, &pkey, ts, &large_value);
     }
 
     #[test]
     fn test_insert_multiple_and_update_multiple() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -1967,7 +2094,7 @@ mod tests {
         ];
 
         for (key, value) in keys.iter().zip(values.iter()) {
-            page.insert(key, &pkey, ts, value)
+            page.insert(key, &pkey, ts, Timestamp::MAX, value)
                 .expect("Failed to insert key-value pair");
         }
 
@@ -1980,14 +2107,16 @@ mod tests {
         ];
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
-            page.update(key, &pkey, ts, new_value)
-                .expect("Failed to update value");
+            let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
+            let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, new_value, ts).expect("Failed to update value");
+            // page.update(key, &pkey, ts, new_value)
+            //     .expect("Failed to update value");
         }
 
         // Retrieve the updated values and verify correctness
         for (key, expected_value) in keys.iter().zip(new_values.iter()) {
             let retrieved_value = page
-                .get(key, &pkey, ts)
+                .get(key, &pkey, ts, true)
                 .expect("Failed to get updated value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
@@ -1996,7 +2125,7 @@ mod tests {
     #[test]
     fn test_insert_multiple_update_mixed_sizes_and_get() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert multiple key-value pairs
         let keys = vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
@@ -2005,7 +2134,7 @@ mod tests {
         let values = vec![vec![10, 20, 30], vec![40, 50, 60], vec![70, 80, 90]];
 
         for (key, value) in keys.iter().zip(values.iter()) {
-            page.insert(key, &pkey, ts, value)
+            page.insert(key, &pkey, ts, Timestamp::MAX, value)
                 .expect("Failed to insert key-value pair");
         }
 
@@ -2017,8 +2146,10 @@ mod tests {
         ];
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
-            page.update(key, &pkey, ts, new_value)
-                .expect("Failed to update value");
+            let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
+            let update_result = page.check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts).expect("Failed to update value");
+            // page.update(key, &pkey, ts, new_value)
+            //     .expect("Failed to update value");
         }
 
         // Retrieve the updated values and verify correctness
@@ -2030,7 +2161,7 @@ mod tests {
 
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {
             let retrieved_value = page
-                .get(key, &pkey, ts)
+                .get(key, &pkey, ts, true)
                 .expect("Failed to get updated value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
@@ -2039,7 +2170,7 @@ mod tests {
     #[test]
     fn test_insert_update_and_get_mixed() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2048,7 +2179,7 @@ mod tests {
         let initial_values = vec![vec![11, 12, 13], vec![21, 22, 23]];
 
         for (key, value) in initial_keys.iter().zip(initial_values.iter()) {
-            page.insert(key, &pkey, ts, value)
+            page.insert(key, &pkey, ts, Timestamp::MAX, value)
                 .expect("Failed to insert key-value pair");
         }
 
@@ -2060,14 +2191,16 @@ mod tests {
         ];
 
         for (key, new_value) in keys_to_update.iter().zip(new_values.iter()) {
-            page.update(key, &pkey, ts, new_value)
-                .expect("Failed to update value");
+            let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
+            let update_result = page.check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts).expect("Failed to update value");
+            // page.update(key, &pkey, ts, new_value)
+            //     .expect("Failed to update value");
         }
 
         // Insert a new key-value pair
         let new_key = vec![3, 3, 3];
         let new_value = vec![31, 32, 33];
-        page.insert(&new_key, &pkey, ts, &new_value)
+        page.insert(&new_key, &pkey, ts, Timestamp::MAX, &new_value)
             .expect("Failed to insert new key-value pair");
 
         // Verify updates and new insertions
@@ -2080,7 +2213,7 @@ mod tests {
         let all_keys = vec![vec![1, 1, 1], vec![2, 2, 2], vec![3, 3, 3]];
 
         for (key, expected_value) in all_keys.iter().zip(retrieved_values.iter()) {
-            let retrieved_value = page.get(key, &pkey, ts).expect("Failed to get value");
+            let retrieved_value = page.get(key, &pkey, ts, true).expect("Failed to get value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
     }
@@ -2088,7 +2221,7 @@ mod tests {
     #[test]
     fn test_update_large_keys() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2097,28 +2230,32 @@ mod tests {
         let initial_value = vec![101, 102, 103];
 
         // Insert a key-value pair
-        page.insert(&key, &pkey, ts, &initial_value)
+        page.insert(&key, &pkey, ts, Timestamp::MAX, &initial_value)
             .expect("Failed to insert key-value pair");
 
         // Update the value with a larger value
         let new_value = vec![104, 105, 106, 107, 108];
-        page.update(&key, &pkey, ts, &new_value)
-            .expect("Failed to update value");
+        let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
+        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts).expect("Failed to update value");
+        // page.update(&key, &pkey, ts, &new_value)
+        //     .expect("Failed to update value");
 
         // Retrieve the updated value and verify correctness
         let retrieved_value = page
-            .get(&key, &pkey, ts)
+            .get(&key, &pkey, ts, true)
             .expect("Failed to get updated value");
         assert_eq!(retrieved_value, new_value.as_slice());
 
         // Update the value with a smaller value
         let smaller_value = vec![109, 110];
-        page.update(&key, &pkey, ts, &smaller_value)
-            .expect("Failed to update value");
+        let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
+        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &smaller_value, ts).expect("Failed to update value");
+        // page.update(&key, &pkey, ts, &smaller_value)
+        //     .expect("Failed to update value");
 
         // Retrieve the updated value
         let retrieved_value = page
-            .get(&key, &pkey, ts)
+            .get(&key, &pkey, ts, true)
             .expect("Failed to get updated value");
         assert_eq!(retrieved_value, smaller_value.as_slice());
     }
@@ -2126,7 +2263,7 @@ mod tests {
     #[test]
     fn test_insert_update_and_get_with_large_keys() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooRecentPage>::init(&mut page);
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2143,7 +2280,7 @@ mod tests {
         ];
 
         for (key, value) in keys.iter().zip(initial_values.iter()) {
-            page.insert(key, &pkey, ts, value)
+            page.insert(key, &pkey, ts, Timestamp::MAX, value)
                 .expect("Failed to insert key-value pair");
         }
 
@@ -2155,8 +2292,10 @@ mod tests {
         ];
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
-            page.update(key, &pkey, ts, new_value)
-                .expect("Failed to update value");
+            let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
+            let update_result = page.check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts).expect("Failed to update value");
+            // page.update(key, &pkey, ts, new_value)
+            //     .expect("Failed to update value");
         }
 
         // Retrieve and verify all values
@@ -2167,8 +2306,9 @@ mod tests {
         ];
 
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {
-            let retrieved_value = page.get(key, &pkey, ts).expect("Failed to get value");
+            let retrieved_value = page.get(key, &pkey, ts,true).expect("Failed to get value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
     }
 }
+
