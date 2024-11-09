@@ -1,9 +1,11 @@
 mod header {
-    use crate::page::AVAILABLE_PAGE_SIZE;
+    use crate::page::{AVAILABLE_PAGE_SIZE, PAGE_SIZE};
 
     use super::SLOT_SIZE;
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
-
+    const BASE_HEADER_SIZE: usize = PAGE_SIZE - AVAILABLE_PAGE_SIZE;
+    const _: () = assert!(SLOT_SIZE >= PAGE_HEADER_SIZE + BASE_HEADER_SIZE);
+    pub const PAGE_HEADER_SIZE_ALIGNED: usize = SLOT_SIZE - BASE_HEADER_SIZE;
     #[derive(Debug)]
     pub struct Header {
         total_bytes_used: u32,
@@ -64,7 +66,7 @@ mod header {
 
         pub fn new() -> Self {
             Self {
-                total_bytes_used: PAGE_HEADER_SIZE as u32,
+                total_bytes_used: PAGE_HEADER_SIZE_ALIGNED as u32,
                 slot_count: 0,
                 rec_start_offset: AVAILABLE_PAGE_SIZE as u32,
             }
@@ -115,14 +117,19 @@ mod header {
         }
 
         pub fn slot_end_offset(&self) -> usize {
-            (self.slot_count() as u32 * SLOT_SIZE as u32 + PAGE_HEADER_SIZE as u32) as usize
+            (self.slot_count() as u32 * SLOT_SIZE as u32 + PAGE_HEADER_SIZE_ALIGNED as u32) as usize
         }
     }
 }
 
+use core::slice;
+use std::cmp::{self, Ordering};
+
 use header::*;
 
 mod slot {
+    use std::cmp;
+
     use crate::mvcc_index::Timestamp;
 
     pub const DELETE_MARKER_IN_VAL_SIZE: u32 = u32::MAX;
@@ -130,7 +137,7 @@ mod slot {
     pub const SLOT_KEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
     pub const SLOT_PKEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Default)]
     pub struct Slot {
         // hash key for join
         key_size: u32,
@@ -552,6 +559,57 @@ pub trait MvccHashJoinCuckooPage {
 /* ------------------helper function------------------------ */
     fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
     fn read_bytes(&self, offset: usize, length:usize) -> &[u8];
+    fn get_slot_slice(&self, slot_id: u32) -> &[Slot];
+    fn set_slot(&mut self, slot_id: u32, slot: &Slot);
+    fn get_slot(&self, slot_id: u32) -> Option<Slot>;
+    // fn get_slot(&self, slot_id: u32) -> Slot;
+    /// find the first slot idx >= given (key, pkey, ts) \
+    /// if no slot >=, THEN return None
+    fn find_slot_idx(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<usize> {
+        log_warn!("[8.5]");
+        let slots_slice = self.get_slot_slice(0);
+
+        let cmp_seek_key = (key, pkey, ts);
+
+        // seek:(key, pkey, ts) , slot: (key, pkey, end_ts)
+        let cmp_slot_key = |seek_key: &(&[u8],&[u8],Timestamp), slot_key: &(&[u8],&[u8],Timestamp)| -> cmp::Ordering {
+            if slot_key.0 == seek_key.0 {
+                if slot_key.1 == seek_key.1 {
+                    if slot_key.2 <= seek_key.2 {
+                        return Ordering::Less;
+                    } else {
+                        return Ordering::Greater;
+                    }
+                } else {
+                    return slot_key.1.cmp(&seek_key.1);
+                }
+            } else {
+                return slot_key.0.cmp(&seek_key.0);
+            }
+        };
+
+        let slot_idx = slots_slice.binary_search_by(|slot| {
+            // key > pkey > ts
+            let (slot_key, slot_pkey, _slot_val,  _slot_start_ts, slot_end_ts) = self.get_key_pkey_val_ts_with_slot(&slot);
+            let slot_key = (&slot_key[..], &slot_pkey[..], slot_end_ts);
+            cmp_slot_key(&cmp_seek_key, &slot_key)
+        });
+        assert!(slot_idx.is_err());
+        let slot_idx = slot_idx.err().unwrap();
+
+        if slot_idx >= slots_slice.len() {
+            return None;
+        }
+        Some(slot_idx)
+        // let slot = self.slot(slot_idx as u32).unwrap();
+        // let (slot_key, slot_pkey, slot_val,  slot_start_ts, slot_end_ts) = self.get_key_pkey_val_ts_with_slot(&slot);
+        // if slot_key == key && slot_pkey == pkey && ts >= slot_start_ts && ts < slot_end_ts {
+        //     Some(slot_idx)
+        // } else {
+        //     None
+        // }
+
+    }
     fn header(&self) -> Header {
         let header_bytes = self.read_bytes(0, PAGE_HEADER_SIZE);
         Header::from_bytes(header_bytes).unwrap()
@@ -568,7 +626,7 @@ pub trait MvccHashJoinCuckooPage {
     }
     fn free_space_without_compaction(&self) -> u32 {
         let header = self.header();
-        header.rec_start_offset() - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE as u32)
+        header.rec_start_offset() - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE_ALIGNED as u32)
     }
     fn free_space_with_compaction(&self) -> u32 {
         let header = self.header();
@@ -581,30 +639,20 @@ pub trait MvccHashJoinCuckooPage {
     }
 
     fn slot_offset(&self, slot_id: u32) -> u32 {
-        PAGE_HEADER_SIZE as u32 + slot_id as u32 * SLOT_SIZE as u32
+        PAGE_HEADER_SIZE_ALIGNED as u32 + slot_id as u32 * SLOT_SIZE as u32
     }
-    fn set_slot(&mut self, slot_id: u32, slot: &Slot) {
-        let slot_offset = self.slot_offset(slot_id);
-        self.write_bytes(slot_offset as usize, &slot.to_bytes());
-    }
+    // fn set_slot(&mut self, slot_id: u32, slot: &Slot) {
+    //     let slot_offset = self.slot_offset(slot_id);
+    //     self.write_bytes(slot_offset as usize, &slot.to_bytes());
+    // }
 
     fn write_record(&mut self, offset: u32, record: &Record) {
         let bytes = record.to_bytes();
         self.write_bytes(offset as usize, &bytes);
     }
 
-    fn slot(&self, slot_id: u32) -> Option<Slot> {
-        if slot_id < self.slot_count() {
-            let offset = self.slot_offset(slot_id) as usize;
-            let slot_bytes = self.read_bytes(offset, SLOT_SIZE);
-            Some(Slot::from_bytes(&slot_bytes).unwrap())
-        } else {
-            None
-        }
-    }
-
     fn get_value_with_slot_id(&self, slot_id: u32) -> Vec<u8> {
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        let slot = self.get_slot(slot_id).expect("Invalid slot_id");
         self.get_value_with_slot(&slot)
     }
 
@@ -621,7 +669,7 @@ pub trait MvccHashJoinCuckooPage {
     }
 
     fn get_key_pkey_val_with_slot_id(&self, slot_id: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        let slot = self.get_slot(slot_id).expect("Invalid slot_id");
         self.get_key_pkey_val_with_slot(&slot)
     }
 
@@ -652,7 +700,7 @@ pub trait MvccHashJoinCuckooPage {
         &self,
         slot_id: u32,
     ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Timestamp, Timestamp) {
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        let slot = self.get_slot(slot_id).expect("Invalid slot_id");
         self.get_key_pkey_val_ts_with_slot(&slot)
     }
 
@@ -724,7 +772,6 @@ impl MvccHashJoinCuckooPage for Page {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
             return Err(CuckooAccessMethodError::OutOfSpace);
         }
-
         if space_need > self.free_space_without_compaction() {
             // DO COMPACT
             let want_free_with_compaction_space = self.free_space_with_compaction();
@@ -734,31 +781,41 @@ impl MvccHashJoinCuckooPage for Page {
                 actual_free_with_compaction_space
             );
         }
-
         let mut header = self.header();
         let record_size = space_need - SLOT_SIZE as u32;
         let rec_offset = header.rec_start_offset() - record_size;
-        let slot_id = self.slot_count();
-        let slot_offset = self.slot_offset(self.slot_count());
 
+        let slot_offset = self.slot_offset(self.slot_count());
         if rec_offset < slot_offset + SLOT_SIZE as u32 {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
             return Err(CuckooAccessMethodError::OutOfSpace);
         }
 
+        let slot_count = self.slot_count();
+        let slot_id = {
+            if let Some(idx) = self.find_slot_idx(key, pkey, start_ts) {
+                idx as u32
+            } else {
+                slot_count
+            }
+        };
+
+        let old_suffix_slot_offset = self.slot_offset(slot_id) as usize;
+        self.copy_within(old_suffix_slot_offset..slot_offset as usize, old_suffix_slot_offset + SLOT_SIZE);
         let slot = Slot::new(key, pkey, start_ts, end_ts, val, rec_offset as usize);
         let record = Record::new(key, pkey, val);
 
         self.set_slot(slot_id, &slot);
         self.write_record(rec_offset, &record);
-
         header.increment_slot_count();
         header.increase_total_bytes_used(space_need);
         header.set_rec_start_offset(rec_offset);
         self.set_header(&header);
+        log_warn!("[7] insert key{:?} at slot id {:?} slot count{:?}", key, slot_id, self.slot_count());
 
         Ok(())
     }
+
     fn get(
         &self,
         key: &[u8],
@@ -768,11 +825,9 @@ impl MvccHashJoinCuckooPage for Page {
     ) -> Result<Vec<u8>, CuckooAccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
-        let mut slot_offset = PAGE_HEADER_SIZE;
 
-        for _ in 0..slot_count {
-            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-            let slot = Slot::from_bytes(slot_bytes).unwrap();
+        for slot_id in 0..slot_count {
+            let slot = self.get_slot(slot_id).unwrap();
             if slot.key_size() == key.len() as u32
                 && slot.pkey_size() == pkey.len() as u32
                 && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
@@ -805,7 +860,6 @@ impl MvccHashJoinCuckooPage for Page {
                         // only find once
                         if ts >= slot.start_ts() 
                         {
-                            log_warn!("ts: {:?}, slot_start_ts: {:?}", ts, slot.start_ts());
                             if !slot.is_mark_deleted()  {
                                 // find and not deleted
                                 return Ok(record.val().to_vec())
@@ -836,7 +890,6 @@ impl MvccHashJoinCuckooPage for Page {
                     }
                 }
             }
-            slot_offset += SLOT_SIZE;
         }
         Err(CuckooAccessMethodError::KeyNotFound)
     }
@@ -852,12 +905,10 @@ impl MvccHashJoinCuckooPage for Page {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
-        let mut slot_offset = PAGE_HEADER_SIZE;
 
         let mut ret = vec![];
-        for _ in 0..slot_count {
-            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-            let slot = Slot::from_bytes(slot_bytes).unwrap();
+        for slot_id in 0..slot_count {
+            let slot = self.get_slot(slot_id).unwrap();
             if slot.key_size() == key.len() as u32
                 && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
             {
@@ -892,21 +943,19 @@ impl MvccHashJoinCuckooPage for Page {
                     }
                 }
             }
-            slot_offset += SLOT_SIZE;
         }
         return Ok(ret);
     }
 
     /// delete slot at specific id \
-    /// used in recent::delete() and both::re-hash \
-    /// and history::garbage_collect() \
+    /// used in both::re-hash and history::garbage_collect() \
     /// returns the old ts and old val
     fn delete_slot_at_id(
         &mut self,
         slot_id: u32,
     ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
         // check if rec_start_offset should change
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        let slot = self.get_slot(slot_id).expect("Invalid slot_id");
 
         let old_ts = slot.start_ts();
         let old_val = self.get_value_with_slot(&slot);
@@ -955,7 +1004,7 @@ impl MvccHashJoinCuckooPage for Page {
         end_ts: Timestamp,
     ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
         // check if rec_start_offset should change
-        let mut slot = self.slot(slot_id).expect("Invalid slot_id");
+        let mut slot = self.get_slot(slot_id).expect("Invalid slot_id");
 
         let old_ts = slot.start_ts();
         let old_val = self.get_value_with_slot(&slot);
@@ -1000,11 +1049,9 @@ impl MvccHashJoinCuckooPage for Page {
     ) -> Result<u32, CuckooAccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
-        let mut slot_offset = PAGE_HEADER_SIZE;
 
         for slot_idx in 0..slot_count {
-            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-            let slot = Slot::from_bytes(slot_bytes).unwrap();
+            let slot = self.get_slot(slot_idx).unwrap();
             if slot.key_size() == key.len() as u32
                 && slot.pkey_size() == pkey.len() as u32
                 && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
@@ -1038,7 +1085,6 @@ impl MvccHashJoinCuckooPage for Page {
                     }
                 }
             }
-            slot_offset += SLOT_SIZE;
         }
         Err(CuckooAccessMethodError::KeyNotFound)
     }
@@ -1053,12 +1099,11 @@ impl MvccHashJoinCuckooPage for Page {
     ) -> Result<u32, CuckooAccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
-        let mut slot_offset = PAGE_HEADER_SIZE;
-        log_warn!("enter get_slot_id");
+        log_warn!("enter get_slot_id slot count: {:?}", header.slot_count());
 
         for slot_idx in 0..slot_count {
-            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-            let slot = Slot::from_bytes(slot_bytes).unwrap();
+            let slot = self.get_slot(slot_idx).unwrap();
+            log_warn!("check slot_id: {:?} slot{:?}", slot_idx, slot);
             if slot.key_size() == key.len() as u32
                 && slot.pkey_size() == pkey.len() as u32
                 && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
@@ -1100,7 +1145,6 @@ impl MvccHashJoinCuckooPage for Page {
                     // }
                 }
             }
-            slot_offset += SLOT_SIZE;
         }
         Err(CuckooAccessMethodError::KeyNotFound)
     }
@@ -1120,7 +1164,7 @@ impl MvccHashJoinCuckooPage for Page {
     ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
         let new_rec_size = Self::space_need(key, pkey, val) - SLOT_SIZE as u32;
 
-        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        let slot = self.get_slot(slot_id).expect("Invalid slot_id");
         let old_val = self.get_value_with_slot(&slot);
         let old_ts = slot.start_ts();
         let old_record_offset = slot.offset();
@@ -1142,6 +1186,7 @@ impl MvccHashJoinCuckooPage for Page {
             {
                 // log_warn!("new rec size: {:?}, old: {:?}", new_rec_size, old_rec_size);
                 // delete old record and compaction
+                
                 let dummy_slot = Slot::new(b"", b"", 0, 0, b"", old_record_offset as usize);
                 self.set_slot(slot_id, &dummy_slot);
                 let want_free_space = self.free_space_with_compaction() + old_rec_size;
@@ -1225,13 +1270,10 @@ impl MvccHashJoinCuckooPage for Page {
             // (slot, slot_rec_offset, slot_idx)
             let mut rec_offsets = vec![];
 
-            let mut slot_offset = PAGE_HEADER_SIZE;
-            for i in 0..self.slot_count() {
-                let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
-                let slot = Slot::from_bytes(slot_bytes).unwrap();
+            for slot_id in 0..self.slot_count() {
+                let slot = self.get_slot(slot_id).unwrap();
                 let rec_offset = slot.offset();
-                rec_offsets.push((slot, rec_offset, i));
-                slot_offset += SLOT_SIZE as usize;
+                rec_offsets.push((slot, rec_offset, slot_id));
             }
 
             rec_offsets.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1273,7 +1315,7 @@ impl MvccHashJoinCuckooPage for Page {
         let slot_count = self.slot_count();
 
         for slot_id in 0..slot_count {
-            let slot = self.slot(slot_id).unwrap();
+            let slot = self.get_slot(slot_id).unwrap();
             if slot.end_ts() <= safe_ts {
                 // delete slot
                 self.delete_slot_at_id(slot_id).unwrap();
@@ -1309,13 +1351,25 @@ impl MvccHashJoinCuckooPage for Page {
         let mut header = self.header();
         let record_size = space_need - SLOT_SIZE as u32;
         let rec_offset = header.rec_start_offset() - record_size;
-        let slot_id = self.slot_count();
+        // let slot_id = self.slot_count();
         let slot_offset = self.slot_offset(self.slot_count());
 
         if rec_offset < slot_offset + SLOT_SIZE as u32 {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
             return Err(CuckooAccessMethodError::OutOfSpace);
         }
+
+        let slot_count = self.slot_count();
+        let slot_id = {
+            if let Some(idx) = self.find_slot_idx(key, pkey, start_ts) {
+                idx as u32
+            } else {
+                slot_count
+            }
+        };
+
+        let old_suffix_slot_offset = self.slot_offset(slot_id) as usize;
+        self.copy_within(old_suffix_slot_offset..slot_offset as usize, old_suffix_slot_offset + SLOT_SIZE);
 
         let mut slot = Slot::new(key, pkey, start_ts, end_ts, &vec![], rec_offset as usize);
         slot.mark_deleted();
@@ -1340,6 +1394,50 @@ impl MvccHashJoinCuckooPage for Page {
         &self[offset..offset + length]
     }
 
+    fn get_slot_slice(&self, slot_id: u32) -> &[Slot] {
+        let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
+        let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *const Slot;
+        assert!(slots_start_ptr.is_aligned());
+        let len = self.slot_count();
+        assert!(slot_id <= len, "sid {:?}, len{:?}", slot_id, len);
+        unsafe { slice::from_raw_parts(slots_start_ptr, (len - slot_id) as usize) }
+    }
+    
+    fn set_slot(&mut self, slot_id: u32, slot: &Slot) {
+        let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
+        let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *mut Slot;
+        let len = self.slot_count();
+        assert!(slot_id <= len);
+        unsafe {
+            std::ptr::copy_nonoverlapping(slot as *const Slot, slots_start_ptr, 1);
+        }
+    }
+
+    fn get_slot(&self, slot_id: u32) -> Option<Slot> {
+        // fn get_slot(&self, slot_id: u32) -> Slot {
+        //     let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
+        //     let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *mut Slot;
+        //     let len = self.slot_count();
+        //     assert!(slot_id <= len);
+        //     unsafe {
+        //         std::ptr::copy_nonoverlapping(slot as *const Slot, slots_start_ptr, 1);
+        //     }
+        // }
+        if slot_id < self.slot_count() {
+            let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
+            let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *const Slot;
+            let len = self.slot_count();
+            assert!(slot_id <= len);
+            let mut slot = Slot::default();
+            unsafe {
+                std::ptr::copy_nonoverlapping(slots_start_ptr,&mut slot as *mut Slot,  1);
+            }
+
+            Some(slot)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1435,11 +1533,13 @@ mod tests {
 
         let mut page = Page::new_empty();
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
-
+        log_warn!("[1]");
         // Insert entries
         for (key, pkey, ts, val) in &entries {
             page.insert(key, pkey, *ts, Timestamp::MAX, val).unwrap();
+            log_warn!("[2]");
         }
+
 
         // Retrieve and verify entries
         for (key, pkey, ts, val) in &entries {
@@ -1517,7 +1617,7 @@ mod tests {
         let ts: Timestamp = 1;
 
         let space_per_entry = Page::space_need(key, pkey, val) as usize;
-        let available_space = AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE;
+        let available_space = AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE_ALIGNED;
         let page_capacity = available_space / space_per_entry;
 
         // Insert entries until the page is full
@@ -1943,7 +2043,7 @@ mod tests {
         let ts: Timestamp = 1;
 
         let space_per_entry = Page::space_need(key, pkey, val) as usize;
-        let available_space = AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE;
+        let available_space = AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE_ALIGNED;
         let page_capacity = available_space / space_per_entry;
 
         // Insert entries until the page is full
@@ -2107,8 +2207,9 @@ mod tests {
         ];
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
+            log_warn!("update key {:?}", key);
             let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
-            let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, new_value, ts).expect("Failed to update value");
+            let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, new_value, ts + 1).expect("Failed to update value");
             // page.update(key, &pkey, ts, new_value)
             //     .expect("Failed to update value");
         }
@@ -2116,7 +2217,7 @@ mod tests {
         // Retrieve the updated values and verify correctness
         for (key, expected_value) in keys.iter().zip(new_values.iter()) {
             let retrieved_value = page
-                .get(key, &pkey, ts, true)
+                .get(key, &pkey, ts + 1, true)
                 .expect("Failed to get updated value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
@@ -2312,3 +2413,21 @@ mod tests {
     }
 }
 
+
+
+#[test]
+fn mugaunduo() {
+
+    fn get_slot_slice(selff: &[u8], slot_id: u32) -> &[Slot] {
+        let slots_start_offset_in_page = SLOT_SIZE + SLOT_SIZE * slot_id as usize;
+        let slots_start_ptr = &selff[slots_start_offset_in_page] as *const u8 as *const Slot;
+        let len = 1;
+        assert!(slot_id <= len, "sid {:?}, len{:?}", slot_id, len);
+        unsafe { slice::from_raw_parts(slots_start_ptr, (len - slot_id) as usize) }
+    }
+
+    let mut a = Vec::<u8>::with_capacity(100);
+    a.resize(100, 0);
+    let t = get_slot_slice(&a[..], 0);
+    println!("ts: {:?}", t[0].end_ts());
+}

@@ -134,7 +134,7 @@ impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
             let mut current_slot_id = self.current_slot_id;
             let mut ret = Option::<Self::Item>::None;
             '_scan_a_page: loop {
-                match <Page as MvccHashJoinCuckooPage>::slot(&*read_page, current_slot_id) {
+                match <Page as MvccHashJoinCuckooPage>::get_slot(&*read_page, current_slot_id) {
                     Some(slot) => {
                         let (slot_key, slot_pkey, slot_val, slot_start_ts, slot_end_ts) =
                             <Page as MvccHashJoinCuckooPage>::get_key_pkey_val_ts_with_slot(
