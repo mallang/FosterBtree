@@ -3,9 +3,9 @@ pub mod hashtable_mu;
 pub type Timestamp = u64;
 pub type TxId = u64; // Transaction ID
 
-use std::{error::Error, fmt::Debug, sync::Arc};
-use serde::{Deserialize, Serialize};
 use crate::bp::{ContainerKey, MemPool};
+use serde::{Deserialize, Serialize};
+use std::{error::Error, fmt::Debug, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxStatusType {

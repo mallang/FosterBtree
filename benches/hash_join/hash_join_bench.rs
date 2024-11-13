@@ -9,7 +9,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("Usage: {} <data_file> <ops_file> <expected_data_file>", args[0]);
+        eprintln!(
+            "Usage: {} <data_file> <ops_file> <expected_data_file>",
+            args[0]
+        );
         return Ok(());
     }
     let data_file = &args[1];
@@ -96,10 +99,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     for op in &ops {
         match op.op_type.as_str() {
             "insert" => {
-                hash_join_table.insert(op.key.clone(), op.pkey.clone(), op.ts, op.tx_id, op.value.clone())?;
+                hash_join_table.insert(
+                    op.key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
             }
             "update" => {
-                hash_join_table.update(op.key.clone(), op.pkey.clone(), op.ts, op.tx_id, op.value.clone())?;
+                hash_join_table.update(
+                    op.key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
             }
             "delete" => {
                 hash_join_table.delete(&op.key, &op.pkey, op.ts, op.tx_id)?;
@@ -137,7 +152,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // );
 
     // Perform consistency check between HashJoinTable and Rust HashMap
-    let is_consistent = check_consistency_between_hash_join_and_hash_map(&hash_join_table, &rust_hash_map)?;
+    let is_consistent =
+        check_consistency_between_hash_join_and_hash_map(&hash_join_table, &rust_hash_map)?;
     println!(
         "Consistency check between HashJoinTable and Rust HashMap: {}",
         if is_consistent { "PASSED" } else { "FAILED" }
@@ -237,7 +253,6 @@ fn read_expected_data_file(file_path: &str) -> io::Result<HashMap<(Vec<u8>, Vec<
     Ok(expected_data)
 }
 
-
 // Function to check consistency of HashJoinTable with expected data
 fn check_consistency_hash_join_table(
     hash_join_table: &HashJoinTable<impl MemPool>,
@@ -293,7 +308,6 @@ fn check_consistency_hash_join_table(
 
     Ok(is_consistent)
 }
-
 
 // Function to check consistency of Rust HashMap with expected data
 fn check_consistency_hash_map(
@@ -399,11 +413,13 @@ fn check_consistency_between_hash_join_and_hash_map(
     Ok(is_consistent)
 }
 
-
 // Function to convert byte arrays to strings safely
 fn bytes_to_string(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
-        Err(_) => bytes.iter().map(|b| format!("{:02X}", b)).collect::<String>(),
+        Err(_) => bytes
+            .iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<String>(),
     }
 }

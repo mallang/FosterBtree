@@ -454,7 +454,11 @@ mod record {
 }
 use record::*;
 
-use crate::{log_debug, log_warn, mvcc_index::Timestamp, page::{Page, AVAILABLE_PAGE_SIZE}};
+use crate::{
+    log_debug, log_warn,
+    mvcc_index::Timestamp,
+    page::{Page, AVAILABLE_PAGE_SIZE},
+};
 
 use super::mvcc_hash_join_cuckoo_common::CuckooAccessMethodError;
 
@@ -497,7 +501,7 @@ pub trait MvccHashJoinCuckooPage {
         ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError>;
 
-/* -----------------only recent------------------- */
+    /* -----------------only recent------------------- */
     /// calculate to find whether the record size is okay or not \
     /// if compaction is not enough -> OutOfSpace \
     /// ONLY RECENT
@@ -521,7 +525,6 @@ pub trait MvccHashJoinCuckooPage {
         ts: Timestamp,
     ) -> Result<u32, CuckooAccessMethodError>;
 
-    
     /// ONLY RECENT
     fn mark_delete_slot_at_id(
         &mut self,
@@ -536,22 +539,21 @@ pub trait MvccHashJoinCuckooPage {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<u32, CuckooAccessMethodError>;
- /* -----------------only history------------------- */
+    /* -----------------only history------------------- */
     /// ONLY HISTORY
     fn garbage_collect(&mut self, safe_ts: Timestamp);
     /// ONLY HISTORY
     fn insert_deleted(
-        &mut self, 
+        &mut self,
         key: &[u8],
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
     ) -> Result<(), CuckooAccessMethodError>;
 
-
-/* ------------------helper function------------------------ */
+    /* ------------------helper function------------------------ */
     fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
-    fn read_bytes(&self, offset: usize, length:usize) -> &[u8];
+    fn read_bytes(&self, offset: usize, length: usize) -> &[u8];
     fn header(&self) -> Header {
         let header_bytes = self.read_bytes(0, PAGE_HEADER_SIZE);
         Header::from_bytes(header_bytes).unwrap()
@@ -568,7 +570,8 @@ pub trait MvccHashJoinCuckooPage {
     }
     fn free_space_without_compaction(&self) -> u32 {
         let header = self.header();
-        header.rec_start_offset() - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE as u32)
+        header.rec_start_offset()
+            - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE as u32)
     }
     fn free_space_with_compaction(&self) -> u32 {
         let header = self.header();
@@ -800,27 +803,23 @@ impl MvccHashJoinCuckooPage for Page {
 
                 if full_key == key && full_pkey == pkey {
                     // check recent or history get
-                    if is_recent_get 
-                    {
+                    if is_recent_get {
                         // only find once
-                        if ts >= slot.start_ts() 
-                        {
+                        if ts >= slot.start_ts() {
                             log_warn!("ts: {:?}, slot_start_ts: {:?}", ts, slot.start_ts());
-                            if !slot.is_mark_deleted()  {
+                            if !slot.is_mark_deleted() {
                                 // find and not deleted
-                                return Ok(record.val().to_vec())
+                                return Ok(record.val().to_vec());
                             } else {
                                 // slot deleted
-                                return Err(CuckooAccessMethodError::KeyNotFound)
+                                return Err(CuckooAccessMethodError::KeyNotFound);
                             }
-                        } 
-                        else 
-                        {
+                        } else {
                             // find but mismatch ts
-                            return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+                            return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
                         }
-                    } 
-                    else  /* history get */
+                    } else
+                    /* history get */
                     {
                         // history get
                         if slot.start_ts() <= ts && ts < slot.end_ts() {
@@ -844,7 +843,7 @@ impl MvccHashJoinCuckooPage for Page {
     /// get all pair matching `key` and `ts` \
     /// return (pkey, val) \
     /// ignore deleted \
-    /// 
+    ///
     fn get_all(
         &self,
         key: &[u8],
@@ -883,11 +882,8 @@ impl MvccHashJoinCuckooPage for Page {
 
                 let val = record.val();
 
-                if full_key == key 
-                {
-                    if slot.start_ts() <= ts && ts < slot.end_ts() 
-                        && !slot.is_mark_deleted()    
-                    {
+                if full_key == key {
+                    if slot.start_ts() <= ts && ts < slot.end_ts() && !slot.is_mark_deleted() {
                         ret.push((full_pkey, val.to_vec()));
                     }
                 }
@@ -1086,13 +1082,13 @@ impl MvccHashJoinCuckooPage for Page {
 
                 if full_key == key && full_pkey == pkey {
                     if slot.is_mark_deleted() {
-                        return Err(CuckooAccessMethodError::KeyNotFound)
+                        return Err(CuckooAccessMethodError::KeyNotFound);
                     } else if ts < slot.start_ts() {
-                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
                     } else {
-                        return Ok(slot_idx)
+                        return Ok(slot_idx);
                     }
-                    // if slot.start_ts() <= ts 
+                    // if slot.start_ts() <= ts
                     //     && !slot.is_mark_deleted() {
                     //     return Ok(slot_idx);
                     // } else {
@@ -1158,7 +1154,7 @@ impl MvccHashJoinCuckooPage for Page {
         let new_rec_offset = {
             if new_rec_size <= old_rec_size || old_record_offset == self.rec_start_offset() {
                 // Case 1: New value size is smaller or equal (or) Case 2: Offset matches `rec_start_offset`
-               
+
                 // log_warn!(
                 //     "[case 1 PAGEID: {:?}]<OLD>, old_rec offset:{:?} rec start offset: {:?}",
                 //     self.get_id(),
@@ -1284,7 +1280,7 @@ impl MvccHashJoinCuckooPage for Page {
     /// when deleted is inserted again in recent table \
     /// insert deleted pair in history table
     fn insert_deleted(
-        &mut self, 
+        &mut self,
         key: &[u8],
         pkey: &[u8],
         start_ts: Timestamp,
@@ -1336,10 +1332,9 @@ impl MvccHashJoinCuckooPage for Page {
         self[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
-    fn read_bytes(&self, offset: usize, length:usize) -> &[u8] {
+    fn read_bytes(&self, offset: usize, length: usize) -> &[u8] {
         &self[offset..offset + length]
     }
-
 }
 
 #[cfg(test)]
@@ -1378,7 +1373,7 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts,Timestamp::MAX,  val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
         let retrieved_val = page.get(key, pkey, ts, true).unwrap();
@@ -1397,7 +1392,7 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts,Timestamp::MAX,  val).unwrap();
+        page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
         let retrieved_val = page.get(key, pkey, ts, true).unwrap();
@@ -1461,7 +1456,8 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, Timestamp::MAX, val).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val)
+            .unwrap();
 
         // Attempt to retrieve with earlier timestamp
         let result = page.get(key, pkey, ts_query, true);
@@ -1526,7 +1522,7 @@ mod tests {
         }
 
         // Attempt to insert one more entry
-        let result = page.insert(key, pkey, ts,Timestamp::MAX,  val);
+        let result = page.insert(key, pkey, ts, Timestamp::MAX, val);
         assert!(matches!(result, Err(CuckooAccessMethodError::OutOfSpace)));
     }
     #[test]
@@ -1542,19 +1538,22 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
+            .unwrap();
 
         // Update the entry
         let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
 
-        let (old_ts, old_val) = page.check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update).unwrap();
+        let (old_ts, old_val) = page
+            .check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update)
+            .unwrap();
 
         // Verify old timestamp and value
         assert_eq!(old_ts, ts_insert);
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update,true).unwrap();
+        let retrieved_val = page.get(key, pkey, ts_update, true).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -1571,20 +1570,22 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
+            .unwrap();
 
         // Update the entry
         let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
 
-        let (old_ts, old_val) = page.check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update).unwrap();
-
+        let (old_ts, old_val) = page
+            .check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update)
+            .unwrap();
 
         // Verify old timestamp and value
         assert_eq!(old_ts, ts_insert);
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update,true).unwrap();
+        let retrieved_val = page.get(key, pkey, ts_update, true).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -1601,12 +1602,15 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
+            .unwrap();
 
         // Update the entry
         let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
 
-        let (old_ts, old_val) = page.check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update).unwrap();
+        let (old_ts, old_val) = page
+            .check_and_update_at_slot_id(slot_id, key, pkey, val_update, ts_update)
+            .unwrap();
 
         // let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
 
@@ -1636,13 +1640,14 @@ mod tests {
             b"key_dummy",
             b"pkey_dummy",
             50,
-            Timestamp::MAX, 
+            Timestamp::MAX,
             &vec![b'b'; (AVAILABLE_PAGE_SIZE / 2) as usize],
         )
         .unwrap();
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
+            .unwrap();
 
         // Attempt to update the entry with a larger value
         let slot_id = page.get_slot_id(key, pkey, ts_update).unwrap();
@@ -1669,7 +1674,6 @@ mod tests {
         // let result = page.check_and_update_at_slot_id(slot_id, key, pkey, &val_update, ts_update);
 
         // let result = page.update(key, pkey, ts_update, val_update);
- 
     }
 
     #[test]
@@ -1685,11 +1689,15 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
+            .unwrap();
 
         // Attempt to update with an earlier timestamp
         let slot_id = page.get_slot_id(key, pkey, ts_update);
-        assert_eq!(slot_id.err(), Some(CuckooAccessMethodError::KeyFoundButInvalidTimestamp));
+        assert_eq!(
+            slot_id.err(),
+            Some(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+        );
         // let result = page.update(key, pkey, ts_update, val_update);
         // assert!(matches!(
         //     result,
@@ -1850,7 +1858,6 @@ mod tests {
             let del_result = page.delete_slot_at_id(slot_id);
             assert_eq!(del_result.unwrap().1, *val);
             // assert_eq!(page.delete(key, pkey, *ts).unwrap().1, *val);
-            
         }
 
         // Retrieve and verify entries
@@ -1876,7 +1883,8 @@ mod tests {
         <Page as MvccHashJoinCuckooPage>::init(&mut page);
 
         // Insert the entry
-        page.insert(key, pkey, ts_insert, Timestamp::MAX, val).unwrap();
+        page.insert(key, pkey, ts_insert, Timestamp::MAX, val)
+            .unwrap();
 
         // Delete the entry
         let slot_id = page.get_slot_id(key, pkey, ts_query);
@@ -2067,8 +2075,12 @@ mod tests {
         // Attempt to update with a value that is too large
         let large_value = vec![0; AVAILABLE_PAGE_SIZE]; // Value larger than the remaining space
         let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
-        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &large_value, ts);
-        assert_eq!(update_result.err(), Some(CuckooAccessMethodError::OutOfSpace))
+        let update_result =
+            page.check_and_update_at_slot_id(slot_id, &key, &pkey, &large_value, ts);
+        assert_eq!(
+            update_result.err(),
+            Some(CuckooAccessMethodError::OutOfSpace)
+        )
         // let result = page.update(&key, &pkey, ts, &large_value);
     }
 
@@ -2108,7 +2120,9 @@ mod tests {
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
             let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
-            let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, new_value, ts).expect("Failed to update value");
+            let update_result = page
+                .check_and_update_at_slot_id(slot_id, &key, &pkey, new_value, ts)
+                .expect("Failed to update value");
             // page.update(key, &pkey, ts, new_value)
             //     .expect("Failed to update value");
         }
@@ -2147,7 +2161,9 @@ mod tests {
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
             let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
-            let update_result = page.check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts).expect("Failed to update value");
+            let update_result = page
+                .check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts)
+                .expect("Failed to update value");
             // page.update(key, &pkey, ts, new_value)
             //     .expect("Failed to update value");
         }
@@ -2192,7 +2208,9 @@ mod tests {
 
         for (key, new_value) in keys_to_update.iter().zip(new_values.iter()) {
             let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
-            let update_result = page.check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts).expect("Failed to update value");
+            let update_result = page
+                .check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts)
+                .expect("Failed to update value");
             // page.update(key, &pkey, ts, new_value)
             //     .expect("Failed to update value");
         }
@@ -2236,7 +2254,9 @@ mod tests {
         // Update the value with a larger value
         let new_value = vec![104, 105, 106, 107, 108];
         let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
-        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts).expect("Failed to update value");
+        let update_result = page
+            .check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts)
+            .expect("Failed to update value");
         // page.update(&key, &pkey, ts, &new_value)
         //     .expect("Failed to update value");
 
@@ -2249,7 +2269,9 @@ mod tests {
         // Update the value with a smaller value
         let smaller_value = vec![109, 110];
         let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
-        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &smaller_value, ts).expect("Failed to update value");
+        let update_result = page
+            .check_and_update_at_slot_id(slot_id, &key, &pkey, &smaller_value, ts)
+            .expect("Failed to update value");
         // page.update(&key, &pkey, ts, &smaller_value)
         //     .expect("Failed to update value");
 
@@ -2293,7 +2315,9 @@ mod tests {
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
             let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
-            let update_result = page.check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts).expect("Failed to update value");
+            let update_result = page
+                .check_and_update_at_slot_id(slot_id, key, &pkey, new_value, ts)
+                .expect("Failed to update value");
             // page.update(key, &pkey, ts, new_value)
             //     .expect("Failed to update value");
         }
@@ -2306,9 +2330,8 @@ mod tests {
         ];
 
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {
-            let retrieved_value = page.get(key, &pkey, ts,true).expect("Failed to get value");
+            let retrieved_value = page.get(key, &pkey, ts, true).expect("Failed to get value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
     }
 }
-

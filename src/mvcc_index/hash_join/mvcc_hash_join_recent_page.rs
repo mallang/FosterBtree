@@ -1,7 +1,4 @@
-use super::{
-    Timestamp,
-    mvcc_hash_join::MvccEntry,
-};
+use super::{mvcc_hash_join::MvccEntry, Timestamp};
 use crate::{
     access_method::AccessMethodError,
     log_debug,
@@ -365,7 +362,7 @@ mod record {
         remain_key: Vec<u8>,
         remain_pkey: Vec<u8>,
         val: Vec<u8>,
-        pointer_to_history: (PageId, SlotId),
+        // pointer_to_history: (PageId, SlotId),
     }
 
     impl Record {
@@ -824,7 +821,9 @@ impl MvccHashJoinRecentPage for Page {
         let rec_offset = slot.offset() as usize;
         let rec_size = slot.val_size()
             + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-            + slot.pkey_size().saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+            + slot
+                .pkey_size()
+                .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
         let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
         let record = Record::from_bytes(
             record_bytes,

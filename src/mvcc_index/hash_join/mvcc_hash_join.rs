@@ -20,10 +20,8 @@ use super::{
     mvcc_hash_join_history_chain::{MvccHashJoinHistoryChain, MvccHashJoinHistoryChainScanner},
     mvcc_hash_join_history_page::MvccHashJoinHistoryPage,
     mvcc_hash_join_recent_chain::{MvccHashJoinRecentChain, MvccHashJoinRecentChainScanner},
-    mvcc_hash_join_recent_page::MvccHashJoinRecentPage, 
-    Timestamp, 
-    TxId, 
-    TxStatus,
+    mvcc_hash_join_recent_page::MvccHashJoinRecentPage,
+    Timestamp, TxId, TxStatus,
 };
 
 use rand::seq::index;
@@ -49,8 +47,7 @@ pub struct HashJoinTable<T: MemPool> {
         Arc<MvccHashJoinRecentChain<T>>,
         Arc<MvccHashJoinHistoryChain<T>>,
     )>,
-
-    tx_status: HashMap<TxId, TxStatus>,
+    // tx_status: HashMap<TxId, TxStatus>,
 }
 
 impl<T: MemPool> MvccIndex for HashJoinTable<T> {
@@ -504,7 +501,10 @@ impl<T: MemPool> Clone for HashJoinTable<T> {
             mem_pool: Arc::clone(&self.mem_pool),
             c_key: self.c_key,
             meta_page_id: self.meta_page_id,
-            meta_frame_id: AtomicU32::new(self.meta_frame_id.load(std::sync::atomic::Ordering::Acquire)),
+            meta_frame_id: AtomicU32::new(
+                self.meta_frame_id
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
             num_buckets: self.num_buckets,
             bucket_entries: self.bucket_entries.clone(),
         }
@@ -1270,15 +1270,32 @@ mod tests {
 
         // Insert entries
         let entries = vec![
-            (b"key1".to_vec(), b"pkey1".to_vec(), b"value1".to_vec(), 10u64),
-            (b"key2".to_vec(), b"pkey2".to_vec(), b"value2".to_vec(), 20u64),
-            (b"key3".to_vec(), b"pkey3".to_vec(), b"value3".to_vec(), 30u64),
+            (
+                b"key1".to_vec(),
+                b"pkey1".to_vec(),
+                b"value1".to_vec(),
+                10u64,
+            ),
+            (
+                b"key2".to_vec(),
+                b"pkey2".to_vec(),
+                b"value2".to_vec(),
+                20u64,
+            ),
+            (
+                b"key3".to_vec(),
+                b"pkey3".to_vec(),
+                b"value3".to_vec(),
+                30u64,
+            ),
         ];
 
         let tx_id = 1;
 
         for (key, pkey, value, ts) in &entries {
-            hash_table.insert(key.clone(), pkey.clone(), *ts, tx_id, value.clone()).unwrap();
+            hash_table
+                .insert(key.clone(), pkey.clone(), *ts, tx_id, value.clone())
+                .unwrap();
         }
 
         // Scan the table at timestamp after insertions
@@ -1287,7 +1304,12 @@ mod tests {
         let mut results: Vec<_> = scanner.collect();
 
         // Verify that all entries are returned
-        assert_eq!(results.len(), entries.len(), "Expected {} entries", entries.len());
+        assert_eq!(
+            results.len(),
+            entries.len(),
+            "Expected {} entries",
+            entries.len()
+        );
 
         // Create a map for easier verification
         let mut result_map = std::collections::HashMap::new();
@@ -1318,13 +1340,17 @@ mod tests {
         let ts_insert = 10u64;
         let tx_id = 1;
 
-        hash_table.insert(key.clone(), pkey.clone(), ts_insert, tx_id, value1.clone()).unwrap();
+        hash_table
+            .insert(key.clone(), pkey.clone(), ts_insert, tx_id, value1.clone())
+            .unwrap();
 
         // Update the entry
         let value2 = b"value2".to_vec();
         let ts_update = 20u64;
 
-        hash_table.update(key.clone(), pkey.clone(), ts_update, tx_id, value2.clone()).unwrap();
+        hash_table
+            .update(key.clone(), pkey.clone(), ts_update, tx_id, value2.clone())
+            .unwrap();
 
         // Scan at timestamp after update
         let scan_ts = 30u64;
@@ -1372,7 +1398,9 @@ mod tests {
         let ts_insert = 10u64;
         let tx_id = 1;
 
-        hash_table.insert(key.clone(), pkey.clone(), ts_insert, tx_id, value.clone()).unwrap();
+        hash_table
+            .insert(key.clone(), pkey.clone(), ts_insert, tx_id, value.clone())
+            .unwrap();
 
         // Delete the entry
         let ts_delete = 20u64;
@@ -1413,16 +1441,28 @@ mod tests {
         // Insert entries
         let entries = vec![
             // Entry that will be updated
-            (b"key1".to_vec(), b"pkey1".to_vec(), b"value1".to_vec(), 10u64),
+            (
+                b"key1".to_vec(),
+                b"pkey1".to_vec(),
+                b"value1".to_vec(),
+                10u64,
+            ),
             // Entry that will remain in recent chain
-            (b"key2".to_vec(), b"pkey2".to_vec(), b"value2".to_vec(), 15u64),
+            (
+                b"key2".to_vec(),
+                b"pkey2".to_vec(),
+                b"value2".to_vec(),
+                15u64,
+            ),
         ];
 
         let tx_id = 1;
 
         // Insert entries
         for (key, pkey, value, ts) in &entries {
-            hash_table.insert(key.clone(), pkey.clone(), *ts, tx_id, value.clone()).unwrap();
+            hash_table
+                .insert(key.clone(), pkey.clone(), *ts, tx_id, value.clone())
+                .unwrap();
         }
 
         // Update one entry
@@ -1431,7 +1471,15 @@ mod tests {
         let value_updated = b"value1_updated".to_vec();
         let ts_update = 20u64;
 
-        hash_table.update(key_to_update.clone(), pkey_to_update.clone(), ts_update, tx_id, value_updated.clone()).unwrap();
+        hash_table
+            .update(
+                key_to_update.clone(),
+                pkey_to_update.clone(),
+                ts_update,
+                tx_id,
+                value_updated.clone(),
+            )
+            .unwrap();
 
         // Scan at timestamp after update
         let scan_ts = 25u64;
@@ -1448,7 +1496,9 @@ mod tests {
         }
 
         // Check updated entry
-        let entry = result_map.get(&(key_to_update.clone(), pkey_to_update.clone())).unwrap();
+        let entry = result_map
+            .get(&(key_to_update.clone(), pkey_to_update.clone()))
+            .unwrap();
         assert_eq!(entry.value, value_updated);
         assert_eq!(entry.start_ts, ts_update);
         assert_eq!(entry.end_ts, u64::MAX);
@@ -1458,7 +1508,9 @@ mod tests {
         let pkey_other = b"pkey2".to_vec();
         let value_other = b"value2".to_vec();
 
-        let entry = result_map.get(&(key_other.clone(), pkey_other.clone())).unwrap();
+        let entry = result_map
+            .get(&(key_other.clone(), pkey_other.clone()))
+            .unwrap();
         assert_eq!(entry.value, value_other);
         assert_eq!(entry.start_ts, 15u64);
         assert_eq!(entry.end_ts, u64::MAX);
@@ -1497,18 +1549,24 @@ mod tests {
         let value1 = b"value1".to_vec();
         let ts_insert = 10u64;
 
-        hash_table.insert(key.clone(), pkey.clone(), ts_insert, tx_id, value1.clone()).unwrap();
+        hash_table
+            .insert(key.clone(), pkey.clone(), ts_insert, tx_id, value1.clone())
+            .unwrap();
 
         // Update the entry multiple times
         let value2 = b"value2".to_vec();
         let ts_update1 = 20u64;
 
-        hash_table.update(key.clone(), pkey.clone(), ts_update1, tx_id, value2.clone()).unwrap();
+        hash_table
+            .update(key.clone(), pkey.clone(), ts_update1, tx_id, value2.clone())
+            .unwrap();
 
         let value3 = b"value3".to_vec();
         let ts_update2 = 30u64;
 
-        hash_table.update(key.clone(), pkey.clone(), ts_update2, tx_id, value3.clone()).unwrap();
+        hash_table
+            .update(key.clone(), pkey.clone(), ts_update2, tx_id, value3.clone())
+            .unwrap();
 
         // Scan at timestamp after updates
         let scan_ts = 40u64;
@@ -1525,5 +1583,4 @@ mod tests {
         assert_eq!(entry.start_ts, ts_update2);
         assert_eq!(entry.end_ts, u64::MAX);
     }
-
 }

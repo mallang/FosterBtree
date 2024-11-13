@@ -293,8 +293,14 @@ impl<T: MemPool> MvccHashJoinHistoryChain<T> {
         }
     }
 
-    pub fn scan(&self, ts: Timestamp) -> Result<MvccHashJoinHistoryChainScanner<T>, AccessMethodError> {
-        Ok(MvccHashJoinHistoryChainScanner::new(Arc::new(self.clone()), ts))
+    pub fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<MvccHashJoinHistoryChainScanner<T>, AccessMethodError> {
+        Ok(MvccHashJoinHistoryChainScanner::new(
+            Arc::new(self.clone()),
+            ts,
+        ))
     }
 }
 
@@ -331,7 +337,8 @@ impl<T: MemPool> MvccHashJoinHistoryChainScanner<T> {
 
     fn initialize(&mut self) {
         let first_page = self.chain.first_page();
-        let first_page = unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(first_page) };
+        let first_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(first_page) };
         self.current_page = Some(first_page);
         self.current_slot_id = 0;
     }
@@ -354,11 +361,18 @@ impl<T: MemPool> Iterator for MvccHashJoinHistoryChainScanner<T> {
             let page_ref = &**page;
 
             if self.current_slot_id < MvccHashJoinHistoryPage::slot_count(page_ref) {
-                let entry = MvccHashJoinHistoryPage::get_entry_at_slot(page_ref, self.current_slot_id);
+                let entry =
+                    MvccHashJoinHistoryPage::get_entry_at_slot(page_ref, self.current_slot_id);
                 self.current_slot_id += 1;
 
                 if entry.start_ts <= self.ts && self.ts < entry.end_ts {
-                    return Some((entry.start_ts, entry.end_ts, entry.key.clone(), entry.pkey.clone(), entry.value.clone()));
+                    return Some((
+                        entry.start_ts,
+                        entry.end_ts,
+                        entry.key.clone(),
+                        entry.pkey.clone(),
+                        entry.value.clone(),
+                    ));
                 } else {
                     continue;
                 }
@@ -370,7 +384,9 @@ impl<T: MemPool> Iterator for MvccHashJoinHistoryChainScanner<T> {
                         next_pid,
                         next_fid,
                     ));
-                    let next_page = unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page) };
+                    let next_page = unsafe {
+                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
+                    };
                     self.current_page = Some(next_page);
                     self.current_slot_id = 0;
                 } else {
@@ -383,9 +399,6 @@ impl<T: MemPool> Iterator for MvccHashJoinHistoryChainScanner<T> {
         }
     }
 }
-
-
-
 
 #[cfg(test)]
 mod tests {

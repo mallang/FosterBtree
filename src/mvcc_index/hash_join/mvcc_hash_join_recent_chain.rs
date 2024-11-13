@@ -17,9 +17,7 @@ use crate::{
 };
 
 use super::{
-    mvcc_hash_join_recent_page::MvccHashJoinRecentPage, 
-    Timestamp, 
-    mvcc_hash_join::MvccEntry,
+    mvcc_hash_join::MvccEntry, mvcc_hash_join_recent_page::MvccHashJoinRecentPage, Timestamp,
 };
 
 pub struct MvccHashJoinRecentChain<T: MemPool> {
@@ -357,8 +355,14 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         first_page
     }
 
-    pub fn scan(&self, ts: Timestamp) -> Result<MvccHashJoinRecentChainScanner<T>, AccessMethodError> {
-        Ok(MvccHashJoinRecentChainScanner::new(Arc::new(self.clone()), ts))
+    pub fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<MvccHashJoinRecentChainScanner<T>, AccessMethodError> {
+        Ok(MvccHashJoinRecentChainScanner::new(
+            Arc::new(self.clone()),
+            ts,
+        ))
     }
 }
 
@@ -369,9 +373,17 @@ impl<T: MemPool> Clone for MvccHashJoinRecentChain<T> {
             mem_pool: Arc::clone(&self.mem_pool),
             c_key: self.c_key,
             first_page_id: self.first_page_id,
-            first_frame_id: AtomicU32::new(self.first_frame_id.load(std::sync::atomic::Ordering::Acquire)),
-            last_page_id: AtomicU32::new(self.last_page_id.load(std::sync::atomic::Ordering::Acquire)),
-            last_frame_id: AtomicU32::new(self.last_frame_id.load(std::sync::atomic::Ordering::Acquire)),
+            first_frame_id: AtomicU32::new(
+                self.first_frame_id
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
+            last_page_id: AtomicU32::new(
+                self.last_page_id.load(std::sync::atomic::Ordering::Acquire),
+            ),
+            last_frame_id: AtomicU32::new(
+                self.last_frame_id
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
         }
     }
 }
@@ -397,7 +409,8 @@ impl<T: MemPool> MvccHashJoinRecentChainScanner<T> {
 
     fn initialize(&mut self) {
         let first_page = self.chain.first_page();
-        let first_page = unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(first_page) };
+        let first_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(first_page) };
         self.current_page = Some(first_page);
         self.current_slot_id = 0;
     }
@@ -420,11 +433,18 @@ impl<T: MemPool> Iterator for MvccHashJoinRecentChainScanner<T> {
             let page_ref = &**page; // Dereference to get the page
 
             if self.current_slot_id < MvccHashJoinRecentPage::slot_count(page_ref) {
-                let entry = MvccHashJoinRecentPage::get_entry_at_slot(page_ref, self.current_slot_id);
+                let entry =
+                    MvccHashJoinRecentPage::get_entry_at_slot(page_ref, self.current_slot_id);
                 self.current_slot_id += 1;
 
                 if entry.start_ts <= self.ts {
-                    return Some((entry.start_ts, entry.end_ts, entry.key.clone(), entry.pkey.clone(), entry.value.clone()));
+                    return Some((
+                        entry.start_ts,
+                        entry.end_ts,
+                        entry.key.clone(),
+                        entry.pkey.clone(),
+                        entry.value.clone(),
+                    ));
                 } else {
                     continue;
                 }
@@ -436,7 +456,9 @@ impl<T: MemPool> Iterator for MvccHashJoinRecentChainScanner<T> {
                         next_pid,
                         next_fid,
                     ));
-                    let next_page = unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page) };
+                    let next_page = unsafe {
+                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
+                    };
                     self.current_page = Some(next_page);
                     self.current_slot_id = 0;
                 } else {
@@ -1117,11 +1139,36 @@ mod tests {
 
         // Entries to insert
         let entries: Vec<(Vec<u8>, Vec<u8>, Timestamp, Vec<u8>)> = vec![
-            (b"key1".to_vec(), b"pkey1".to_vec(), 10u64, b"value1".to_vec()),
-            (b"key2".to_vec(), b"pkey2".to_vec(), 20u64, b"value2".to_vec()),
-            (b"key3".to_vec(), b"pkey3".to_vec(), 30u64, b"value3".to_vec()),
-            (b"key4".to_vec(), b"pkey4".to_vec(), 40u64, b"value4".to_vec()),
-            (b"key5".to_vec(), b"pkey5".to_vec(), 50u64, b"value5".to_vec()),
+            (
+                b"key1".to_vec(),
+                b"pkey1".to_vec(),
+                10u64,
+                b"value1".to_vec(),
+            ),
+            (
+                b"key2".to_vec(),
+                b"pkey2".to_vec(),
+                20u64,
+                b"value2".to_vec(),
+            ),
+            (
+                b"key3".to_vec(),
+                b"pkey3".to_vec(),
+                30u64,
+                b"value3".to_vec(),
+            ),
+            (
+                b"key4".to_vec(),
+                b"pkey4".to_vec(),
+                40u64,
+                b"value4".to_vec(),
+            ),
+            (
+                b"key5".to_vec(),
+                b"pkey5".to_vec(),
+                50u64,
+                b"value5".to_vec(),
+            ),
         ];
 
         // Insert entries
@@ -1131,24 +1178,52 @@ mod tests {
 
         // Test scanning at different timestamps
         let test_cases = vec![
-            (5u64, vec![]),                        // Before any entries
-            (15u64, vec![&entries[0]]),            // After first entry
-            (25u64, vec![&entries[0], &entries[1]]), // After second entry
+            (5u64, vec![]),                                       // Before any entries
+            (15u64, vec![&entries[0]]),                           // After first entry
+            (25u64, vec![&entries[0], &entries[1]]),              // After second entry
             (35u64, vec![&entries[0], &entries[1], &entries[2]]), // After third entry
-            (45u64, vec![&entries[0], &entries[1], &entries[2], &entries[3]]), // After fourth entry
-            (55u64, vec![&entries[0], &entries[1], &entries[2], &entries[3], &entries[4]]), // After all entries
+            (
+                45u64,
+                vec![&entries[0], &entries[1], &entries[2], &entries[3]],
+            ), // After fourth entry
+            (
+                55u64,
+                vec![
+                    &entries[0],
+                    &entries[1],
+                    &entries[2],
+                    &entries[3],
+                    &entries[4],
+                ],
+            ), // After all entries
         ];
 
         for (scan_ts, expected_entries) in test_cases {
             let scanner = chain.scan(scan_ts).unwrap();
             let results: Vec<_> = scanner.collect();
 
-            assert_eq!(results.len(), expected_entries.len(), "At ts {}, expected {} entries, got {}", scan_ts, expected_entries.len(), results.len());
+            assert_eq!(
+                results.len(),
+                expected_entries.len(),
+                "At ts {}, expected {} entries, got {}",
+                scan_ts,
+                expected_entries.len(),
+                results.len()
+            );
 
             for (result, expected_entry) in results.iter().zip(expected_entries) {
                 let (start_ts, end_ts, key, pkey, value) = result;
-                assert_eq!(*start_ts, expected_entry.2, "Start timestamp mismatch at ts {}", scan_ts);
-                assert_eq!(*end_ts, u64::MAX, "End timestamp should be u64::MAX for recent entries at ts {}", scan_ts);
+                assert_eq!(
+                    *start_ts, expected_entry.2,
+                    "Start timestamp mismatch at ts {}",
+                    scan_ts
+                );
+                assert_eq!(
+                    *end_ts,
+                    u64::MAX,
+                    "End timestamp should be u64::MAX for recent entries at ts {}",
+                    scan_ts
+                );
                 assert_eq!(key, &expected_entry.0, "Key mismatch at ts {}", scan_ts);
                 assert_eq!(pkey, &expected_entry.1, "PKey mismatch at ts {}", scan_ts);
                 assert_eq!(value, &expected_entry.3, "Value mismatch at ts {}", scan_ts);
@@ -1189,7 +1264,10 @@ mod tests {
         let results: Vec<_> = scanner.collect();
         assert_eq!(results.len(), 1, "Expected 1 entry at ts {}", scan_ts);
         let (start_ts, end_ts, key, pkey, value) = &results[0];
-        assert_eq!(*start_ts, 20u64, "Start timestamp should be 20 after update");
+        assert_eq!(
+            *start_ts, 20u64,
+            "Start timestamp should be 20 after update"
+        );
         assert_eq!(*end_ts, u64::MAX, "End timestamp should be u64::MAX");
         assert_eq!(key, b"key1");
         assert_eq!(pkey, b"pkey1");
@@ -1209,7 +1287,12 @@ mod tests {
         let scan_ts = 10u64;
         let scanner = chain.scan(scan_ts).unwrap();
         let results: Vec<_> = scanner.collect();
-        assert_eq!(results.len(), 0, "Expected no entries in empty chain at ts {}", scan_ts);
+        assert_eq!(
+            results.len(),
+            0,
+            "Expected no entries in empty chain at ts {}",
+            scan_ts
+        );
     }
 
     #[test]
@@ -1223,10 +1306,30 @@ mod tests {
 
         // Entries with different keys and pkeys
         let entries: Vec<(Vec<u8>, Vec<u8>, Timestamp, Vec<u8>)> = vec![
-            (b"key1".to_vec(), b"pkey1".to_vec(), 10u64, b"value1".to_vec()),
-            (b"key1".to_vec(), b"pkey2".to_vec(), 15u64, b"value2".to_vec()),
-            (b"key2".to_vec(), b"pkey1".to_vec(), 20u64, b"value3".to_vec()),
-            (b"key2".to_vec(), b"pkey2".to_vec(), 25u64, b"value4".to_vec()),
+            (
+                b"key1".to_vec(),
+                b"pkey1".to_vec(),
+                10u64,
+                b"value1".to_vec(),
+            ),
+            (
+                b"key1".to_vec(),
+                b"pkey2".to_vec(),
+                15u64,
+                b"value2".to_vec(),
+            ),
+            (
+                b"key2".to_vec(),
+                b"pkey1".to_vec(),
+                20u64,
+                b"value3".to_vec(),
+            ),
+            (
+                b"key2".to_vec(),
+                b"pkey2".to_vec(),
+                25u64,
+                b"value4".to_vec(),
+            ),
         ];
 
         // Insert entries
