@@ -4,8 +4,32 @@ pub type Timestamp = u64;
 pub type TxId = u64; // Transaction ID
 
 use std::{error::Error, fmt::Debug, sync::Arc};
-
+use serde::{Deserialize, Serialize};
 use crate::bp::{ContainerKey, MemPool};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxStatusType {
+    Committed(Timestamp),
+    Aborted,
+    Active,
+}
+
+pub struct TxStatus {
+    pub tx_id: TxId,
+    pub ts: Timestamp,
+    pub status: TxStatusType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MvccEntry {
+    pub key: Vec<u8>,
+    pub pkey: Vec<u8>,
+    pub value: Vec<u8>,
+
+    pub tx_id: TxId,
+    pub start_ts: Timestamp,
+    pub end_ts: Timestamp,
+}
 
 pub trait MvccIndex {
     type Key: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync;

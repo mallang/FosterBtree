@@ -7,19 +7,23 @@ use crate::{
     prelude::AccessMethodError,
 };
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     error::Error,
     fmt::Debug,
     hash::{Hash, Hasher},
     sync::{atomic::AtomicU32, Arc},
     time::Duration,
+    vec::IntoIter,
 };
 
 use super::{
-    mvcc_hash_join_history_chain::MvccHashJoinHistoryChain,
+    mvcc_hash_join_history_chain::{MvccHashJoinHistoryChain, MvccHashJoinHistoryChainScanner},
     mvcc_hash_join_history_page::MvccHashJoinHistoryPage,
-    mvcc_hash_join_recent_chain::MvccHashJoinRecentChain,
-    mvcc_hash_join_recent_page::MvccHashJoinRecentPage, Timestamp, TxId,
+    mvcc_hash_join_recent_chain::{MvccHashJoinRecentChain, MvccHashJoinRecentChainScanner},
+    mvcc_hash_join_recent_page::MvccHashJoinRecentPage, 
+    Timestamp, 
+    TxId, 
+    TxStatus,
 };
 
 use rand::seq::index;
@@ -45,6 +49,8 @@ pub struct HashJoinTable<T: MemPool> {
         Arc<MvccHashJoinRecentChain<T>>,
         Arc<MvccHashJoinHistoryChain<T>>,
     )>,
+
+    tx_status: HashMap<TxId, TxStatus>,
 }
 
 impl<T: MemPool> MvccIndex for HashJoinTable<T> {
@@ -119,7 +125,8 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
     }
 
     fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error> {
-        self.scan(ts)
+        // self.scan(ts)
+        todo!()
     }
 
     fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error> {
@@ -336,6 +343,16 @@ impl<T: MemPool> HashJoinTable<T> {
         }
     }
 
+    // pub fn scan(&self, ts: Timestamp) -> Result<HashJoinTableScanner<T>, AccessMethodError> {
+    //     Ok(HashJoinTableScanner {
+    //         table: Arc::new(self.clone()),
+    //         ts,
+    //         bucket_index: 0,
+    //         recent_iter: None,
+    //         history_iter: None,
+    //     })
+    // }
+
     /// Flushes the in-memory bucket entries back to the meta page.
     fn flush_bucket_entries(&self) -> Result<(), AccessMethodError> {
         todo!()
@@ -366,6 +383,10 @@ impl<T: MemPool> HashJoinTable<T> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.num_buckets
+    }
+
+    pub fn scan(&self, ts: Timestamp) -> Result<HashJoinTableScanner<T>, AccessMethodError> {
+        Ok(HashJoinTableScanner::new(Arc::new(self.clone()), ts))
     }
 }
 
@@ -475,6 +496,136 @@ impl MvccHashJoinMetaPage for Page {
             self.set_bucket_entry(index, entry);
         }
     }
+}
+
+impl<T: MemPool> Clone for HashJoinTable<T> {
+    fn clone(&self) -> Self {
+        Self {
+            mem_pool: Arc::clone(&self.mem_pool),
+            c_key: self.c_key,
+            meta_page_id: self.meta_page_id,
+            meta_frame_id: AtomicU32::new(self.meta_frame_id.load(std::sync::atomic::Ordering::Acquire)),
+            num_buckets: self.num_buckets,
+            bucket_entries: self.bucket_entries.clone(),
+        }
+    }
+}
+
+pub struct HashJoinTableScanner<T: MemPool> {
+    table: Arc<HashJoinTable<T>>,
+    ts: Timestamp,
+    bucket_index: usize,
+    recent_scanner: Option<MvccHashJoinRecentChainScanner<T>>,
+    history_scanner: Option<MvccHashJoinHistoryChainScanner<T>>,
+    current_entries: Vec<MvccEntry>, // To store entries from current bucket, if out of memory, need to increase bucket number
+    entry_index: usize,              // Index in current_entries
+    seen_entries: HashSet<(Vec<u8>, Vec<u8>)>, // To track (key, pkey) pairs (to avoid duplicate)
+}
+
+impl<T: MemPool> HashJoinTableScanner<T> {
+    pub fn new(table: Arc<HashJoinTable<T>>, ts: Timestamp) -> Self {
+        Self {
+            table,
+            ts,
+            bucket_index: 0,
+            recent_scanner: None,
+            history_scanner: None,
+            current_entries: Vec::new(),
+            entry_index: 0,
+            seen_entries: HashSet::new(),
+        }
+    }
+}
+
+impl<T: MemPool> Iterator for HashJoinTableScanner<T> {
+    type Item = MvccEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.entry_index < self.current_entries.len() {
+                // Return the next entry from current_entries
+                let entry = self.current_entries[self.entry_index].clone();
+                self.entry_index += 1;
+                return Some(entry);
+            } else {
+                // Move to the next bucket
+                if self.bucket_index >= self.table.num_buckets {
+                    // No more buckets to scan
+                    return None;
+                }
+
+                // Reset current_entries and entry_index
+                self.current_entries.clear();
+                self.entry_index = 0;
+
+                // Get the recent and history chains for the current bucket
+                let (recent_chain, history_chain) = &self.table.bucket_entries[self.bucket_index];
+
+                // Initialize scanners for recent and history chains
+                self.recent_scanner = Some(MvccHashJoinRecentChainScanner::new(
+                    Arc::clone(recent_chain),
+                    self.ts,
+                ));
+                self.history_scanner = Some(MvccHashJoinHistoryChainScanner::new(
+                    Arc::clone(history_chain),
+                    self.ts,
+                ));
+
+                // Collect entries from both scanners
+                let mut entries = Vec::new();
+
+                if let Some(ref mut scanner) = self.recent_scanner {
+                    for (start_ts, end_ts, key, pkey, value) in scanner {
+                        let key_pkey = (key.clone(), pkey.clone());
+                        if !self.seen_entries.contains(&key_pkey) {
+                            self.seen_entries.insert(key_pkey);
+                            entries.push(MvccEntry {
+                                start_ts,
+                                end_ts,
+                                key,
+                                pkey,
+                                value,
+                            });
+                        }
+                    }
+                }
+
+                if let Some(ref mut scanner) = self.history_scanner {
+                    for (start_ts, end_ts, key, pkey, value) in scanner {
+                        let key_pkey = (key.clone(), pkey.clone());
+                        if !self.seen_entries.contains(&key_pkey) {
+                            self.seen_entries.insert(key_pkey);
+                            entries.push(MvccEntry {
+                                start_ts,
+                                end_ts,
+                                key,
+                                pkey,
+                                value,
+                            });
+                        }
+                    }
+                }
+
+                // TODO: (maybe) sort need?
+                // entries.sort_by(|a, b| a.key.cmp(&b.key));
+
+                // Store the entries
+                self.current_entries = entries;
+                self.bucket_index += 1;
+
+                // Loop back to attempt to return entries from current_entries
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MvccEntry {
+    pub key: Vec<u8>,
+    pub pkey: Vec<u8>,
+    pub start_ts: Timestamp,
+    pub end_ts: Timestamp,
+    pub value: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -1108,4 +1259,271 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn test_hash_join_table_scanner_basic() {
+        // Initialize mem_pool and container key
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(100, 100);
+        let num_buckets = 8;
+        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+
+        // Insert entries
+        let entries = vec![
+            (b"key1".to_vec(), b"pkey1".to_vec(), b"value1".to_vec(), 10u64),
+            (b"key2".to_vec(), b"pkey2".to_vec(), b"value2".to_vec(), 20u64),
+            (b"key3".to_vec(), b"pkey3".to_vec(), b"value3".to_vec(), 30u64),
+        ];
+
+        let tx_id = 1;
+
+        for (key, pkey, value, ts) in &entries {
+            hash_table.insert(key.clone(), pkey.clone(), *ts, tx_id, value.clone()).unwrap();
+        }
+
+        // Scan the table at timestamp after insertions
+        let scan_ts = 40u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let mut results: Vec<_> = scanner.collect();
+
+        // Verify that all entries are returned
+        assert_eq!(results.len(), entries.len(), "Expected {} entries", entries.len());
+
+        // Create a map for easier verification
+        let mut result_map = std::collections::HashMap::new();
+        for entry in results {
+            result_map.insert((entry.key.clone(), entry.pkey.clone()), entry);
+        }
+
+        for (key, pkey, value, ts) in &entries {
+            let entry = result_map.get(&(key.clone(), pkey.clone())).unwrap();
+            assert_eq!(&entry.value, value);
+            assert_eq!(entry.start_ts, *ts);
+            assert_eq!(entry.end_ts, u64::MAX);
+        }
+    }
+
+    #[test]
+    fn test_hash_join_table_scanner_after_updates() {
+        // Initialize mem_pool and container key
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(101, 101);
+        let num_buckets = 8;
+        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+
+        // Insert an entry
+        let key = b"key1".to_vec();
+        let pkey = b"pkey1".to_vec();
+        let value1 = b"value1".to_vec();
+        let ts_insert = 10u64;
+        let tx_id = 1;
+
+        hash_table.insert(key.clone(), pkey.clone(), ts_insert, tx_id, value1.clone()).unwrap();
+
+        // Update the entry
+        let value2 = b"value2".to_vec();
+        let ts_update = 20u64;
+
+        hash_table.update(key.clone(), pkey.clone(), ts_update, tx_id, value2.clone()).unwrap();
+
+        // Scan at timestamp after update
+        let scan_ts = 30u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let results: Vec<_> = scanner.collect();
+
+        // Verify that the scanner returns the updated entry
+        assert_eq!(results.len(), 1, "Expected 1 entry");
+
+        let entry = &results[0];
+        assert_eq!(entry.key, key);
+        assert_eq!(entry.pkey, pkey);
+        assert_eq!(entry.value, value2);
+        assert_eq!(entry.start_ts, ts_update);
+        assert_eq!(entry.end_ts, u64::MAX);
+
+        // Scan at timestamp before update
+        let scan_ts = 15u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let results: Vec<_> = scanner.collect();
+
+        // Verify that the scanner returns the original entry
+        assert_eq!(results.len(), 1, "Expected 1 entry");
+
+        let entry = &results[0];
+        assert_eq!(entry.key, key);
+        assert_eq!(entry.pkey, pkey);
+        assert_eq!(entry.value, value1);
+        assert_eq!(entry.start_ts, ts_insert);
+        assert_eq!(entry.end_ts, ts_update);
+    }
+
+    #[test]
+    fn test_hash_join_table_scanner_after_deletions() {
+        // Initialize mem_pool and container key
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(102, 102);
+        let num_buckets = 8;
+        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+
+        // Insert an entry
+        let key = b"key1".to_vec();
+        let pkey = b"pkey1".to_vec();
+        let value = b"value1".to_vec();
+        let ts_insert = 10u64;
+        let tx_id = 1;
+
+        hash_table.insert(key.clone(), pkey.clone(), ts_insert, tx_id, value.clone()).unwrap();
+
+        // Delete the entry
+        let ts_delete = 20u64;
+        hash_table.delete(&key, &pkey, ts_delete, tx_id).unwrap();
+
+        // Scan at timestamp after deletion
+        let scan_ts = 30u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let results: Vec<_> = scanner.collect();
+
+        // Verify that no entries are returned
+        assert_eq!(results.len(), 0, "Expected no entries");
+
+        // Scan at timestamp before deletion
+        let scan_ts = 15u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let results: Vec<_> = scanner.collect();
+
+        // Verify that the entry is returned
+        assert_eq!(results.len(), 1, "Expected 1 entry");
+
+        let entry = &results[0];
+        assert_eq!(entry.key, key);
+        assert_eq!(entry.pkey, pkey);
+        assert_eq!(entry.value, value);
+        assert_eq!(entry.start_ts, ts_insert);
+        assert_eq!(entry.end_ts, ts_delete);
+    }
+
+    #[test]
+    fn test_hash_join_table_scanner_recent_and_history() {
+        // Initialize mem_pool and container key
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(103, 103);
+        let num_buckets = 8;
+        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+
+        // Insert entries
+        let entries = vec![
+            // Entry that will be updated
+            (b"key1".to_vec(), b"pkey1".to_vec(), b"value1".to_vec(), 10u64),
+            // Entry that will remain in recent chain
+            (b"key2".to_vec(), b"pkey2".to_vec(), b"value2".to_vec(), 15u64),
+        ];
+
+        let tx_id = 1;
+
+        // Insert entries
+        for (key, pkey, value, ts) in &entries {
+            hash_table.insert(key.clone(), pkey.clone(), *ts, tx_id, value.clone()).unwrap();
+        }
+
+        // Update one entry
+        let key_to_update = b"key1".to_vec();
+        let pkey_to_update = b"pkey1".to_vec();
+        let value_updated = b"value1_updated".to_vec();
+        let ts_update = 20u64;
+
+        hash_table.update(key_to_update.clone(), pkey_to_update.clone(), ts_update, tx_id, value_updated.clone()).unwrap();
+
+        // Scan at timestamp after update
+        let scan_ts = 25u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let mut results: Vec<_> = scanner.collect();
+
+        // Verify that both entries are returned
+        assert_eq!(results.len(), 2, "Expected 2 entries");
+
+        // Create a map for easier verification
+        let mut result_map = std::collections::HashMap::new();
+        for entry in results {
+            result_map.insert((entry.key.clone(), entry.pkey.clone()), entry);
+        }
+
+        // Check updated entry
+        let entry = result_map.get(&(key_to_update.clone(), pkey_to_update.clone())).unwrap();
+        assert_eq!(entry.value, value_updated);
+        assert_eq!(entry.start_ts, ts_update);
+        assert_eq!(entry.end_ts, u64::MAX);
+
+        // Check the other entry
+        let key_other = b"key2".to_vec();
+        let pkey_other = b"pkey2".to_vec();
+        let value_other = b"value2".to_vec();
+
+        let entry = result_map.get(&(key_other.clone(), pkey_other.clone())).unwrap();
+        assert_eq!(entry.value, value_other);
+        assert_eq!(entry.start_ts, 15u64);
+        assert_eq!(entry.end_ts, u64::MAX);
+    }
+
+    #[test]
+    fn test_hash_join_table_scanner_empty_table() {
+        // Initialize mem_pool and container key
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(104, 104);
+        let num_buckets = 8;
+        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+
+        // Scan the empty table
+        let scan_ts = 10u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let results: Vec<_> = scanner.collect();
+
+        // Verify that no entries are returned
+        assert_eq!(results.len(), 0, "Expected no entries");
+    }
+
+    #[test]
+    fn test_hash_join_table_scanner_no_duplicates() {
+        // Initialize mem_pool and container key
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(105, 105);
+        let num_buckets = 8;
+        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+
+        let tx_id = 1;
+
+        // Insert an entry
+        let key = b"key1".to_vec();
+        let pkey = b"pkey1".to_vec();
+        let value1 = b"value1".to_vec();
+        let ts_insert = 10u64;
+
+        hash_table.insert(key.clone(), pkey.clone(), ts_insert, tx_id, value1.clone()).unwrap();
+
+        // Update the entry multiple times
+        let value2 = b"value2".to_vec();
+        let ts_update1 = 20u64;
+
+        hash_table.update(key.clone(), pkey.clone(), ts_update1, tx_id, value2.clone()).unwrap();
+
+        let value3 = b"value3".to_vec();
+        let ts_update2 = 30u64;
+
+        hash_table.update(key.clone(), pkey.clone(), ts_update2, tx_id, value3.clone()).unwrap();
+
+        // Scan at timestamp after updates
+        let scan_ts = 40u64;
+        let scanner = hash_table.scan(scan_ts).unwrap();
+        let results: Vec<_> = scanner.collect();
+
+        // Verify that only one entry is returned
+        assert_eq!(results.len(), 1, "Expected 1 entry");
+
+        let entry = &results[0];
+        assert_eq!(entry.key, key);
+        assert_eq!(entry.pkey, pkey);
+        assert_eq!(entry.value, value3);
+        assert_eq!(entry.start_ts, ts_update2);
+        assert_eq!(entry.end_ts, u64::MAX);
+    }
+
 }

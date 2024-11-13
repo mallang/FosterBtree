@@ -1,4 +1,7 @@
-use super::Timestamp;
+use super::{
+    Timestamp,
+    mvcc_hash_join::MvccEntry,
+};
 use crate::{
     access_method::AccessMethodError,
     log_debug,
@@ -362,6 +365,7 @@ mod record {
         remain_key: Vec<u8>,
         remain_pkey: Vec<u8>,
         val: Vec<u8>,
+        pointer_to_history: (PageId, SlotId),
     }
 
     impl Record {
@@ -487,6 +491,11 @@ pub trait MvccHashJoinRecentPage {
         let header = self.header();
         header.total_bytes_used()
     }
+
+    fn slot_count(&self) -> u32 {
+        self.header().slot_count()
+    }
+    fn get_entry_at_slot(&self, slot_id: u32) -> MvccEntry;
 }
 
 impl MvccHashJoinRecentPage for Page {
@@ -805,6 +814,38 @@ impl MvccHashJoinRecentPage for Page {
         let remain_key_size = key.len().saturating_sub(SLOT_KEY_PREFIX_SIZE);
         let remain_pkey_size = pkey.len().saturating_sub(SLOT_PKEY_PREFIX_SIZE);
         SLOT_SIZE as u32 + remain_key_size as u32 + remain_pkey_size as u32 + val.len() as u32
+    }
+
+    fn get_entry_at_slot(&self, slot_id: u32) -> MvccEntry {
+        let slot_offset = PAGE_HEADER_SIZE + slot_id as usize * SLOT_SIZE;
+        let slot_bytes = &self[slot_offset as usize..slot_offset as usize + SLOT_SIZE];
+        let slot = Slot::from_bytes(slot_bytes).unwrap();
+
+        let rec_offset = slot.offset() as usize;
+        let rec_size = slot.val_size()
+            + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+            + slot.pkey_size().saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+        let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+        let record = Record::from_bytes(
+            record_bytes,
+            slot.key_size(),
+            slot.pkey_size(),
+            slot.val_size(),
+        );
+
+        let mut full_key = slot.key_prefix().to_vec();
+        full_key.extend_from_slice(record.remain_key());
+
+        let mut full_pkey = slot.pkey_prefix().to_vec();
+        full_pkey.extend_from_slice(record.remain_pkey());
+
+        MvccEntry {
+            key: full_key,
+            pkey: full_pkey,
+            start_ts: slot.ts(),
+            end_ts: u64::MAX,
+            value: record.val().to_vec(),
+        }
     }
 }
 

@@ -2,7 +2,7 @@ import csv
 import argparse
 import random
 from collections import defaultdict
-import string  # Import string module
+import string
 
 def generate_transactions_and_operations(
     data_file,
@@ -14,7 +14,8 @@ def generate_transactions_and_operations(
     read_only_ratio,
     insert_ratio,
     update_ratio,
-    delete_ratio
+    delete_ratio,
+    get_ratio  # New parameter
 ):
     # Load data and determine pkey length
     data = []
@@ -59,8 +60,9 @@ def generate_transactions_and_operations(
         pkey_info[pkey] = (key, pkey, value)
 
     # Validate ratios
-    if abs(insert_ratio + update_ratio + delete_ratio - 1.0) > 0.001:
-        raise ValueError("Insert, update, and delete ratios must sum to 1.0")
+    total_ratio = insert_ratio + update_ratio + delete_ratio + get_ratio
+    if abs(total_ratio - 1.0) > 0.001:
+        raise ValueError("Insert, update, delete, and get ratios must sum to 1.0")
     if not 0 <= read_only_ratio <= 1:
         raise ValueError("Read-only ratio must be between 0 and 1")
 
@@ -69,10 +71,12 @@ def generate_transactions_and_operations(
 
     # Generate transactions
     transactions = []
-    tx_id = 1
-    ts = 1
+    tx_id = 0  # Start from 0 for consistency with op IDs
+    ts = 0
 
     for _ in range(num_transactions):
+        tx_id += 1
+        ts += 1
         num_cmds = random.randint(min_cmds_per_tx, max_cmds_per_tx)
         commands = []
         is_read_only = random.random() < read_only_ratio
@@ -94,8 +98,8 @@ def generate_transactions_and_operations(
             else:
                 # Read-write transaction
                 op_type = random.choices(
-                    ['insert', 'update', 'delete'],
-                    weights=[insert_ratio, update_ratio, delete_ratio],
+                    ['insert', 'update', 'delete', 'get'],
+                    weights=[insert_ratio, update_ratio, delete_ratio, get_ratio],
                     k=1
                 )[0]
                 if op_type == 'insert':
@@ -127,7 +131,7 @@ def generate_transactions_and_operations(
                     pkey_info[new_pkey] = (key, new_pkey, new_value)
                 else:
                     if not available_pkeys:
-                        continue  # No pkeys available for update/delete
+                        continue  # No pkeys available for update/delete/get
                     pkey = random.choice(list(available_pkeys))
                     key, pkey_str, value = pkey_info[pkey]
                     if op_type == 'update':
@@ -156,14 +160,31 @@ def generate_transactions_and_operations(
                         # Remove pkey from available pkeys
                         available_pkeys.remove(pkey)
                         del pkey_info[pkey]
+                    elif op_type == 'get':
+                        commands.append({
+                            'tx_id': tx_id,
+                            'ts': ts,
+                            'op_type': 'get',
+                            'key': key,
+                            'pkey': pkey_str,
+                            'value': ''
+                        })
         if commands:
+            # Add commit command as the last operation
+            commands.append({
+                'tx_id': tx_id,
+                'ts': ts,
+                'op_type': 'commit',
+                'key': '',
+                'pkey': '',
+                'value': ''
+            })
+
             transactions.append({
                 'tx_id': tx_id,
                 'ts': ts,
                 'commands': commands
             })
-            tx_id += 1
-            ts += 1
 
     # Write transactions to txs.csv
     with open(txs_file, 'w', newline='') as csvfile:
@@ -179,34 +200,30 @@ def generate_transactions_and_operations(
     print(f"Generated {len(transactions)} transactions in {txs_file}")
 
     # Generate operations for ops.csv
-    # Collect all commands into a single list
+    # Collect all commands into a single list and record commit operations
     all_operations = []
     op_id = 0
+    tx_commit_op_id = {}  # Map tx_id to its commit operation ID
     for tx in transactions:
         for cmd in tx['commands']:
             cmd['id'] = op_id
             all_operations.append(cmd)
+            if cmd['op_type'] == 'commit':
+                tx_commit_op_id[tx['tx_id']] = op_id
             op_id += 1
 
     # Build dependency graph
     graph = defaultdict(set)
     in_degree = defaultdict(int)
-    pkey_ops = defaultdict(list)
 
     # Collect operations per pkey
+    pkey_ops = defaultdict(list)
     for op in all_operations:
-        pkey_ops[op['pkey']].append(op)
+        pkey = op['pkey']
+        if op['op_type'] != 'commit' and pkey:
+            pkey_ops[pkey].append(op)
 
-    # For each pkey, sort operations by ts and add edges to enforce pkey dependencies
-    for pkey, ops in pkey_ops.items():
-        ops.sort(key=lambda x: x['ts'])
-        for i in range(len(ops) - 1):
-            from_op = ops[i]['id']
-            to_op = ops[i + 1]['id']
-            graph[from_op].add(to_op)
-            in_degree[to_op] += 1
-
-    # Add edges to enforce intra-transaction order
+    # Enforce intra-transaction order (including commit)
     tx_ops = defaultdict(list)
     for op in all_operations:
         tx_ops[op['tx_id']].append(op)
@@ -219,6 +236,48 @@ def generate_transactions_and_operations(
             if to_op not in graph[from_op]:
                 graph[from_op].add(to_op)
                 in_degree[to_op] += 1
+
+    # Build mapping from tx_id to ts
+    tx_ts = {tx['tx_id']: tx['ts'] for tx in transactions}
+
+    # Collect pkeys touched by each transaction
+    tx_pkeys = defaultdict(set)
+    for op in all_operations:
+        tx_id = op['tx_id']
+        if op['op_type'] != 'commit' and op['pkey']:
+            tx_pkeys[tx_id].add(op['pkey'])
+
+    # Build pkey to list of transactions that touch it
+    pkey_tx_list = defaultdict(list)
+    for pkey, ops in pkey_ops.items():
+        tx_ids = set()
+        for op in ops:
+            tx_id = op['tx_id']
+            if tx_id not in tx_ids:
+                tx_ids.add(tx_id)
+                pkey_tx_list[pkey].append((tx_id, tx_ts[tx_id]))
+        # Sort transactions by ts
+        pkey_tx_list[pkey].sort(key=lambda x: x[1])
+
+    # Build mapping of tx_id to pkey to ops
+    tx_pkey_ops = defaultdict(lambda: defaultdict(list))
+    for op in all_operations:
+        tx_id = op['tx_id']
+        pkey = op['pkey']
+        if op['op_type'] != 'commit' and pkey:
+            tx_pkey_ops[tx_id][pkey].append(op)
+
+    # Enforce inter-transaction commit dependencies
+    for pkey, tx_list in pkey_tx_list.items():
+        for i in range(len(tx_list) - 1):
+            tx_id_from = tx_list[i][0]
+            tx_id_to = tx_list[i + 1][0]
+            commit_op_id = tx_commit_op_id[tx_id_from]
+            # For all operations in tx_id_to on this pkey, add dependency
+            for op in tx_pkey_ops[tx_id_to][pkey]:
+                if op['id'] not in graph[commit_op_id]:
+                    graph[commit_op_id].add(op['id'])
+                    in_degree[op['id']] += 1
 
     # Perform randomized topological sort
     zero_in_degree = [op['id'] for op in all_operations if in_degree[op['id']] == 0]
@@ -241,7 +300,6 @@ def generate_transactions_and_operations(
             if in_degree[neighbor] == 0:
                 zero_in_degree.append(neighbor)
                 random.shuffle(zero_in_degree)
-
 
     if len(sorted_ops) != len(all_operations):
         raise ValueError("Cycle detected in operations; cannot perform topological sort.")
@@ -313,8 +371,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '-u', '--update_ratio',
         type=float,
-        default=0.5,
-        help='Ratio of update operations in read-write transactions. (default: 0.5)'
+        default=0.4,
+        help='Ratio of update operations in read-write transactions. (default: 0.4)'
     )
     parser.add_argument(
         '-d', '--delete_ratio',
@@ -322,12 +380,18 @@ if __name__ == "__main__":
         default=0.2,
         help='Ratio of delete operations in read-write transactions. (default: 0.2)'
     )
+    parser.add_argument(
+        '-g', '--get_ratio',
+        type=float,
+        default=0.1,
+        help='Ratio of get operations in read-write transactions. (default: 0.1)'
+    )
     args = parser.parse_args()
 
     # Validate ratios
-    total_ratio = args.insert_ratio + args.update_ratio + args.delete_ratio
+    total_ratio = args.insert_ratio + args.update_ratio + args.delete_ratio + args.get_ratio
     if abs(total_ratio - 1.0) > 0.001:
-        print("Error: Insert, update, and delete ratios must sum to 1.0")
+        print("Error: Insert, update, delete, and get ratios must sum to 1.0")
         exit(1)
 
     generate_transactions_and_operations(
@@ -340,5 +404,6 @@ if __name__ == "__main__":
         read_only_ratio=args.read_only_ratio,
         insert_ratio=args.insert_ratio,
         update_ratio=args.update_ratio,
-        delete_ratio=args.delete_ratio
+        delete_ratio=args.delete_ratio,
+        get_ratio=args.get_ratio  # Pass the new parameter
     )
