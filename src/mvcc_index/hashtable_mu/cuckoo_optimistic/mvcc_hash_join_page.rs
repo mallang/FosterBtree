@@ -560,7 +560,7 @@ pub trait MvccHashJoinCuckooPage {
 
     /* ------------------helper function------------------------ */
     fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
-    fn read_bytes(&self, offset: usize, length:usize) -> &[u8];
+    fn read_bytes(&self, offset: usize, length: usize) -> &[u8];
     fn get_slot_slice(&self, slot_id: u32) -> &[Slot];
     fn set_slot(&mut self, slot_id: u32, slot: &Slot);
     fn get_slot(&self, slot_id: u32) -> Option<Slot>;
@@ -574,7 +574,9 @@ pub trait MvccHashJoinCuckooPage {
         let cmp_seek_key = (key, pkey, ts);
 
         // seek:(key, pkey, ts) , slot: (key, pkey, end_ts)
-        let cmp_slot_key = |seek_key: &(&[u8],&[u8],Timestamp), slot_key: &(&[u8],&[u8],Timestamp)| -> cmp::Ordering {
+        let cmp_slot_key = |seek_key: &(&[u8], &[u8], Timestamp),
+                            slot_key: &(&[u8], &[u8], Timestamp)|
+         -> cmp::Ordering {
             if slot_key.0 == seek_key.0 {
                 if slot_key.1 == seek_key.1 {
                     if slot_key.2 <= seek_key.2 {
@@ -592,7 +594,8 @@ pub trait MvccHashJoinCuckooPage {
 
         let slot_idx = slots_slice.binary_search_by(|slot| {
             // key > pkey > ts
-            let (slot_key, slot_pkey, _slot_val,  _slot_start_ts, slot_end_ts) = self.get_key_pkey_val_ts_with_slot(&slot);
+            let (slot_key, slot_pkey, _slot_val, _slot_start_ts, slot_end_ts) =
+                self.get_key_pkey_val_ts_with_slot(&slot);
             let slot_key = (&slot_key[..], &slot_pkey[..], slot_end_ts);
             cmp_slot_key(&cmp_seek_key, &slot_key)
         });
@@ -610,8 +613,8 @@ pub trait MvccHashJoinCuckooPage {
         // } else {
         //     None
         // }
-
     }
+
     fn header(&self) -> Header {
         let header_bytes = self.read_bytes(0, PAGE_HEADER_SIZE);
         Header::from_bytes(header_bytes).unwrap()
@@ -628,7 +631,8 @@ pub trait MvccHashJoinCuckooPage {
     }
     fn free_space_without_compaction(&self) -> u32 {
         let header = self.header();
-        header.rec_start_offset() - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE_ALIGNED as u32)
+        header.rec_start_offset()
+            - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE_ALIGNED as u32)
     }
     fn free_space_with_compaction(&self) -> u32 {
         let header = self.header();
@@ -803,7 +807,10 @@ impl MvccHashJoinCuckooPage for Page {
         };
 
         let old_suffix_slot_offset = self.slot_offset(slot_id) as usize;
-        self.copy_within(old_suffix_slot_offset..slot_offset as usize, old_suffix_slot_offset + SLOT_SIZE);
+        self.copy_within(
+            old_suffix_slot_offset..slot_offset as usize,
+            old_suffix_slot_offset + SLOT_SIZE,
+        );
         let slot = Slot::new(key, pkey, start_ts, end_ts, val, rec_offset as usize);
         let record = Record::new(key, pkey, val);
 
@@ -813,7 +820,12 @@ impl MvccHashJoinCuckooPage for Page {
         header.increase_total_bytes_used(space_need);
         header.set_rec_start_offset(rec_offset);
         self.set_header(&header);
-        log_warn!("[7] insert key{:?} at slot id {:?} slot count{:?}", key, slot_id, self.slot_count());
+        log_warn!(
+            "[7] insert key{:?} at slot id {:?} slot count{:?}",
+            key,
+            slot_id,
+            self.slot_count()
+        );
 
         Ok(())
     }
@@ -859,9 +871,9 @@ impl MvccHashJoinCuckooPage for Page {
                     // check recent or history get
                     if is_recent_get {
                         // only find once
-                        if ts >= slot.start_ts() 
+                        if ts < slot.end_ts() && ts >= slot.start_ts() 
                         {
-                            if !slot.is_mark_deleted()  {
+                            if !slot.is_mark_deleted() {
                                 // find and not deleted
                                 return Ok(record.val().to_vec());
                             } else {
@@ -1182,7 +1194,7 @@ impl MvccHashJoinCuckooPage for Page {
             {
                 // log_warn!("new rec size: {:?}, old: {:?}", new_rec_size, old_rec_size);
                 // delete old record and compaction
-                
+
                 let dummy_slot = Slot::new(b"", b"", 0, 0, b"", old_record_offset as usize);
                 self.set_slot(slot_id, &dummy_slot);
                 let want_free_space = self.free_space_with_compaction() + old_rec_size;
@@ -1365,7 +1377,10 @@ impl MvccHashJoinCuckooPage for Page {
         };
 
         let old_suffix_slot_offset = self.slot_offset(slot_id) as usize;
-        self.copy_within(old_suffix_slot_offset..slot_offset as usize, old_suffix_slot_offset + SLOT_SIZE);
+        self.copy_within(
+            old_suffix_slot_offset..slot_offset as usize,
+            old_suffix_slot_offset + SLOT_SIZE,
+        );
 
         let mut slot = Slot::new(key, pkey, start_ts, end_ts, &vec![], rec_offset as usize);
         slot.mark_deleted();
@@ -1397,7 +1412,7 @@ impl MvccHashJoinCuckooPage for Page {
         assert!(slot_id <= len, "sid {:?}, len{:?}", slot_id, len);
         unsafe { slice::from_raw_parts(slots_start_ptr, (len - slot_id) as usize) }
     }
-    
+
     fn set_slot(&mut self, slot_id: u32, slot: &Slot) {
         let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
         let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *mut Slot;
@@ -1425,7 +1440,7 @@ impl MvccHashJoinCuckooPage for Page {
             assert!(slot_id <= len);
             let mut slot = Slot::default();
             unsafe {
-                std::ptr::copy_nonoverlapping(slots_start_ptr,&mut slot as *mut Slot,  1);
+                std::ptr::copy_nonoverlapping(slots_start_ptr, &mut slot as *mut Slot, 1);
             }
 
             Some(slot)
@@ -1534,7 +1549,6 @@ mod tests {
             page.insert(key, pkey, *ts, Timestamp::MAX, val).unwrap();
             log_warn!("[2]");
         }
-
 
         // Retrieve and verify entries
         for (key, pkey, ts, val) in &entries {
@@ -2221,7 +2235,9 @@ mod tests {
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
             log_warn!("update key {:?}", key);
             let slot_id = page.get_slot_id(key, &pkey, ts).unwrap();
-            let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, new_value, ts + 1).expect("Failed to update value");
+            let update_result = page
+                .check_and_update_at_slot_id(slot_id, &key, &pkey, new_value, ts + 1)
+                .expect("Failed to update value");
             // page.update(key, &pkey, ts, new_value)
             //     .expect("Failed to update value");
         }
@@ -2390,9 +2406,9 @@ mod tests {
         let ts: Timestamp = 2;
         // Insert multiple key-value pairs with keys larger than 8 bytes
         let keys = vec![
+            vec![20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], // 12 bytes
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9],                      // 9 bytes
             vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19],         // 10 bytes
-            vec![20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], // 12 bytes
         ];
         let initial_values = vec![
             vec![101, 102],

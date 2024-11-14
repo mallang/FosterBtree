@@ -33,8 +33,6 @@ pub struct HashJoinTable<T: MemPool> {
     c_key: ContainerKey,
 
     meta: Arc<(PageId, AtomicU32)>,
-    // meta_page_id: PageId, // fixed
-    // meta_frame_id: AtomicU32,
 
     recent_hash_table: CuckooHashTable<T>,
     history_hash_table: CuckooHashTable<T>,
@@ -413,10 +411,18 @@ impl<T: MemPool> HashJoinTable<T> {
 
         MvccHashJoinCuckooMetaPage::init(&mut *meta_page, num_buckets);
 
-        let recent_table =
-            <CuckooHashTable<T> as CuckooRecentHashTable<T>>::new_with_bucket_num(c_key, mem_pool.clone(), &meta, num_buckets);
-        let history_table =
-            <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::new_with_bucket_num(c_key, mem_pool.clone(), &meta, num_buckets);
+        let recent_table = <CuckooHashTable<T> as CuckooRecentHashTable<T>>::new_with_bucket_num(
+            c_key,
+            mem_pool.clone(),
+            &meta,
+            num_buckets,
+        );
+        let history_table = <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::new_with_bucket_num(
+            c_key,
+            mem_pool.clone(),
+            &meta,
+            num_buckets,
+        );
 
         let recent_page_ids =
             <CuckooHashTable<T> as CuckooRecentHashTable<T>>::get_all_bucket_page_ids(
@@ -459,7 +465,9 @@ impl<T: MemPool> HashJoinTable<T> {
         match insert_res {
             Ok(old_delete_marker) => {
                 if let Some(old_delete_start_ts) = old_delete_marker {
-                    self.history().insert_deleted(&key, &pkey, old_delete_start_ts, ts).unwrap();
+                    self.history()
+                        .insert_deleted(&key, &pkey, old_delete_start_ts, ts)
+                        .unwrap();
                 }
                 Ok(())
             }
@@ -547,9 +555,7 @@ impl<T: MemPool> HashJoinTable<T> {
                 //     .insert(&key, &pkey, old_ts, ts, &old_val)
                 let history_insert_res = self.history().insert(&key, &pkey, old_ts, ts, &old_val);
                 match history_insert_res {
-                    Ok(()) => {
-                        Ok(())
-                    }
+                    Ok(()) => Ok(()),
                     Err(e) => {
                         panic!("should not happen! err: {:?}", e);
                     }

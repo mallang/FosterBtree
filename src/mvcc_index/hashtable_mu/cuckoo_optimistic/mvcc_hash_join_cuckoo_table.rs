@@ -5,7 +5,11 @@ use std::{
 };
 
 use crate::{
-    bp::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey}, lockmanager::{LockManager, Permissions, TransactionId, ValueId}, log_debug, log_warn, mvcc_index::{hashtable_mu::mvcc_hash_join_cuckoo::MvccHashJoinCuckooMetaPage, Timestamp}, page::{Page, PageId}
+    bp::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
+    lockmanager::{LockManager, Permissions, TransactionId, ValueId},
+    log_debug, log_warn,
+    mvcc_index::{hashtable_mu::mvcc_hash_join_cuckoo::MvccHashJoinCuckooMetaPage, Timestamp},
+    page::{Page, PageId},
 };
 
 /* --------------------------- Scanner START ---------------------------------- */
@@ -216,7 +220,12 @@ pub struct CuckooHashTable<T: MemPool> {
 
 pub trait CuckooRecentHashTable<T: MemPool> {
     fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self;
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self;
+    fn new_with_bucket_num(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        meta: &Arc<(PageId, AtomicU32)>,
+        bucket_nums: usize,
+    ) -> Self;
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
@@ -256,7 +265,12 @@ pub trait CuckooRecentHashTable<T: MemPool> {
 pub trait CuckooHistoryHashTable<T: MemPool> {
     fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self;
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self;
+    fn new_with_bucket_num(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        meta: &Arc<(PageId, AtomicU32)>,
+        bucket_nums: usize,
+    ) -> Self;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
     fn insert(
@@ -292,7 +306,7 @@ pub trait CuckooHistoryHashTable<T: MemPool> {
 impl<T: MemPool> CuckooHashTable<T> {
     fn new_with_bucket_num_inner(
         c_key: ContainerKey,
-        mem_pool: Arc<T>, 
+        mem_pool: Arc<T>,
         num_buckets: usize,
         meta: &Arc<(PageId, AtomicU32)>,
     ) -> Self {
@@ -741,8 +755,8 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
         buckets.num_buckets = old_entry_num * 2;
         let meta_page_key = PageFrameKey::new_with_frame_id(
-            self.c_key, 
-            self.meta.0, 
+            self.c_key,
+            self.meta.0,
             self.meta.1.load(std::sync::atomic::Ordering::Acquire),
         );
         let mut meta_page = self.write_page(meta_page_key);
@@ -833,8 +847,8 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
         buckets.num_buckets = old_entry_num * 2;
         let meta_page_key = PageFrameKey::new_with_frame_id(
-            self.c_key, 
-            self.meta.0, 
+            self.c_key,
+            self.meta.0,
             self.meta.1.load(std::sync::atomic::Ordering::Acquire),
         );
         let mut meta_page = self.write_page(meta_page_key);
@@ -1201,7 +1215,12 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
     fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
         Self::new_with_bucket_num_inner(c_key, mem_pool, 1, meta)
     }
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self {
+    fn new_with_bucket_num(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        meta: &Arc<(PageId, AtomicU32)>,
+        bucket_nums: usize,
+    ) -> Self {
         Self::new_with_bucket_num_inner(c_key, mem_pool, bucket_nums, meta)
     }
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
@@ -1399,11 +1418,16 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
     }
 }
 
-impl<T:MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
+impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
     fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
         Self::new_with_bucket_num_inner(c_key, mem_pool, 1, meta)
     }
-    fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>, bucket_nums: usize) -> Self {
+    fn new_with_bucket_num(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        meta: &Arc<(PageId, AtomicU32)>,
+        bucket_nums: usize,
+    ) -> Self {
         Self::new_with_bucket_num_inner(c_key, mem_pool, bucket_nums, meta)
     }
     fn insert(
