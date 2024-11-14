@@ -10,7 +10,12 @@ use crate::{
 
 /* --------------------------- Scanner START ---------------------------------- */
 
-use super::{mvcc_hash_join_cuckoo_common::{arcrwlock::*, BucketEntry, Buckets, CuckooAccessMethodError, LockManagerGuard}, mvcc_hash_join_page::MvccHashJoinCuckooPage};
+use super::{
+    mvcc_hash_join_cuckoo_common::{
+        arcrwlock::*, BucketEntry, Buckets, CuckooAccessMethodError, LockManagerGuard,
+    },
+    mvcc_hash_join_page::MvccHashJoinCuckooPage,
+};
 pub struct ScanTsWithBucketsReadGuard<T: MemPool> {
     lock_manager: Arc<Mutex<LockManager>>,
     tid: TransactionId,
@@ -142,8 +147,10 @@ impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
                                 &slot,
                             );
                         // log_warn!("get slot_id: {:?}, slot_key: {:?}", current_slot_id, slot_key);
-                        if slot_start_ts <= self.ts && self.ts < slot_end_ts
-                            && !slot.is_mark_deleted() {
+                        if slot_start_ts <= self.ts
+                            && self.ts < slot_end_ts
+                            && !slot.is_mark_deleted()
+                        {
                             if self.scan_key.is_some() {
                                 // scan_key, if key matches -> return
                                 // else continue;
@@ -314,7 +321,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
     }
     /// used to provide an interface for lock_manager::valueid \
-    /// only use page_id, 
+    /// only use page_id,
     fn gen_valueid(page_id: u32) -> ValueId {
         ValueId {
             container_id: 0,
@@ -323,8 +330,6 @@ impl<T: MemPool> CuckooHashTable<T> {
             slot_id: None,
         }
     }
-
-
 
     // helper function
     fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard {
@@ -448,15 +453,14 @@ impl<T: MemPool> CuckooHashTable<T> {
         let mut old_delete_marker = None;
         for write_page in &mut guard_and_page_vec {
             // Attempt to retrieve the value from the current page
-            match MvccHashJoinCuckooPage::get_delete_mark_slot_id(& *write_page.1, key, pkey, ts) {
+            match MvccHashJoinCuckooPage::get_delete_mark_slot_id(&*write_page.1, key, pkey, ts) {
                 Ok(slot_id) => {
                     // Value found
-                    match MvccHashJoinCuckooPage::delete_slot_at_id(&mut *write_page.1, slot_id)
-                    {
+                    match MvccHashJoinCuckooPage::delete_slot_at_id(&mut *write_page.1, slot_id) {
                         Ok((old_ts, _)) => {
                             old_delete_marker = Some(old_ts);
                             break;
-                        },
+                        }
                         Err(x) => {
                             panic!("should not happen for that error! {:?}", x);
                         }
@@ -470,7 +474,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 }
             };
         }
-        
+
         let (mut _inserted_guard, mut inserted_page) = {
             if guard_and_page_vec.len() == 1 {
                 guard_and_page_vec.pop().unwrap()
@@ -481,10 +485,9 @@ impl<T: MemPool> CuckooHashTable<T> {
             }
         };
         drop(guard_and_page_vec);
-        
+
         let check_insert_result = {
-            let insert_space_need =
-                <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
+            let insert_space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
             let page_free_space =
                 <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&*inserted_page);
             page_free_space >= insert_space_need
@@ -559,12 +562,9 @@ impl<T: MemPool> CuckooHashTable<T> {
             };
 
         let check_insert_result = {
-            let insert_space_need =
-                <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
+            let insert_space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
             let page_free_space =
-                <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(
-                    &*inserted_page,
-                );
+                <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&*inserted_page);
             // log_warn!(
             //     "[history::insert_inner] page free space: {:?}, insert_size: {:?}",
             //     page_free_space,
@@ -628,9 +628,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let insert_space_need =
                 <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, &vec![]);
             let page_free_space =
-                <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(
-                    &*inserted_page,
-                );
+                <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&*inserted_page);
             // log_warn!(
             //     "[history::insert_inner] page free space: {:?}, insert_size: {:?}",
             //     page_free_space,
@@ -1007,7 +1005,6 @@ impl<T: MemPool> CuckooHashTable<T> {
         return Ok(ret);
     }
 
-
     /*
         acquire 2 pages lock at the same time
         if acquire lock failed -> Err(AcquireLockFailed): REDO
@@ -1136,8 +1133,11 @@ impl<T: MemPool> CuckooHashTable<T> {
             match MvccHashJoinCuckooPage::get_slot_id(&*write_page, key, pkey, ts) {
                 Ok(slot_id) => {
                     // Value found
-                    match MvccHashJoinCuckooPage::mark_delete_slot_at_id(&mut *write_page, slot_id, ts)
-                    {
+                    match MvccHashJoinCuckooPage::mark_delete_slot_at_id(
+                        &mut *write_page,
+                        slot_id,
+                        ts,
+                    ) {
                         Ok(old_res) => return Ok(old_res),
                         Err(x) => {
                             panic!("should not happen for that error! {:?}", x);
@@ -1245,7 +1245,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                     panic!("should not happen");
                 }
             }
-        }    
+        }
     }
     fn get(
         &self,
@@ -1397,9 +1397,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         let buckets = self.rwlock.read_arc();
         self.gen_scan_key_iterator(TransactionId::new(), ts, buckets, Some(key.to_vec()))
     }
-
 }
-
 
 impl<T:MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
     fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
@@ -1483,7 +1481,6 @@ impl<T:MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
             }
         }
     }
-
 
     fn get_all(
         &self,
@@ -1571,5 +1568,4 @@ impl<T:MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
             }
         }
     }
-    
 }

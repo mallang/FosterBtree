@@ -18,7 +18,7 @@ use crate::{
 use super::cuckoo_optimistic::{
     mvcc_hash_join_cuckoo_common::CuckooAccessMethodError,
     mvcc_hash_join_cuckoo_table::{
-        CuckooHashTable, CuckooHistoryHashTable, CuckooRecentHashTable, ScanTsWithBucketsReadGuard
+        CuckooHashTable, CuckooHistoryHashTable, CuckooRecentHashTable, ScanTsWithBucketsReadGuard,
     },
 };
 
@@ -418,8 +418,14 @@ impl<T: MemPool> HashJoinTable<T> {
         let history_table =
             <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::new_with_bucket_num(c_key, mem_pool.clone(), &meta, num_buckets);
 
-        let recent_page_ids = <CuckooHashTable<T> as CuckooRecentHashTable<T>>::get_all_bucket_page_ids(&recent_table);
-        let history_page_ids = <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::get_all_bucket_page_ids(&history_table);
+        let recent_page_ids =
+            <CuckooHashTable<T> as CuckooRecentHashTable<T>>::get_all_bucket_page_ids(
+                &recent_table,
+            );
+        let history_page_ids =
+            <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::get_all_bucket_page_ids(
+                &history_table,
+            );
 
         <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_recent(
             &mut *meta_page,
@@ -472,11 +478,13 @@ impl<T: MemPool> HashJoinTable<T> {
             Ok(val) => Ok(Some(val)),
             // delete marker works -> not find in recent means not find in both recent and history
             Err(CuckooAccessMethodError::KeyNotFound) => {
-                log_warn!("[HashJoinTable::get_inner] return KeyNotFound in recent table!");    
+                log_warn!("[HashJoinTable::get_inner] return KeyNotFound in recent table!");
                 Ok(None)
-            },
+            }
             Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                log_warn!("[HashJoinTable::get_inner] return KeyFoundButInvalidTS in recent table!");    
+                log_warn!(
+                    "[HashJoinTable::get_inner] return KeyFoundButInvalidTS in recent table!"
+                );
                 let history_val = self.history().get(key, pkey, ts);
                 // log_warn!("try to find in history");
                 match history_val {
@@ -501,9 +509,8 @@ impl<T: MemPool> HashJoinTable<T> {
         match old_result {
             Ok((old_ts, old_val)) => {
                 if old_ts < ts {
-                    let history_insert_res = self
-                        .history()
-                        .insert(&key, &pkey, old_ts, ts, &old_val);
+                    let history_insert_res =
+                        self.history().insert(&key, &pkey, old_ts, ts, &old_val);
                     match history_insert_res {
                         Ok(()) => {}
                         Err(e) => {
@@ -538,9 +545,7 @@ impl<T: MemPool> HashJoinTable<T> {
                 );
                 // self.history_hash_table
                 //     .insert(&key, &pkey, old_ts, ts, &old_val)
-                let history_insert_res = self
-                    .history()
-                    .insert(&key, &pkey, old_ts, ts, &old_val);
+                let history_insert_res = self.history().insert(&key, &pkey, old_ts, ts, &old_val);
                 match history_insert_res {
                     Ok(()) => {
                         Ok(())
@@ -1253,7 +1258,8 @@ mod tests {
         for i in 0..1000 {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
-            let get_result: Result<Option<Vec<u8>>, CuckooAccessMethodError> = hash_join_table.get_inner(&key, &pkey, 2);
+            let get_result: Result<Option<Vec<u8>>, CuckooAccessMethodError> =
+                hash_join_table.get_inner(&key, &pkey, 2);
             assert_eq!(get_result.unwrap(), None);
         }
 

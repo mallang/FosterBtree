@@ -4,6 +4,7 @@ use std::{
         Arc,
     },
     time::Duration,
+    vec::IntoIter,
 };
 
 use crate::{
@@ -250,6 +251,23 @@ impl<T: MemPool> MvccHashJoinHistoryChain<T> {
         self.first_frame_id.load(atomic::Ordering::Acquire)
     }
 
+    fn first_page(&self) -> FrameReadGuard {
+        let first_frame_id = self
+            .first_frame_id
+            .load(std::sync::atomic::Ordering::Acquire);
+        let first_page = self.read_page(PageFrameKey::new_with_frame_id(
+            self.c_key,
+            self.first_page_id,
+            first_frame_id,
+        ));
+        if first_page.frame_id() != first_frame_id {
+            log_debug!("Frame of the first page has been changed. Trying to fix the frame id");
+            self.first_frame_id
+                .store(first_page.frame_id(), std::sync::atomic::Ordering::Release);
+        }
+        first_page
+    }
+
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         loop {
             let page = self.mem_pool.get_page_for_read(page_key);
@@ -270,6 +288,112 @@ impl<T: MemPool> MvccHashJoinHistoryChain<T> {
                 }
                 Err(e) => {
                     panic!("Unexpected error: {:?}", e);
+                }
+            }
+        }
+    }
+
+    pub fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<MvccHashJoinHistoryChainScanner<T>, AccessMethodError> {
+        Ok(MvccHashJoinHistoryChainScanner::new(
+            Arc::new(self.clone()),
+            ts,
+        ))
+    }
+}
+
+// Implement Clone for MvccHashJoinHistoryChain to allow cloning
+impl<T: MemPool> Clone for MvccHashJoinHistoryChain<T> {
+    fn clone(&self) -> Self {
+        Self {
+            mem_pool: Arc::clone(&self.mem_pool),
+            c_key: self.c_key,
+            first_page_id: self.first_page_id,
+            first_frame_id: AtomicU32::new(self.first_frame_id.load(atomic::Ordering::SeqCst)),
+        }
+    }
+}
+
+pub struct MvccHashJoinHistoryChainScanner<T: MemPool> {
+    chain: Arc<MvccHashJoinHistoryChain<T>>,
+    ts: Timestamp,
+    current_page: Option<FrameReadGuard<'static>>,
+    current_slot_id: u32,
+    finished: bool,
+}
+
+impl<T: MemPool> MvccHashJoinHistoryChainScanner<T> {
+    pub fn new(chain: Arc<MvccHashJoinHistoryChain<T>>, ts: Timestamp) -> Self {
+        Self {
+            chain,
+            ts,
+            current_page: None,
+            current_slot_id: 0,
+            finished: false,
+        }
+    }
+
+    fn initialize(&mut self) {
+        let first_page = self.chain.first_page();
+        let first_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(first_page) };
+        self.current_page = Some(first_page);
+        self.current_slot_id = 0;
+    }
+}
+
+impl<T: MemPool> Iterator for MvccHashJoinHistoryChainScanner<T> {
+    type Item = (Timestamp, Timestamp, Vec<u8>, Vec<u8>, Vec<u8>); // (start_ts, end_ts, key, pkey, value)
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        if self.current_page.is_none() {
+            self.initialize();
+        }
+
+        loop {
+            let page = self.current_page.as_ref()?;
+            let page_ref = &**page;
+
+            if self.current_slot_id < MvccHashJoinHistoryPage::slot_count(page_ref) {
+                let entry =
+                    MvccHashJoinHistoryPage::get_entry_at_slot(page_ref, self.current_slot_id);
+                self.current_slot_id += 1;
+
+                if entry.start_ts <= self.ts && self.ts < entry.end_ts {
+                    return Some((
+                        entry.start_ts,
+                        entry.end_ts,
+                        entry.key.clone(),
+                        entry.pkey.clone(),
+                        entry.value.clone(),
+                    ));
+                } else {
+                    continue;
+                }
+            } else {
+                // Move to the next page
+                if let Some((next_pid, next_fid)) = MvccHashJoinHistoryPage::next_page(page_ref) {
+                    let next_page = self.chain.read_page(PageFrameKey::new_with_frame_id(
+                        self.chain.c_key,
+                        next_pid,
+                        next_fid,
+                    ));
+                    let next_page = unsafe {
+                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
+                    };
+                    self.current_page = Some(next_page);
+                    self.current_slot_id = 0;
+                } else {
+                    // No more pages
+                    self.finished = true;
+                    self.current_page = None;
+                    return None;
                 }
             }
         }
