@@ -1,5 +1,6 @@
 use fbtree::mvcc_index::MvccIndex;
 use fbtree::{mvcc_index::hash_join::mvcc_hash_join::HashJoinTable, prelude::*};
+// use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HashJoinTable, prelude::*};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -31,7 +32,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Initialize the hash join table using the MvccIndex trait
     let mem_pool = get_in_mem_pool(); // You need to implement or import this function
     let c_key = ContainerKey::new(0, 0);
-    let hash_join_table = HashJoinTable::create(c_key, mem_pool)?;
+    let hash_join_table = HashJoinTable::create(c_key, mem_pool.clone())?;
 
     // Initialize Rust's default HashMap
     let mut rust_hash_map: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
@@ -243,10 +244,10 @@ fn read_expected_data_file(file_path: &str) -> io::Result<HashMap<(Vec<u8>, Vec<
             continue; // Skip empty lines
         }
         let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() >= 3 {
-            let key = parts[0].as_bytes().to_vec();
-            let pkey = parts[1].as_bytes().to_vec();
-            let value = parts[2].as_bytes().to_vec();
+        if parts.len() >= 5 {
+            let key = parts[2].as_bytes().to_vec();
+            let pkey = parts[3].as_bytes().to_vec();
+            let value = parts[4].as_bytes().to_vec();
             expected_data.insert((key, pkey), value);
         }
     }
@@ -265,6 +266,7 @@ fn check_consistency_hash_join_table(
     let scanner = hash_join_table.scan(u64::MAX)?;
     for entry in scanner {
         hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        // hjt_entries.insert((entry.0, entry.1), entry.2);
     }
 
     // Compare expected data with HashJoinTable entries
@@ -369,6 +371,7 @@ fn check_consistency_between_hash_join_and_hash_map(
     let scanner = hash_join_table.scan(u64::MAX)?;
     for entry in scanner {
         hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        // hjt_entries.insert((entry.0, entry.1), entry.2);
     }
 
     // Compare entries in Rust HashMap with entries in HashJoinTable
