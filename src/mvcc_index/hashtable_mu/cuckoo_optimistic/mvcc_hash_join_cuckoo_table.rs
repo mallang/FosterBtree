@@ -152,7 +152,7 @@ impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
                             );
                         // log_warn!("get slot_id: {:?}, slot_key: {:?}", current_slot_id, slot_key);
                         if slot_start_ts <= self.ts
-                            && self.ts < slot_end_ts
+                            && (self.ts < slot_end_ts || /* bench test */ slot_end_ts == Timestamp::MAX)
                             && !slot.is_mark_deleted()
                         {
                             if self.scan_key.is_some() {
@@ -741,16 +741,19 @@ impl<T: MemPool> CuckooHashTable<T> {
                 }
             }
             // log_warn!(
-            //     "rehashed_page_id: {:?}, rec_start_offset: {:?} slot_end {:?}",
+            //     "rehashed_page_id: {:?}, rec_start_offset: {:?} slot_count {:?} slot_end {:?}",
             //     hashed_page.page_key().unwrap().page_id,
             //     hashed_page.header().rec_start_offset(),
+            //     hashed_page.slot_count(),
             //     hashed_page.header().slot_end_offset()
             // );
             // log_warn!(
-            //     "new_page_id: {:?}, rec_start_offset: {:?}, slot_end {:?}",
+            //     "new_page_id: {:?}, rec_start_offset: {:?} slot_count {:?} slot_end {:?} free_with_cpt {:?}",
             //     new_page.page_key().unwrap().page_id,
             //     new_page.header().rec_start_offset(),
-            //     new_page.header().slot_end_offset()
+            //     new_page.slot_count(),
+            //     new_page.header().slot_end_offset(),
+            //     new_page.free_space_with_compaction(),
             // );
         }
         buckets.num_buckets = old_entry_num * 2;
@@ -1066,11 +1069,6 @@ impl<T: MemPool> CuckooHashTable<T> {
             match MvccHashJoinCuckooPage::get_slot_id(&*write_page, key, pkey, ts) {
                 Ok(slot_id) => {
                     // Value found
-                    log_warn!(
-                        "[update key:{:?}, page: {:?}]updated value found!",
-                        String::from_utf8(key.to_vec()),
-                        write_page.page_key().unwrap().page_id
-                    );
                     match MvccHashJoinCuckooPage::check_and_update_at_slot_id(
                         &mut *write_page,
                         slot_id,
@@ -1274,11 +1272,9 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
     ) -> Result<Vec<u8>, CuckooAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
-        log_warn!("start get key: {:?}", key);
         loop {
             match self.recent_get_inner(key, pkey, ts) {
                 Ok(val) => {
-                    log_warn!("finish get key: {:?}", key);
                     return Ok(val);
                 }
                 Err(CuckooAccessMethodError::KeyNotFound) => {
@@ -1343,7 +1339,6 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         let base = 2;
         let mut attempts = 0;
         loop {
-            log_warn!("start update loop");
             match self.recent_update_inner(key, pkey, ts, val) {
                 Ok((old_ts, old_val)) => {
                     return Ok((old_ts, old_val));

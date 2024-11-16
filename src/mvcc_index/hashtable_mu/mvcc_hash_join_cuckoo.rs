@@ -22,11 +22,11 @@ use super::cuckoo_optimistic::{
     },
 };
 
-pub const HASHER_KEYS: [(u64, u64); 2] = [(0, 0), (1, 1)];
-pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
-pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>();
-pub const BUCKET_ENTRY_SIZE: usize = PAGE_ID_SIZE;
-pub const DEFAULT_NUM_BUCKETS: usize = 16;
+pub(crate) const HASHER_KEYS: [(u64, u64); 2] = [(0, 0), (1, 1)];
+pub(crate) const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
+pub(crate) const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>();
+pub(crate) const BUCKET_ENTRY_SIZE: usize = PAGE_ID_SIZE;
+pub(crate) const DEFAULT_NUM_BUCKETS: usize = 16;
 
 pub struct HashJoinTable<T: MemPool> {
     mem_pool: Arc<T>, // TODO: check may be deleted
@@ -613,7 +613,7 @@ impl<T: MemPool> HashJoinTable<T> {
     <Recent Bucket Num> <History Bucket Num> [Recent Page Id ...] [History Page Id...]
 
 */
-pub trait MvccHashJoinCuckooMetaPage {
+pub(crate) trait MvccHashJoinCuckooMetaPage {
     /// Initializes the meta page with the specified number of buckets.
     fn init(&mut self, num_buckets: usize);
     fn set_history_bucket_num(&mut self, num_buckets: usize);
@@ -1305,5 +1305,76 @@ mod tests {
             assert_eq!(&pkey[4..], &value[5..]);
         }
         assert_eq!(cnt, 100);
+    }
+
+    #[test]
+    fn test_double_update() {
+        // Initialize the hash join table using the MvccIndex trait
+        let mem_pool = get_in_mem_pool(); // You need to implement or import this function
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = HashJoinTable::create(c_key, mem_pool.clone()).unwrap();
+
+        let data_num = 10000 as usize;
+        let data = (0..data_num)
+            .into_iter()
+            .map(|i| {
+                (
+                    format!("key_{:06}", i).as_bytes().to_vec(),
+                    format!("pkey_{:06}", i).as_bytes().to_vec(),
+                    format!("value_{:06}", i).as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let value_new = (0..data_num)
+            .into_iter()
+            .map(|i| format!("new_value_{:06}", i).as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let value_new_new = value_new
+            .clone()
+            .into_iter()
+            .map(|mut ve| {
+                ve.push(233);
+                ve
+            })
+            .collect::<Vec<_>>();
+
+        // BENCH HASH_JOIN_TABLE UPDATE
+
+        // Load data into the hash join table
+        for (key, pkey, value) in &data {
+            hash_join_table
+                .insert(key.clone(), pkey.clone(), 0, 0, value.clone())
+                .unwrap();
+        }
+
+        {
+            let data_clone = data.clone();
+            let value_new_clone = value_new.clone();
+
+            for ((key, pkey, _value), new_value) in
+                (data_clone).into_iter().zip((value_new_clone).into_iter())
+            {
+                // UPDATE data
+                hash_join_table.update(key, pkey, 1, 0, new_value).unwrap();
+            }
+        }
+
+        {
+            let data_clone = data.clone();
+            let value_new_new_clone = value_new_new.clone();
+
+            for ((key, pkey, _value), new_value) in (data_clone)
+                .into_iter()
+                .zip((value_new_new_clone).into_iter())
+            {
+                // UPDATE data
+                hash_join_table.update(key, pkey, 1, 0, new_value).unwrap();
+            }
+        }
+
+        for ((key, pkey, _value), new_value) in (&data).iter().zip((&value_new_new).iter()) {
+            let a = hash_join_table.get(key, pkey, 1).unwrap();
+            assert_eq!(a.as_ref().unwrap(), new_value);
+        }
     }
 }

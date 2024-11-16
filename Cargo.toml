@@ -82,3 +82,7 @@ harness = false
 [[bin]]
 name = "hash_join_bench"
 path = "benches/hash_join/hash_join_bench.rs"
+
+[[bin]]
+name = "perf_bench"
+path = "benches/hash_join/hash_join_mu/hash_perf_bench.rs"

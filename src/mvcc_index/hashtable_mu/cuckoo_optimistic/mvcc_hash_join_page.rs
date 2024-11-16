@@ -564,11 +564,12 @@ pub trait MvccHashJoinCuckooPage {
     fn get_slot_slice(&self, slot_id: u32) -> &[Slot];
     fn set_slot(&mut self, slot_id: u32, slot: &Slot);
     fn get_slot(&self, slot_id: u32) -> Option<Slot>;
-    // fn get_slot(&self, slot_id: u32) -> Slot;
+
     /// find the first slot idx >= given (key, pkey, ts) \
+    /// if (key,pkey) of slot is the same, then return the \
+    /// first idx whose end_ts is larger than seek_ts \
     /// if no slot >=, THEN return None
     fn find_slot_idx(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<usize> {
-        log_warn!("[8.5]");
         let slots_slice = self.get_slot_slice(0);
 
         let cmp_seek_key = (key, pkey, ts);
@@ -820,12 +821,12 @@ impl MvccHashJoinCuckooPage for Page {
         header.increase_total_bytes_used(space_need);
         header.set_rec_start_offset(rec_offset);
         self.set_header(&header);
-        log_warn!(
-            "[7] insert key{:?} at slot id {:?} slot count{:?}",
-            key,
-            slot_id,
-            self.slot_count()
-        );
+        // log_warn!(
+        //     "insert key{:?} at slot id {:?} slot count{:?}",
+        //     key,
+        //     slot_id,
+        //     self.slot_count()
+        // );
 
         Ok(())
     }
@@ -871,8 +872,7 @@ impl MvccHashJoinCuckooPage for Page {
                     // check recent or history get
                     if is_recent_get {
                         // only find once
-                        if ts < slot.end_ts() && ts >= slot.start_ts() 
-                        {
+                        if ts < slot.end_ts() && ts >= slot.start_ts() {
                             if !slot.is_mark_deleted() {
                                 // find and not deleted
                                 return Ok(record.val().to_vec());
@@ -997,10 +997,10 @@ impl MvccHashJoinCuckooPage for Page {
             self.slot_offset(self.slot_count()) as usize,
             [0u8; SLOT_SIZE].as_ref(),
         );
-        log_warn!(
-            "total_bytes_used for deleted slot page: {:?}",
-            self.header().total_bytes_used()
-        );
+        // log_warn!(
+        //     "total_bytes_used for deleted slot page: {:?}",
+        //     self.header().total_bytes_used()
+        // );
         Ok((old_ts, old_val))
     }
 
@@ -1048,17 +1048,17 @@ impl MvccHashJoinCuckooPage for Page {
         Ok((old_ts, old_val))
     }
 
-    // only recent
+    /// ONLY RECENT
     fn get_delete_mark_slot_id(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<u32, CuckooAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count();
-
-        for slot_idx in 0..slot_count {
+        let slot_idx = self.find_slot_idx(key, pkey, ts);
+        if let Some(slot_idx) = slot_idx {
+            let slot_idx = slot_idx as u32;
+            // log_warn!("get idx: {}\n", slot_idx);
             let slot = self.get_slot(slot_idx).unwrap();
             if slot.key_size() == key.len() as u32
                 && slot.pkey_size() == pkey.len() as u32
@@ -1093,11 +1093,13 @@ impl MvccHashJoinCuckooPage for Page {
                     }
                 }
             }
+        } else {
+            // not found
         }
-        Err(CuckooAccessMethodError::KeyNotFound)
+        return Err(CuckooAccessMethodError::KeyNotFound);
     }
 
-    // only recent
+    /// ONLY RECENT
     /// used in recent::update and recent::delete
     fn get_slot_id(
         &self,
@@ -1105,13 +1107,11 @@ impl MvccHashJoinCuckooPage for Page {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<u32, CuckooAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count();
-        log_warn!("enter get_slot_id slot count: {:?}", header.slot_count());
-
-        for slot_idx in 0..slot_count {
+        let slot_idx = self.find_slot_idx(key, pkey, ts);
+        if let Some(slot_idx) = slot_idx {
+            let slot_idx = slot_idx as u32;
+            // log_warn!("get idx: {}\n", slot_idx);
             let slot = self.get_slot(slot_idx).unwrap();
-            log_warn!("check slot_id: {:?} slot{:?}", slot_idx, slot);
             if slot.key_size() == key.len() as u32
                 && slot.pkey_size() == pkey.len() as u32
                 && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
@@ -1145,16 +1145,12 @@ impl MvccHashJoinCuckooPage for Page {
                     } else {
                         return Ok(slot_idx);
                     }
-                    // if slot.start_ts() <= ts
-                    //     && !slot.is_mark_deleted() {
-                    //     return Ok(slot_idx);
-                    // } else {
-                    //     return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                    // }
                 }
             }
+        } else {
+            // not found
         }
-        Err(CuckooAccessMethodError::KeyNotFound)
+        return Err(CuckooAccessMethodError::KeyNotFound);
     }
 
     // only recent
@@ -1183,18 +1179,28 @@ impl MvccHashJoinCuckooPage for Page {
                 .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32)
             + old_val_size;
 
+        // log_warn!(
+        //     "[before UPDATE: page_id: {:?}] ref offset: {:?}, slot_end {:?} free_space_without_compaction {:?} free_space_with_compaction {:?}, new_recsize: {:?} old_recsize: {:?}",
+        //     self.get_id(),
+        //     self.rec_start_offset(),
+        //     self.slot_offset(self.slot_count()),
+        //     self.free_space_without_compaction(),
+        //     self.free_space_with_compaction(),
+        //     new_rec_size,
+        //     old_rec_size,
+        // );
+
         if self.free_space_without_compaction() < new_rec_size {
             if (self.free_space_with_compaction() as i32)
                 < (new_rec_size as i32) - (old_rec_size as i32)
             {
                 return Err(CuckooAccessMethodError::OutOfSpace);
             }
-            if new_rec_size > old_rec_size
-                && self.free_space_with_compaction() != self.free_space_without_compaction()
-            {
+            if new_rec_size > old_rec_size {
                 // log_warn!("new rec size: {:?}, old: {:?}", new_rec_size, old_rec_size);
                 // delete old record and compaction
 
+                // WARNING: inconsistent state
                 let dummy_slot = Slot::new(b"", b"", 0, 0, b"", old_record_offset as usize);
                 self.set_slot(slot_id, &dummy_slot);
                 let want_free_space = self.free_space_with_compaction() + old_rec_size;
@@ -1203,9 +1209,10 @@ impl MvccHashJoinCuckooPage for Page {
             }
         }
         // log_warn!(
-        //     "new rec size: {:?}, old rec size: {:?} ",
-        //     new_rec_size,
-        //     old_rec_size
+        //     "[before UPDATE, after possible COMPACT] ref offset: {:?}, slot_end {:?} free_space_without_compaction {:?}",
+        //     self.rec_start_offset(),
+        //     self.slot_offset(self.slot_count()),
+        //     self.free_space_without_compaction(),
         // );
         let new_record = Record::new(key, pkey, val);
         let new_rec_offset = {
@@ -1213,7 +1220,7 @@ impl MvccHashJoinCuckooPage for Page {
                 // Case 1: New value size is smaller or equal (or) Case 2: Offset matches `rec_start_offset`
 
                 // log_warn!(
-                //     "[case 1 PAGEID: {:?}]<OLD>, old_rec offset:{:?} rec start offset: {:?}",
+                //     "[case 1&2 PAGEID: {:?}]<OLD>, old_rec offset:{:?} rec start offset: {:?}",
                 //     self.get_id(),
                 //     old_record_offset,
                 //     self.rec_start_offset()
@@ -1232,7 +1239,7 @@ impl MvccHashJoinCuckooPage for Page {
                 }
 
                 // log_warn!(
-                //     "[case 1 PAGEID: {:?}]<NEW>, new_rec offset:{:?} new rec start offset: {:?}",
+                //     "[case 1&2 PAGEID: {:?}]<NEW>, new_rec offset:{:?} new rec start offset: {:?}",
                 //     self.get_id(),
                 //     new_rec_offset,
                 //     self.rec_start_offset()
@@ -1308,11 +1315,12 @@ impl MvccHashJoinCuckooPage for Page {
         let mut header = self.header();
         header.set_rec_start_offset(new_rec_offset as u32);
         self.set_header(&header);
-        log_warn!(
-            "new rec offset: {:?}, slot_count: {:?}",
-            header.rec_start_offset(),
-            header.slot_count()
-        );
+        // log_warn!(
+        //     "[COMPACT page-id: {:?}] new rec offset: {:?}, slot_count: {:?}",
+        //     self.get_id(),
+        //     header.rec_start_offset(),
+        //     header.slot_count()
+        // );
 
         self.free_space_without_compaction()
     }
@@ -2447,6 +2455,62 @@ mod tests {
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {
             let retrieved_value = page.get(key, &pkey, ts, true).expect("Failed to get value");
             assert_eq!(retrieved_value, expected_value.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_get_delete_mark() {
+        let mut page = Page::new_empty();
+        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+
+        let pkey = vec![1, 2, 3];
+        let ts: Timestamp = 2;
+        // Insert multiple key-value pairs with keys larger than 8 bytes
+        let keys = vec![
+            vec![1, 2, 1],
+            vec![1, 2, 3],
+            vec![1, 2, 3, 4],
+            vec![1, 2, 4],
+            vec![1, 2, 5],
+            vec![2, 1, 1],
+        ];
+        let initial_values = vec![
+            vec![1, 2, 1],
+            vec![1, 2, 3],
+            vec![1, 2, 3, 4],
+            vec![1, 2, 4],
+            vec![1, 2, 5],
+            vec![2, 1, 1],
+        ];
+
+        for (key, value) in keys.iter().zip(initial_values.iter()) {
+            page.insert(key, &pkey, ts, Timestamp::MAX, value)
+                .expect("Failed to insert key-value pair");
+        }
+
+        for slot_id in 0..page.slot_count() {
+            let slot = page.get_slot(slot_id).unwrap();
+            let (k, pk, v) = page.get_key_pkey_val_with_slot(&slot);
+            log_warn!("k {:?}, pk: {:?} v: {:?}", k, pk, v);
+
+            let del_result = page.mark_delete_slot_at_id(slot_id, ts + 1);
+            assert!(del_result.is_ok());
+            assert_eq!(
+                del_result.as_ref().unwrap(),
+                &(ts, (&initial_values[slot_id as usize]).clone())
+            );
+        }
+
+        for i in 0..6 {
+            let delete_mark_result = <Page as MvccHashJoinCuckooPage>::get_delete_mark_slot_id(
+                &page,
+                &keys[i],
+                &pkey,
+                ts + 1,
+            );
+            log_warn!("res: {:?}", delete_mark_result);
+            assert!(delete_mark_result.is_ok());
+            assert_eq!(delete_mark_result.unwrap(), i as u32);
         }
     }
 }
