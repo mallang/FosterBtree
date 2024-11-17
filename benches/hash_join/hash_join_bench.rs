@@ -1,7 +1,7 @@
-use fbtree::mvcc_index::MvccIndex;
+use fbtree::mvcc_index::{MvccEntry, MvccIndex, Timestamp};
 use fbtree::{mvcc_index::hash_join::mvcc_hash_join::HashJoinTable, prelude::*};
 // use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HashJoinTable, prelude::*};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,19 +9,21 @@ use std::time::Instant;
 fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
+    if args.len() < 5 {
         eprintln!(
-            "Usage: {} <data_file> <ops_file> <expected_data_file>",
+            "Usage: {} <data_file> <ops_file> <recent_data_file> <history_data_file>",
             args[0]
         );
         return Ok(());
     }
     let data_file = &args[1];
     let ops_file = &args[2];
-    let expected_data_file = &args[3];
+    let recent_data_file = &args[3];
+    let history_data_file = &args[4];
     println!("Data file: {}", data_file);
     println!("Ops file: {}", ops_file);
-    println!("Expected data file: {}", expected_data_file);
+    println!("Recent data file: {}", recent_data_file);
+    println!("History data file: {}", history_data_file);
 
     // Read data and operations
     let data = read_data_file(data_file)?;
@@ -80,6 +82,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             "get" => {
                 let _ = rust_hash_map.get(&key_pkey);
             }
+            "commit" => {
+                // No-op for Rust's HashMap
+            }
             _ => {
                 eprintln!("Unknown operation: {}", op.op_type);
             }
@@ -123,6 +128,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             "get" => {
                 let _ = hash_join_table.get(&op.key, &op.pkey, op.ts)?;
             }
+            "commit" => {
+                // Implement commit if needed
+            }
             _ => {
                 eprintln!("Unknown operation: {}", op.op_type);
             }
@@ -135,22 +143,44 @@ fn main() -> Result<(), Box<dyn Error>> {
         op_num, duration_hj
     );
 
-    // Perform consistency check with expected data
-    let expected_data = read_expected_data_file(expected_data_file)?;
-
-    // Check HashJoinTable data against expected data
-    let is_consistent_hj = check_consistency_hash_join_table(&hash_join_table, &expected_data)?;
+    // Perform consistency check with expected recent data
+    let expected_recent_data = read_expected_data_file(recent_data_file)?;
+    let is_consistent_hj =
+        check_consistency_hash_join_table(&hash_join_table, &expected_recent_data)?;
     println!(
-        "HashJoinTable consistency check: {}",
+        "HashJoinTable recent data consistency check: {}",
         if is_consistent_hj { "PASSED" } else { "FAILED" }
     );
 
-    // // Check Rust HashMap data against expected data
-    // let is_consistent_hashmap = check_consistency_hash_map(&rust_hash_map, &expected_data);
-    // println!(
-    //     "Rust HashMap consistency check: {}",
-    //     if is_consistent_hashmap { "PASSED" } else { "FAILED" }
-    // );
+    // Perform full consistency check with expected full data
+    let expected_full_data = {
+        let mut data = read_expected_full_data_file(recent_data_file)?;
+        let mut history_data = read_expected_full_data_file(history_data_file)?;
+        data.append(&mut history_data);
+        data
+    };
+
+    let is_full_consistent_hj =
+        check_full_consistency_hash_join_table(&hash_join_table, &expected_full_data)?;
+    println!(
+        "HashJoinTable full consistency check: {}",
+        if is_full_consistent_hj {
+            "PASSED"
+        } else {
+            "FAILED"
+        }
+    );
+
+    // Check Rust HashMap data against expected recent data
+    let is_consistent_hashmap = check_consistency_hash_map(&rust_hash_map, &expected_recent_data);
+    println!(
+        "Rust HashMap consistency check: {}",
+        if is_consistent_hashmap {
+            "PASSED"
+        } else {
+            "FAILED"
+        }
+    );
 
     // Perform consistency check between HashJoinTable and Rust HashMap
     let is_consistent =
@@ -234,7 +264,7 @@ fn read_ops_file(file_path: &str) -> io::Result<Vec<Operation>> {
     Ok(operations)
 }
 
-// Function to read expected data after ops (data_after_ops.csv)
+// Function to read expected data after ops (recent_data_after_ops.csv)
 fn read_expected_data_file(file_path: &str) -> io::Result<HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>> {
     let mut expected_data = HashMap::new();
     let file = File::open(file_path)?;
@@ -245,13 +275,44 @@ fn read_expected_data_file(file_path: &str) -> io::Result<HashMap<(Vec<u8>, Vec<
         }
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() >= 5 {
+            let start_ts = parts[0];
+            let end_ts = parts[1];
             let key = parts[2].as_bytes().to_vec();
             let pkey = parts[3].as_bytes().to_vec();
             let value = parts[4].as_bytes().to_vec();
             expected_data.insert((key, pkey), value);
+        } else {
+            eprintln!("Invalid line (expected at least 5 fields): {}", line);
         }
     }
     Ok(expected_data)
+}
+
+fn read_expected_full_data_file(
+    file_path: &str,
+) -> io::Result<Vec<(Timestamp, Timestamp, Vec<u8>, Vec<u8>, Vec<u8>)>> {
+    let mut data = Vec::new();
+    let file = File::open(file_path)?;
+    for line in io::BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue; // Skip empty lines
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() >= 5 {
+            let start_ts = parts[0].parse::<u64>().unwrap_or(0);
+            let end_ts = if parts[1] == "-1" {
+                u64::MAX
+            } else {
+                parts[1].parse::<u64>().unwrap_or(u64::MAX)
+            };
+            let key = parts[2].as_bytes().to_vec();
+            let pkey = parts[3].as_bytes().to_vec();
+            let value = parts[4].as_bytes().to_vec();
+            data.push((start_ts, end_ts, key, pkey, value));
+        }
+    }
+    Ok(data)
 }
 
 // Function to check consistency of HashJoinTable with expected data
@@ -366,25 +427,24 @@ fn check_consistency_between_hash_join_and_hash_map(
 ) -> Result<bool, Box<dyn Error>> {
     let mut is_consistent = true;
 
-    // Collect entries from HashJoinTable
+    // Collect entries from HashJoinTable valid at ts = u64::MAX
     let mut hjt_entries: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
     let scanner = hash_join_table.scan(u64::MAX)?;
     for entry in scanner {
         hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
-        // hjt_entries.insert((entry.0, entry.1), entry.2);
     }
 
     // Compare entries in Rust HashMap with entries in HashJoinTable
-    for ((key, pkey), expected_value) in rust_hash_map {
+    for ((key, pkey), value) in rust_hash_map {
         match hjt_entries.get(&(key.clone(), pkey.clone())) {
-            Some(value) => {
-                if value != expected_value {
+            Some(hjt_value) => {
+                if hjt_value != value {
                     eprintln!(
-                        "Mismatch for key '{}', pkey '{}': expected '{}', got '{}'",
-                        bytes_to_string(&key),
-                        bytes_to_string(&pkey),
-                        bytes_to_string(expected_value),
-                        bytes_to_string(value)
+                        "Mismatch for key '{}', pkey '{}': Rust HashMap value '{}', HashJoinTable value '{}'",
+                        bytes_to_string(key),
+                        bytes_to_string(pkey),
+                        bytes_to_string(value),
+                        bytes_to_string(hjt_value)
                     );
                     is_consistent = false;
                 }
@@ -392,8 +452,8 @@ fn check_consistency_between_hash_join_and_hash_map(
             None => {
                 eprintln!(
                     "Missing entry in HashJoinTable for key '{}', pkey '{}'",
-                    bytes_to_string(&key),
-                    bytes_to_string(&pkey)
+                    bytes_to_string(key),
+                    bytes_to_string(pkey)
                 );
                 is_consistent = false;
             }
@@ -401,15 +461,72 @@ fn check_consistency_between_hash_join_and_hash_map(
     }
 
     // Check for any extra entries in HashJoinTable not present in Rust HashMap
-    for ((key, pkey), value) in hjt_entries {
+    for ((key, pkey), hjt_value) in hjt_entries {
         if !rust_hash_map.contains_key(&(key.clone(), pkey.clone())) {
             eprintln!(
                 "Extra entry in HashJoinTable: key '{}', pkey '{}', value '{}'",
                 bytes_to_string(&key),
                 bytes_to_string(&pkey),
-                bytes_to_string(&value)
+                bytes_to_string(&hjt_value)
             );
             is_consistent = false;
+        }
+    }
+
+    Ok(is_consistent)
+}
+
+fn check_full_consistency_hash_join_table(
+    hash_join_table: &HashJoinTable<impl MemPool>,
+    expected_data: &Vec<(u64, u64, Vec<u8>, Vec<u8>, Vec<u8>)>,
+) -> Result<bool, Box<dyn Error>> {
+    let mut is_consistent = true;
+
+    // Collect all entries from HashJoinTable
+    let mut hjt_entries: HashSet<MvccEntry> = HashSet::new();
+    let scanner = hash_join_table.scan_all()?; // Implement scan_all method
+    for entry in scanner {
+        hjt_entries.insert(entry);
+    }
+
+    // Create a HashSet of expected entries for comparison
+    let expected_entries: HashSet<MvccEntry> = expected_data
+        .iter()
+        .map(|(start_ts, end_ts, key, pkey, value)| MvccEntry {
+            start_ts: *start_ts,
+            end_ts: *end_ts,
+            key: key.clone(),
+            pkey: pkey.clone(),
+            value: value.clone(),
+        })
+        .collect();
+
+    // Compare the sets
+    if hjt_entries != expected_entries {
+        is_consistent = false;
+        let missing_entries = expected_entries.difference(&hjt_entries);
+        let extra_entries = hjt_entries.difference(&expected_entries);
+
+        for entry in missing_entries {
+            eprintln!(
+                "Missing entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
+                entry.start_ts,
+                if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
+                bytes_to_string(&entry.key),
+                bytes_to_string(&entry.pkey),
+                bytes_to_string(&entry.value)
+            );
+        }
+
+        for entry in extra_entries {
+            eprintln!(
+                "Extra entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
+                entry.start_ts,
+                if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
+                bytes_to_string(&entry.key),
+                bytes_to_string(&entry.pkey),
+                bytes_to_string(&entry.value)
+            );
         }
     }
 

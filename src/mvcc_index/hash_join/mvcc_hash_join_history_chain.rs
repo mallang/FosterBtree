@@ -302,6 +302,13 @@ impl<T: MemPool> MvccHashJoinHistoryChain<T> {
             ts,
         ))
     }
+
+    pub fn scan_all(&self) -> Result<MvccHashJoinHistoryChainScanner<T>, AccessMethodError> {
+        // Create a scanner with ts = u64::MAX and no timestamp filtering
+        Ok(MvccHashJoinHistoryChainScanner::new_full_scan(Arc::new(
+            self.clone(),
+        )))
+    }
 }
 
 // Implement Clone for MvccHashJoinHistoryChain to allow cloning
@@ -319,16 +326,28 @@ impl<T: MemPool> Clone for MvccHashJoinHistoryChain<T> {
 pub struct MvccHashJoinHistoryChainScanner<T: MemPool> {
     chain: Arc<MvccHashJoinHistoryChain<T>>,
     ts: Timestamp,
+    filter_by_ts: bool,
     current_page: Option<FrameReadGuard<'static>>,
     current_slot_id: u32,
     finished: bool,
 }
-
 impl<T: MemPool> MvccHashJoinHistoryChainScanner<T> {
     pub fn new(chain: Arc<MvccHashJoinHistoryChain<T>>, ts: Timestamp) -> Self {
         Self {
             chain,
             ts,
+            filter_by_ts: true,
+            current_page: None,
+            current_slot_id: 0,
+            finished: false,
+        }
+    }
+
+    pub fn new_full_scan(chain: Arc<MvccHashJoinHistoryChain<T>>) -> Self {
+        Self {
+            chain,
+            ts: u64::MAX, // ts is irrelevant in full scan
+            filter_by_ts: false,
             current_page: None,
             current_slot_id: 0,
             finished: false,
@@ -365,7 +384,20 @@ impl<T: MemPool> Iterator for MvccHashJoinHistoryChainScanner<T> {
                     MvccHashJoinHistoryPage::get_entry_at_slot(page_ref, self.current_slot_id);
                 self.current_slot_id += 1;
 
-                if entry.start_ts <= self.ts && self.ts < entry.end_ts {
+                if self.filter_by_ts {
+                    if entry.start_ts <= self.ts && self.ts < entry.end_ts {
+                        return Some((
+                            entry.start_ts,
+                            entry.end_ts,
+                            entry.key.clone(),
+                            entry.pkey.clone(),
+                            entry.value.clone(),
+                        ));
+                    } else {
+                        continue;
+                    }
+                } else {
+                    // Full scan, return all entries
                     return Some((
                         entry.start_ts,
                         entry.end_ts,
@@ -373,8 +405,6 @@ impl<T: MemPool> Iterator for MvccHashJoinHistoryChainScanner<T> {
                         entry.pkey.clone(),
                         entry.value.clone(),
                     ));
-                } else {
-                    continue;
                 }
             } else {
                 // Move to the next page

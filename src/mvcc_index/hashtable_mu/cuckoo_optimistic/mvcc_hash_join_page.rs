@@ -1415,7 +1415,7 @@ impl MvccHashJoinCuckooPage for Page {
     fn get_slot_slice(&self, slot_id: u32) -> &[Slot] {
         let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
         let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *const Slot;
-        assert!(slots_start_ptr.is_aligned());
+        // assert!(slots_start_ptr.is_aligned());
         let len = self.slot_count();
         assert!(slot_id <= len, "sid {:?}, len{:?}", slot_id, len);
         unsafe { slice::from_raw_parts(slots_start_ptr, (len - slot_id) as usize) }

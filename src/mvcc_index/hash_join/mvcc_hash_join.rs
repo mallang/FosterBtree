@@ -2,7 +2,7 @@ use crate::{
     access_method::fbt::FosterBtreeRangeScanner,
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_debug, log_trace, log_warn,
-    mvcc_index::{Delta, MvccIndex},
+    mvcc_index::{Delta, MvccEntry, MvccIndex},
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
     prelude::AccessMethodError,
 };
@@ -47,7 +47,7 @@ pub struct HashJoinTable<T: MemPool> {
         Arc<MvccHashJoinRecentChain<T>>,
         Arc<MvccHashJoinHistoryChain<T>>,
     )>,
-    // tx_status: HashMap<TxId, TxStatus>,
+    // tx_status: HashMap<TxId, TxStatus>, // Neet to written down to disk later...
 }
 
 impl<T: MemPool> MvccIndex for HashJoinTable<T> {
@@ -385,6 +385,10 @@ impl<T: MemPool> HashJoinTable<T> {
     pub fn scan(&self, ts: Timestamp) -> Result<HashJoinTableScanner<T>, AccessMethodError> {
         Ok(HashJoinTableScanner::new(Arc::new(self.clone()), ts))
     }
+
+    pub fn scan_all(&self) -> Result<HashJoinTableFullScanner<T>, AccessMethodError> {
+        Ok(HashJoinTableFullScanner::new(Arc::new(self.clone())))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -619,13 +623,96 @@ impl<T: MemPool> Iterator for HashJoinTableScanner<T> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MvccEntry {
-    pub key: Vec<u8>,
-    pub pkey: Vec<u8>,
-    pub start_ts: Timestamp,
-    pub end_ts: Timestamp,
-    pub value: Vec<u8>,
+pub struct HashJoinTableFullScanner<T: MemPool> {
+    table: Arc<HashJoinTable<T>>,
+    bucket_index: usize,
+    recent_scanner: Option<MvccHashJoinRecentChainScanner<T>>,
+    history_scanner: Option<MvccHashJoinHistoryChainScanner<T>>,
+    current_entries: Vec<MvccEntry>,
+    entry_index: usize,
+}
+
+impl<T: MemPool> HashJoinTableFullScanner<T> {
+    pub fn new(table: Arc<HashJoinTable<T>>) -> Self {
+        Self {
+            table,
+            bucket_index: 0,
+            recent_scanner: None,
+            history_scanner: None,
+            current_entries: Vec::new(),
+            entry_index: 0,
+        }
+    }
+}
+
+impl<T: MemPool> Iterator for HashJoinTableFullScanner<T> {
+    type Item = MvccEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.entry_index < self.current_entries.len() {
+                // Return the next entry from current_entries
+                let entry = self.current_entries[self.entry_index].clone();
+                self.entry_index += 1;
+                return Some(entry);
+            } else {
+                // Move to the next bucket
+                if self.bucket_index >= self.table.num_buckets {
+                    // No more buckets to scan
+                    return None;
+                }
+
+                // Reset current_entries and entry_index
+                self.current_entries.clear();
+                self.entry_index = 0;
+
+                // Get the recent and history chains for the current bucket
+                let (recent_chain, history_chain) = &self.table.bucket_entries[self.bucket_index];
+
+                // Initialize scanners
+                self.recent_scanner = Some(MvccHashJoinRecentChainScanner::new(
+                    Arc::clone(recent_chain),
+                    u64::MAX, // Use ts = u64::MAX to get all entries
+                ));
+                self.history_scanner = Some(MvccHashJoinHistoryChainScanner::new_full_scan(
+                    Arc::clone(history_chain),
+                ));
+
+                // Collect entries from both scanners
+                let mut entries = Vec::new();
+
+                if let Some(ref mut scanner) = self.recent_scanner {
+                    for (start_ts, end_ts, key, pkey, value) in scanner {
+                        entries.push(MvccEntry {
+                            start_ts,
+                            end_ts,
+                            key,
+                            pkey,
+                            value,
+                        });
+                    }
+                }
+
+                if let Some(ref mut scanner) = self.history_scanner {
+                    for (start_ts, end_ts, key, pkey, value) in scanner {
+                        entries.push(MvccEntry {
+                            start_ts,
+                            end_ts,
+                            key,
+                            pkey,
+                            value,
+                        });
+                    }
+                }
+
+                // Store the entries
+                self.current_entries = entries;
+                self.bucket_index += 1;
+
+                // Loop back to attempt to return entries from current_entries
+            }
+        }
+    }
 }
 
 #[cfg(test)]

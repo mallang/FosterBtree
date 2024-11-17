@@ -16,9 +16,7 @@ use crate::{
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::{
-    mvcc_hash_join::MvccEntry, mvcc_hash_join_recent_page::MvccHashJoinRecentPage, Timestamp,
-};
+use super::{mvcc_hash_join_recent_page::MvccHashJoinRecentPage, Timestamp};
 
 pub struct MvccHashJoinRecentChain<T: MemPool> {
     mem_pool: Arc<T>,

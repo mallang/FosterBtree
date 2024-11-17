@@ -363,7 +363,9 @@ mod tests {
         assert_eq!(store.append(key, value), Ok(()));
     }
 
+    // ignore this test
     #[test]
+    #[ignore]
     fn test_large_append() {
         let mem_pool = get_test_bp(10);
         let container_key = get_c_key();

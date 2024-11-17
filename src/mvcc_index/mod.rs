@@ -5,7 +5,12 @@ pub type TxId = u64; // Transaction ID
 
 use crate::bp::{ContainerKey, MemPool};
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt::Debug, sync::Arc};
+use std::{
+    error::Error,
+    fmt::Debug,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxStatusType {
@@ -26,9 +31,31 @@ pub struct MvccEntry {
     pub pkey: Vec<u8>,
     pub value: Vec<u8>,
 
-    pub tx_id: TxId,
+    // pub tx_id: TxId,
     pub start_ts: Timestamp,
     pub end_ts: Timestamp,
+}
+
+impl PartialEq for MvccEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.start_ts == other.start_ts
+            && self.end_ts == other.end_ts
+            && self.key == other.key
+            && self.pkey == other.pkey
+            && self.value == other.value
+    }
+}
+
+impl Eq for MvccEntry {}
+
+impl Hash for MvccEntry {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.start_ts.hash(state);
+        self.end_ts.hash(state);
+        self.key.hash(state);
+        self.pkey.hash(state);
+        self.value.hash(state);
+    }
 }
 
 pub trait MvccIndex {

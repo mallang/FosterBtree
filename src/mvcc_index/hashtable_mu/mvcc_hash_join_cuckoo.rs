@@ -2,6 +2,7 @@ use core::str;
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write},
+    mem::size_of,
     sync::{atomic::AtomicU32, Arc},
     time::Duration,
 };

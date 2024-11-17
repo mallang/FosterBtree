@@ -1,7 +1,8 @@
-use super::{mvcc_hash_join::MvccEntry, Timestamp};
+use super::Timestamp;
 use crate::{
     access_method::AccessMethodError,
     log_debug,
+    mvcc_index::MvccEntry,
     prelude::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
