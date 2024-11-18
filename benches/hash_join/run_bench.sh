@@ -21,11 +21,12 @@ echo "Project root directory: $PROJECT_ROOT"
 cd "$PROJECT_ROOT"
 
 # Build the Rust project
-echo "Building the Rust project..."
-cargo build --release
+# echo "Building the Rust project..."
+# RUSTFLAGS="-Aunused-imports -Adeprecated" cargo build --release
 
 # Run the benchmark
 echo "Running the Rust benchmark..."
+# env RUSTFLAGS="-Aunused-variables -Aunreachable-code -Aunused-assignments -Aunconditional-recursion -Adead-code -Aunused-fields -Aunused-variables -Aunused-imports -Aunused-must-use -Adeprecated" cargo run --release --bin hash_join_bench -- "$DATA_CSV" "$OPS_CSV" "$RECENT_DATA_CSV" "$HISTORY_DATA_CSV"
 cargo run --release --bin hash_join_bench -- "$DATA_CSV" "$OPS_CSV" "$RECENT_DATA_CSV" "$HISTORY_DATA_CSV"
 
 echo "Benchmark completed."

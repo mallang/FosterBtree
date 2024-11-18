@@ -19,8 +19,8 @@ echo ""
 # You can adjust these parameters as needed
 
 # Update TXS_PARAMS to include the get_ratio parameter
-DATA_PARAMS="-n 10 -k 8 -p 8 -vmin 32 -vmax 64 -s 5"
-TXS_PARAMS="-n 5 -minc 2 -maxc 4 -ro 0.0 -i 0.1 -u 0.3 -d 0.1 -g 0.5"
+DATA_PARAMS="-n 1000 -k 8 -p 8 -vmin 32 -vmax 64 -s 5"
+TXS_PARAMS="-n 100 -minc 8 -maxc 12 -ro 0.0 -i 0.1 -u 0.3 -d 0.1 -g 0.5"
 
 # Run gen_data.py with parameters
 echo "Running gen_data.py with parameters: $DATA_PARAMS"
