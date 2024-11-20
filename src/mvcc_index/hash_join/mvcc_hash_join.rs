@@ -21,7 +21,7 @@ use super::{
     mvcc_hash_join_history_page::MvccHashJoinHistoryPage,
     mvcc_hash_join_recent_chain::{MvccHashJoinRecentChain, MvccHashJoinRecentChainScanner},
     mvcc_hash_join_recent_page::MvccHashJoinRecentPage,
-    Timestamp, TxId, TxStatus,
+    Timestamp, TxId, TxInfo,
 };
 
 use rand::seq::index;
@@ -31,9 +31,9 @@ pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
 pub const BUCKET_ENTRY_SIZE: usize = std::mem::size_of::<BucketEntry>();
 pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
 
-pub const DEAFAULT_NUM_BUCKETS: usize = 16;
+pub const DEAFAULT_NUM_BUCKETS: usize = 1024;
 
-pub struct HashJoinTable<T: MemPool> {
+pub struct MvccHashJoinTable<T: MemPool> {
     // txid: u64,
     // ts: Timestamp,
     mem_pool: Arc<T>,
@@ -50,7 +50,7 @@ pub struct HashJoinTable<T: MemPool> {
     // tx_status: HashMap<TxId, TxStatus>, // Neet to written down to disk later...
 }
 
-impl<T: MemPool> MvccIndex for HashJoinTable<T> {
+impl<T: MemPool> MvccIndex for MvccHashJoinTable<T> {
     type Key = Vec<u8>;
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
@@ -76,7 +76,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         // self.insert(key, pkey, ts, tx_id, value)
-        HashJoinTable::insert(self, key, pkey, ts, tx_id, value)
+        MvccHashJoinTable::insert(self, key, pkey, ts, tx_id, value)
     }
 
     fn get(
@@ -85,7 +85,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         pkey: &Self::PKey,
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
-        match HashJoinTable::get(self, key, pkey, ts) {
+        match MvccHashJoinTable::get(self, key, pkey, ts) {
             Ok(val) => Ok(Some(val)),
             Err(AccessMethodError::KeyNotFound) => Ok(None),
             Err(e) => Err(e),
@@ -108,7 +108,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        HashJoinTable::update(self, key, pkey, ts, tx_id, value)
+        MvccHashJoinTable::update(self, key, pkey, ts, tx_id, value)
     }
 
     fn delete(
@@ -143,7 +143,7 @@ impl<T: MemPool> MvccIndex for HashJoinTable<T> {
     }
 }
 
-impl<T: MemPool> HashJoinTable<T> {
+impl<T: MemPool> MvccHashJoinTable<T> {
     /// Creates a new hash join table with the default number of buckets.
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEAFAULT_NUM_BUCKETS)
@@ -214,7 +214,7 @@ impl<T: MemPool> HashJoinTable<T> {
 
     /// Constructs a hash join table from an existing meta page.
     pub fn new_from_page(c_key: ContainerKey, mem_pool: Arc<T>, meta_pid: PageId) -> Self {
-        let temp_table = HashJoinTable {
+        let temp_table = MvccHashJoinTable {
             mem_pool: mem_pool.clone(),
             c_key,
             meta_page_id: meta_pid,
@@ -249,7 +249,7 @@ impl<T: MemPool> HashJoinTable<T> {
         }
         drop(meta_page);
 
-        HashJoinTable {
+        MvccHashJoinTable {
             mem_pool,
             c_key,
             meta_page_id: meta_pid,
@@ -382,8 +382,8 @@ impl<T: MemPool> HashJoinTable<T> {
         (hasher.finish() as usize) % self.num_buckets
     }
 
-    pub fn scan(&self, ts: Timestamp) -> Result<HashJoinTableScanner<T>, AccessMethodError> {
-        Ok(HashJoinTableScanner::new(Arc::new(self.clone()), ts))
+    pub fn scan(&self, ts: Timestamp) -> Result<MvccHashJoinTableScanner<T>, AccessMethodError> {
+        Ok(MvccHashJoinTableScanner::new(Arc::new(self.clone()), ts))
     }
 
     pub fn scan_all(&self) -> Result<HashJoinTableFullScanner<T>, AccessMethodError> {
@@ -499,7 +499,7 @@ impl MvccHashJoinMetaPage for Page {
     }
 }
 
-impl<T: MemPool> Clone for HashJoinTable<T> {
+impl<T: MemPool> Clone for MvccHashJoinTable<T> {
     fn clone(&self) -> Self {
         Self {
             mem_pool: Arc::clone(&self.mem_pool),
@@ -515,8 +515,8 @@ impl<T: MemPool> Clone for HashJoinTable<T> {
     }
 }
 
-pub struct HashJoinTableScanner<T: MemPool> {
-    table: Arc<HashJoinTable<T>>,
+pub struct MvccHashJoinTableScanner<T: MemPool> {
+    table: Arc<MvccHashJoinTable<T>>,
     ts: Timestamp,
     bucket_index: usize,
     recent_scanner: Option<MvccHashJoinRecentChainScanner<T>>,
@@ -526,8 +526,8 @@ pub struct HashJoinTableScanner<T: MemPool> {
     seen_entries: HashSet<(Vec<u8>, Vec<u8>)>, // To track (key, pkey) pairs (to avoid duplicate)
 }
 
-impl<T: MemPool> HashJoinTableScanner<T> {
-    pub fn new(table: Arc<HashJoinTable<T>>, ts: Timestamp) -> Self {
+impl<T: MemPool> MvccHashJoinTableScanner<T> {
+    pub fn new(table: Arc<MvccHashJoinTable<T>>, ts: Timestamp) -> Self {
         Self {
             table,
             ts,
@@ -541,7 +541,7 @@ impl<T: MemPool> HashJoinTableScanner<T> {
     }
 }
 
-impl<T: MemPool> Iterator for HashJoinTableScanner<T> {
+impl<T: MemPool> Iterator for MvccHashJoinTableScanner<T> {
     type Item = MvccEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -624,7 +624,7 @@ impl<T: MemPool> Iterator for HashJoinTableScanner<T> {
 }
 
 pub struct HashJoinTableFullScanner<T: MemPool> {
-    table: Arc<HashJoinTable<T>>,
+    table: Arc<MvccHashJoinTable<T>>,
     bucket_index: usize,
     recent_scanner: Option<MvccHashJoinRecentChainScanner<T>>,
     history_scanner: Option<MvccHashJoinHistoryChainScanner<T>>,
@@ -633,7 +633,7 @@ pub struct HashJoinTableFullScanner<T: MemPool> {
 }
 
 impl<T: MemPool> HashJoinTableFullScanner<T> {
-    pub fn new(table: Arc<HashJoinTable<T>>) -> Self {
+    pub fn new(table: Arc<MvccHashJoinTable<T>>) -> Self {
         Self {
             table,
             bucket_index: 0,
@@ -809,7 +809,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(1, 1);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Insert multiple records
         let num_records = 100;
@@ -843,7 +844,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(2, 2);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Insert and update records
         let key = b"key_update".to_vec();
@@ -877,7 +879,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(3, 3);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Generate a large value close to page size
         let large_val = vec![b'x'; (AVAILABLE_PAGE_SIZE / 2) as usize];
@@ -900,7 +903,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(4, 4);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Generate an oversized value exceeding page size
         let oversized_val = vec![b'x'; (AVAILABLE_PAGE_SIZE + 1) as usize];
@@ -919,7 +923,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(5, 5);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         let key = b"".to_vec();
         let pkey = b"pkey_empty".to_vec();
@@ -941,7 +946,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(6, 6);
         let num_buckets = 8;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         let num_records = 10000;
         let mut bucket_counts = vec![0; num_buckets];
@@ -1078,7 +1084,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(9, 9);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         let key = b"key_test".to_vec();
         let pkey = b"pkey_test".to_vec();
@@ -1104,7 +1111,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(10, 10);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         let key = b"key_nonexistent".to_vec();
         let pkey = b"pkey_nonexistent".to_vec();
@@ -1121,7 +1129,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(11, 11);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         let key = b"key_future".to_vec();
         let pkey = b"pkey_future".to_vec();
@@ -1144,7 +1153,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(12, 12);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         let key = b"key_past".to_vec();
         let pkey = b"pkey_past".to_vec();
@@ -1174,7 +1184,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(13, 13);
         let num_buckets = 16;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Define the number of operations
         let num_operations = 10_000;
@@ -1353,7 +1364,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(100, 100);
         let num_buckets = 8;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Insert entries
         let entries = vec![
@@ -1418,7 +1430,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(101, 101);
         let num_buckets = 8;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Insert an entry
         let key = b"key1".to_vec();
@@ -1476,7 +1489,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(102, 102);
         let num_buckets = 8;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Insert an entry
         let key = b"key1".to_vec();
@@ -1523,7 +1537,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(103, 103);
         let num_buckets = 8;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Insert entries
         let entries = vec![
@@ -1609,7 +1624,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(104, 104);
         let num_buckets = 8;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         // Scan the empty table
         let scan_ts = 10u64;
@@ -1626,7 +1642,8 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(105, 105);
         let num_buckets = 8;
-        let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
+        let hash_table =
+            MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
 
         let tx_id = 1;
 

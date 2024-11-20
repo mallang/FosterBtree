@@ -13,16 +13,16 @@ use std::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TxStatusType {
+pub enum TxStatus {
     Committed(Timestamp),
     Aborted,
     Active,
 }
 
-pub struct TxStatus {
+pub struct TxInfo {
     pub tx_id: TxId,
     pub ts: Timestamp,
-    pub status: TxStatusType,
+    pub status: TxStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

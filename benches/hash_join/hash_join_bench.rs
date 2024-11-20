@@ -1,5 +1,5 @@
 use fbtree::mvcc_index::{MvccEntry, MvccIndex, Timestamp};
-use fbtree::{mvcc_index::hash_join::mvcc_hash_join::HashJoinTable, prelude::*};
+use fbtree::{mvcc_index::hash_join::mvcc_hash_join::MvccHashJoinTable, prelude::*};
 // use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HashJoinTable, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -9,9 +9,9 @@ use std::time::Instant;
 fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 5 {
+    if args.len() < 6 {
         eprintln!(
-            "Usage: {} <data_file> <ops_file> <recent_data_file> <history_data_file>",
+            "Usage: {} <data_file> <ops_file> <recent_data_file> <history_data_file> <scan_ops_file>",
             args[0]
         );
         return Ok(());
@@ -20,10 +20,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ops_file = &args[2];
     let recent_data_file = &args[3];
     let history_data_file = &args[4];
+    let scan_ops_file = &args[5];
     println!("Data file: {}", data_file);
     println!("Ops file: {}", ops_file);
     println!("Recent data file: {}", recent_data_file);
     println!("History data file: {}", history_data_file);
+    println!("Scan operations file: {}", scan_ops_file);
 
     // Read data and operations
     let data = read_data_file(data_file)?;
@@ -32,9 +34,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let data_num = data.len();
 
     // Initialize the hash join table using the MvccIndex trait
-    let mem_pool = get_in_mem_pool(); // You need to implement or import this function
+    let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
-    let hash_join_table = HashJoinTable::create(c_key, mem_pool.clone())?;
+    let hash_join_table = MvccHashJoinTable::create(c_key, mem_pool.clone())?;
 
     // Initialize Rust's default HashMap
     let mut rust_hash_map: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
@@ -317,7 +319,7 @@ fn read_expected_full_data_file(
 
 // Function to check consistency of HashJoinTable with expected data
 fn check_consistency_hash_join_table(
-    hash_join_table: &HashJoinTable<impl MemPool>,
+    hash_join_table: &MvccHashJoinTable<impl MemPool>,
     expected_data: &HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
 ) -> Result<bool, Box<dyn Error>> {
     let mut is_consistent = true;
@@ -422,7 +424,7 @@ fn check_consistency_hash_map(
 }
 
 fn check_consistency_between_hash_join_and_hash_map(
-    hash_join_table: &HashJoinTable<impl MemPool>,
+    hash_join_table: &MvccHashJoinTable<impl MemPool>,
     rust_hash_map: &HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
 ) -> Result<bool, Box<dyn Error>> {
     let mut is_consistent = true;
@@ -477,7 +479,7 @@ fn check_consistency_between_hash_join_and_hash_map(
 }
 
 fn check_full_consistency_hash_join_table(
-    hash_join_table: &HashJoinTable<impl MemPool>,
+    hash_join_table: &MvccHashJoinTable<impl MemPool>,
     expected_data: &Vec<(u64, u64, Vec<u8>, Vec<u8>, Vec<u8>)>,
 ) -> Result<bool, Box<dyn Error>> {
     let mut is_consistent = true;
@@ -527,6 +529,102 @@ fn check_full_consistency_hash_join_table(
                 bytes_to_string(&entry.pkey),
                 bytes_to_string(&entry.value)
             );
+        }
+    }
+
+    Ok(is_consistent)
+}
+
+fn read_scan_ops_file(
+    file_path: &str,
+) -> Result<Vec<(u64, Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>)>, Box<dyn Error>> {
+    let mut scan_operations = Vec::new();
+
+    let file = File::open(file_path)?;
+    let reader = io::BufReader::new(file);
+    let mut lines = reader.lines();
+
+    while let Some(line) = lines.next() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+        if parts.len() == 3 && parts[0] == "scan" && parts[1] == "ts" {
+            let ts = parts[2].parse::<u64>()?;
+            let mut entries = Vec::new();
+
+            while let Some(entry_line) = lines.next() {
+                let entry_line = entry_line?;
+                if entry_line.trim().is_empty() {
+                    break;
+                }
+                let entry_parts: Vec<&str> = entry_line.split(',').map(|s| s.trim()).collect();
+                if entry_parts.len() >= 3 {
+                    let key = entry_parts[0].as_bytes().to_vec();
+                    let pkey = entry_parts[1].as_bytes().to_vec();
+                    let value = entry_parts[2].as_bytes().to_vec();
+                    entries.push((key, pkey, value));
+                }
+            }
+            scan_operations.push((ts, entries));
+        }
+    }
+
+    Ok(scan_operations)
+}
+
+fn perform_scans_and_check(
+    hash_join_table: &MvccHashJoinTable<impl MemPool>,
+    scan_operations: &[(u64, Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>)],
+) -> Result<bool, Box<dyn Error>> {
+    let mut is_consistent = true;
+
+    for (ts, expected_entries) in scan_operations {
+        let effective_ts = if *ts == u64::MAX || *ts == -1_i64 as u64 {
+            u64::MAX
+        } else {
+            *ts
+        };
+
+        // Perform the scan at the specified timestamp
+        let scanner = hash_join_table.scan(effective_ts)?;
+        let mut scan_results: HashSet<(Vec<u8>, Vec<u8>, Vec<u8>)> = HashSet::new();
+        for entry in scanner {
+            scan_results.insert((entry.key.clone(), entry.pkey.clone(), entry.value.clone()));
+        }
+
+        // Convert expected entries to a set
+        let expected_set: HashSet<(Vec<u8>, Vec<u8>, Vec<u8>)> =
+            expected_entries.iter().cloned().collect();
+
+        // Compare results
+        if scan_results != expected_set {
+            is_consistent = false;
+
+            let missing_entries: Vec<_> = expected_set.difference(&scan_results).collect();
+            let extra_entries: Vec<_> = scan_results.difference(&expected_set).collect();
+
+            println!("Discrepancies found in scan at timestamp {}:", ts);
+
+            for (key, pkey, value) in missing_entries {
+                println!(
+                    "Missing entry: key '{}', pkey '{}', value '{}'",
+                    bytes_to_string(key),
+                    bytes_to_string(pkey),
+                    bytes_to_string(value)
+                );
+            }
+
+            for (key, pkey, value) in extra_entries {
+                println!(
+                    "Extra entry: key '{}', pkey '{}', value '{}'",
+                    bytes_to_string(key),
+                    bytes_to_string(pkey),
+                    bytes_to_string(value)
+                );
+            }
         }
     }
 

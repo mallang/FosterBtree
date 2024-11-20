@@ -1,5 +1,5 @@
 use fbtree::mvcc_index::MvccIndex;
-use fbtree::{mvcc_index::hash_join::mvcc_hash_join::HashJoinTable, prelude::*};
+use fbtree::{mvcc_index::hash_join::mvcc_hash_join::MvccHashJoinTable, prelude::*};
 // use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HashJoinTable, prelude::*};
 use serde::de::value;
 
@@ -12,7 +12,7 @@ fn bench_update_perflog() -> Result<(), Box<dyn Error>> {
     // Initialize the hash join table using the MvccIndex trait
     let mem_pool = get_in_mem_pool(); // You need to implement or import this function
     let c_key = ContainerKey::new(0, 0);
-    let hash_join_table = HashJoinTable::create(c_key, mem_pool.clone())?;
+    let hash_join_table = MvccHashJoinTable::create(c_key, mem_pool.clone())?;
 
     let data_num = 10000 as usize;
     let data = (0..data_num)
@@ -92,7 +92,7 @@ fn bench_update() -> Result<(), Box<dyn Error>> {
     // Initialize the hash join table using the MvccIndex trait
     let mem_pool = get_in_mem_pool(); // You need to implement or import this function
     let c_key = ContainerKey::new(0, 0);
-    let hash_join_table = HashJoinTable::create(c_key, mem_pool.clone())?;
+    let hash_join_table = MvccHashJoinTable::create(c_key, mem_pool.clone())?;
 
     let data_num = 10000 as usize;
     let data = (0..data_num)
@@ -181,7 +181,7 @@ fn bench_insert() -> Result<(), Box<dyn Error>> {
     // Initialize the hash join table using the MvccIndex trait
     let mem_pool = get_in_mem_pool(); // You need to implement or import this function
     let c_key = ContainerKey::new(0, 0);
-    let hash_join_table = HashJoinTable::create(c_key, mem_pool.clone())?;
+    let hash_join_table = MvccHashJoinTable::create(c_key, mem_pool.clone())?;
 
     let data_num = 10000 as usize;
     let data = (0..data_num)

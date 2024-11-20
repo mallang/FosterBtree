@@ -1,4 +1,5 @@
 mod inmem;
+mod mvcc_hash_storage;
 mod ondisk;
 mod txn_storage_trait;
 

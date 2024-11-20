@@ -7,4 +7,4 @@ mod mvcc_hash_join_recent_page;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Timestamp, TxId, TxStatus};
+use super::{Timestamp, TxId, TxInfo};
