@@ -3,10 +3,8 @@ use std::{fmt, sync::Arc};
 use crate::bp::MemPoolStatus;
 
 pub mod append_only_store;
-pub mod bloom_chain;
 pub mod chain;
 pub mod fbt;
-pub mod fbt_secondary;
 pub mod hash_fbt;
 pub mod hashindex;
 
@@ -15,11 +13,10 @@ pub enum AccessMethodError {
     KeyNotFound,
     KeyFoundButInvalidTimestamp, // For MVCC
     KeyDuplicate,
-    KeyNotInPageRange, // For Btree
+    NotEnoughMemory,
     PageReadLatchFailed,
     PageWriteLatchFailed,
     RecordTooLarge,
-    MemPoolStatus(MemPoolStatus),
     OutOfSpace, // For ReadOptimizedPage
     OutOfSpaceForUpdate(Vec<u8>),
     NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
@@ -27,12 +24,23 @@ pub enum AccessMethodError {
     Other(String),
 }
 
+impl From<MemPoolStatus> for AccessMethodError {
+    fn from(status: MemPoolStatus) -> AccessMethodError {
+        match status {
+            MemPoolStatus::CannotEvictPage => AccessMethodError::NotEnoughMemory,
+            MemPoolStatus::FrameReadLatchGrantFailed => AccessMethodError::PageReadLatchFailed,
+            MemPoolStatus::FrameWriteLatchGrantFailed => AccessMethodError::PageWriteLatchFailed,
+            e => {
+                panic!("Unexpected MemPoolStatus: {:?}", e)
+            }
+        }
+    }
+}
+
 pub mod prelude {
     pub use super::append_only_store::prelude::*;
-    pub use super::bloom_chain::prelude::*;
     pub use super::chain::prelude::*;
     pub use super::fbt::prelude::*;
-    pub use super::fbt_secondary::prelude::*;
     pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;
     pub use super::AccessMethodError;
@@ -55,7 +63,7 @@ pub trait UniqueKeyIndex {
     fn scan(self: &Arc<Self>) -> Self::Iter;
     fn scan_with_filter(
         self: &Arc<Self>,
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::Iter;
 }
 
@@ -66,7 +74,7 @@ pub trait OrderedUniqueKeyIndex: UniqueKeyIndex {
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::RangeIter;
 }
 
@@ -85,11 +93,11 @@ impl fmt::Display for AccessMethodError {
                 write!(f, "Key found but invalid timestamp")
             }
             AccessMethodError::KeyDuplicate => write!(f, "Key duplicate"),
-            AccessMethodError::KeyNotInPageRange => write!(f, "Key not in page range"),
+            // AccessMethodError::KeyNotInPageRange => write!(f, "Key not in page range"),
             AccessMethodError::PageReadLatchFailed => write!(f, "Page read latch failed"),
             AccessMethodError::PageWriteLatchFailed => write!(f, "Page write latch failed"),
             AccessMethodError::RecordTooLarge => write!(f, "Record too large"),
-            AccessMethodError::MemPoolStatus(status) => write!(f, "MemPool status: {:?}", status),
+            // AccessMethodError::MemPoolStatus(status) => write!(f, "MemPool status: {:?}", status),
             AccessMethodError::OutOfSpace => write!(f, "Out of space"),
             AccessMethodError::OutOfSpaceForUpdate(key) => {
                 write!(f, "Out of space for update: {:?}", key)
@@ -99,6 +107,7 @@ impl fmt::Display for AccessMethodError {
             }
             AccessMethodError::InvalidTimestamp => write!(f, "Invalid timestamp"),
             AccessMethodError::Other(msg) => write!(f, "{}", msg),
+            AccessMethodError::NotEnoughMemory => write!(f, "Not enough memory"),
         }
     }
 }

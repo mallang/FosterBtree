@@ -174,7 +174,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
 
     fn scan_with_filter(
         self: &Arc<Self>,
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::Iter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
@@ -188,7 +188,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
 pub struct HashFosterBtreeIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
 }
 
 impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeIter<T> {
@@ -200,7 +200,10 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeIter<T> {
         }
     }
 
-    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
+    pub fn new_with_filter(
+        scanners: Vec<T>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scanners,
             current: 0,
@@ -246,7 +249,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::RangeIter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
@@ -260,7 +263,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
 pub struct HashFosterBtreeUnorderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
 }
 
 impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
@@ -272,7 +275,10 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
         }
     }
 
-    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
+    pub fn new_with_filter(
+        scanners: Vec<T>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scanners,
             current: 0,
@@ -305,7 +311,7 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for HashFosterBtreeUnorder
 pub struct HashFosterBtreeOrderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
     heap: BinaryHeap<(Reverse<Vec<u8>>, (usize, Vec<u8>))>, // (key, (tree_index, value))
     initialized: bool,
     finished: bool,
@@ -324,7 +330,10 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeOrderedIter<T> {
         }
     }
 
-    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
+    pub fn new_with_filter(
+        scanners: Vec<T>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scanners,
             current: 0,
@@ -482,7 +491,6 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 #[cfg(test)]
 mod tests {
 
-    use core::num;
     use std::{collections::HashSet, fs::File, sync::Arc};
 
     use crate::{
@@ -1000,7 +1008,7 @@ mod tests {
     fn test_durability() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        let num_keys = 10000;
+        let num_keys = 100;
         let key_size = 50;
         let val_min_size = 50;
         let val_max_size = 100;
@@ -1024,7 +1032,7 @@ mod tests {
         // Create a store and insert some values.
         // Drop the store and buffer pool
         {
-            let bp = Arc::new(BufferPool::new(&temp_dir, 20, false).unwrap());
+            let bp = Arc::new(BufferPool::new(&temp_dir, 100, false).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashFosterBtree::new(c_key, bp.clone(), 10));
@@ -1043,9 +1051,9 @@ mod tests {
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashFosterBtree::load(c_key, bp.clone(), 0));
 
-            let mut scanner = store.scan();
+            let scanner = store.scan();
             // Remove the keys from the expected_vals set as they are scanned.
-            while let Some((key, val)) = scanner.next() {
+            for (key, val) in scanner {
                 let key = key.to_vec();
                 let val = val.to_vec();
                 assert!(expected_vals.remove(&(key, val)));

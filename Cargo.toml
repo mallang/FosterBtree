@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["256k_page"]
+default = []
 log_trace = []
 log_debug = []
 log_info = []
@@ -14,6 +14,7 @@ log_error = []
 stat = []
 
 # Page sizes. If page sizes are larger than 256k, pages will be heap allocated to avoid stack overflow.
+# Default is 16KB (defined in page.rs)
 4k_page = []
 8k_page = []
 16k_page = []
@@ -31,6 +32,10 @@ ycsb_hash_fbt = []
 ycsb_hash_chain = []
 ycsb_hash_bloom_chain = []
 
+# Hints
+no_tree_hint = []
+no_bp_hint = []
+
 # Old iterator for foster btree
 old_iter = []
 # Async IO only for write
@@ -47,17 +52,20 @@ chrono = "0.4"
 lazy_static = { version = "1.4" }
 clap = {version = "4.5", features = ["derive"]}
 concurrent-queue = "2.5"
-io-uring = {version = "0.6", optional = true}
+io-uring = {version = "0.7", optional = true}
 libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
 fastbloom = "0.7"
 csv = "1.1.6"
 lock_api = {version = "0.4.12", features = ["arc_lock"]} 
+memchr = "2.7.4"
+dashmap = "6.1"
+rpmalloc = "0.2.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}
 serde_cbor = "0.11"
-rstest = "0.22"
+rstest = "0.23"
 
 # For wasm (uncomment to use)
 # [lib]

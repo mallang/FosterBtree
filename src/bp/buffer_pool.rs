@@ -6,7 +6,7 @@ use crate::{log_debug, random::gen_random_int, rwlatch::RwLatch};
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
-    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey, PageKey},
+    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 
 use crate::file_manager::FileManager;
@@ -625,7 +625,8 @@ impl MemPool for BufferPool {
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
 
-        let location = {
+        #[cfg(not(feature = "no_bp_hint"))]
+        {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             let frames = unsafe { &*self.frames.get() };
@@ -646,13 +647,11 @@ impl MemPool for BufferPool {
                         } else {
                             // The page key does not match.
                             // Go to the slow path.
-                            Some(g)
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
                         log_debug!("Page fast path write empty frame: {}", key);
-                        Some(g)
                     }
                 } else {
                     // The frame is latched.
@@ -660,15 +659,13 @@ impl MemPool for BufferPool {
                     log_debug!("Page fast path write latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
-                    None
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
                 log_debug!("Page fast path write frame id out of bounds: {}", key);
-                None
             }
-        };
+        }
 
         {
             self.shared();
@@ -718,9 +715,7 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
-                let mut victim = if let Some(location) = location {
-                    location
-                } else if let Some(location) = self.choose_victim() {
+                let mut victim = if let Some(location) = self.choose_victim() {
                     location
                 } else {
                     self.release_exclusive();
@@ -746,7 +741,8 @@ impl MemPool for BufferPool {
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
 
-        let location = {
+        #[cfg(not(feature = "no_bp_hint"))]
+        {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             let frames = unsafe { &*self.frames.get() };
@@ -766,14 +762,11 @@ impl MemPool for BufferPool {
                             // The page key does not match.
                             // Go to the slow path.
                             log_debug!("Page fast path read key mismatch: {}", key);
-                            // Return option
-                            g.try_upgrade(false).ok()
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
                         log_debug!("Page fast path read empty frame: {}", key);
-                        g.try_upgrade(false).ok()
                     }
                 } else {
                     // The frame is latched.
@@ -781,13 +774,11 @@ impl MemPool for BufferPool {
                     log_debug!("Page fast path read latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
-                    None
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
                 log_debug!("Page fast path read frame id out of bounds: {}", key);
-                None
             }
         };
 
@@ -838,9 +829,7 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
             None => {
-                let mut victim = if let Some(location) = location {
-                    location
-                } else if let Some(location) = self.choose_victim() {
+                let mut victim = if let Some(location) = self.choose_victim() {
                     location
                 } else {
                     self.release_exclusive();
@@ -946,8 +935,14 @@ impl MemPool for BufferPool {
     }
 
     // Just return the runtime stats
-    fn stats(&self) -> (usize, usize, usize) {
-        self.runtime_stats.get()
+    fn stats(&self) -> MemoryStats {
+        let (new_page, read_count, write_count) = self.runtime_stats.get();
+        MemoryStats {
+            num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
+            new_page_created: new_page,
+            read_page_from_disk: read_count,
+            write_page_to_disk: write_count,
+        }
     }
 
     // Reset the runtime stats

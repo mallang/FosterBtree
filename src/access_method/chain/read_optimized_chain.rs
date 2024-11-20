@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     sync::{atomic::AtomicU32, Arc},
     time::Duration,
 };
@@ -9,8 +8,8 @@ use crate::log;
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
-    log_debug, log_info, log_trace, log_warn,
-    page::{Page, PageId, PAGE_SIZE},
+    log_debug, log_info, log_trace,
+    page::{Page, PageId},
 };
 
 use super::read_optimized_page::ReadOptimizedPage;
@@ -520,7 +519,7 @@ fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> F
     }
 }
 
-type FilterFunc = Box<dyn FnMut((&[u8], &[u8])) -> bool>;
+type FilterFunc = Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>;
 
 /// Scan the Chain in the range [l_key, r_key)
 /// To specify all keys, use an empty slice.
@@ -658,7 +657,7 @@ impl<T: MemPool> Iterator for ReadOptimizedChainRangeScanner<T> {
                     }
                 }
 
-                if self.filter.is_none() || (self.filter.as_mut().unwrap())((key.as_ref(), value)) {
+                if self.filter.is_none() || self.filter.as_ref().unwrap()(key.as_ref(), value) {
                     return Some((key, value.to_vec()));
                 }
 

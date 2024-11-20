@@ -3,11 +3,11 @@ pub mod bench_utils;
 pub mod bp;
 pub mod mvcc_index;
 pub mod random;
+pub mod tpcc;
 pub mod txn_storage;
 pub mod write_ahead_log;
 
 mod file_manager;
-mod heap_page;
 mod hybrid_latch;
 mod lockmanager;
 mod logger;
@@ -20,5 +20,6 @@ pub mod prelude {
     pub use crate::access_method::prelude::*;
     pub use crate::bp::prelude::*;
     pub use crate::page::*;
+    pub use crate::tpcc::prelude::*;
     pub use crate::txn_storage::prelude::*;
 }
