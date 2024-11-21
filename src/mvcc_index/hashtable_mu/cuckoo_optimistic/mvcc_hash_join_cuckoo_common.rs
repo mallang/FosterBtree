@@ -92,7 +92,6 @@ impl Buckets {
         &self,
         key: &[u8],
         first_idx: usize,
-        double_num_buckets: bool,
     ) -> Option<usize> {
         let num_buckets = self.num_buckets as usize;
         let bucket_idxs = HASHER_KEYS

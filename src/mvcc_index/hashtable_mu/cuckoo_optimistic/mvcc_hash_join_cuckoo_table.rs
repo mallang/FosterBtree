@@ -727,7 +727,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 let (key, pkey, val, start_ts, end_ts) =
                     hashed_page.get_key_pkey_val_ts_with_slot_id(slot_idx);
                 if let Some(idx) =
-                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize, true)
+                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize)
                 {
                     // log_warn!("we can get a second idx!!!");
                     assert_eq!(idx as u32, (hashed_bucket_idx + old_entry_num));
@@ -822,7 +822,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 let (key, pkey, val, start_ts, end_ts) =
                     hashed_page.get_key_pkey_val_ts_with_slot_id(slot_idx);
                 if let Some(idx) =
-                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize, true)
+                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize)
                 {
                     // log_warn!("we can get a second idx!!!");
                     assert_eq!(idx as u32, (hashed_bucket_idx + old_entry_num));
@@ -902,7 +902,7 @@ impl<T: MemPool> CuckooHashTable<T> {
 
         for read_page in pages {
             let get_result =
-                <Page as MvccHashJoinCuckooPage>::get(&*read_page, key, pkey, ts, true);
+                <Page as MvccHashJoinCuckooPage>::recent_get(&*read_page, key, pkey, ts);
             match get_result {
                 Ok(val) => {
                     return Ok(val);
