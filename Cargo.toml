@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = []
+default = ["256k_page", "log_warn"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -61,6 +61,8 @@ lock_api = {version = "0.4.12", features = ["arc_lock"]}
 memchr = "2.7.4"
 dashmap = "6.1"
 rpmalloc = "0.2.0"
+farmhash = "1"
+anyhow = "1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}

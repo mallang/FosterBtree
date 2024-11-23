@@ -1,7 +1,6 @@
 use core::str;
 use std::{
-    sync::{atomic::AtomicU32, Arc, Mutex},
-    time::Duration,
+    sync::{atomic::AtomicU32, Arc, Mutex}, time::Duration
 };
 
 use crate::{
@@ -29,7 +28,7 @@ pub struct ScanTsWithBucketsReadGuard<T: MemPool> {
 
     current_slot_id: u32,
 
-    ts: Timestamp,
+    ts: Option<Timestamp>,
     c_key: ContainerKey,
 
     buckets_read_guard: ArcRwlockReadGuard<Buckets>,
@@ -42,7 +41,7 @@ impl<T: MemPool> ScanTsWithBucketsReadGuard<T> {
         lm: &Arc<Mutex<LockManager>>,
         tid: TransactionId,
         mem_pool: &Arc<T>,
-        ts: Timestamp,
+        ts: Option<Timestamp>,
         c_key: ContainerKey,
         buckets_read_guard: ArcRwlockReadGuard<Buckets>,
         scan_key: Option<Vec<u8>>,
@@ -151,9 +150,17 @@ impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
                                 &slot,
                             );
                         // log_warn!("get slot_id: {:?}, slot_key: {:?}", current_slot_id, slot_key);
-                        if slot_start_ts <= self.ts
-                            && (self.ts < slot_end_ts || /* bench test */ slot_end_ts == Timestamp::MAX)
-                            && !slot.is_mark_deleted()
+                        let ts_match_result =  {
+                            if let Some(ts) = self.ts {
+                                slot_start_ts <= ts 
+                                    && ts < slot_end_ts 
+                                    && !slot.is_mark_deleted()
+                            } else {
+                                // scan all entry
+                                !slot.is_mark_deleted()
+                            }
+                        };
+                        if ts_match_result
                         {
                             if self.scan_key.is_some() {
                                 // scan_key, if key matches -> return
@@ -228,6 +235,7 @@ pub trait CuckooRecentHashTable<T: MemPool> {
     ) -> Self;
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
     fn insert(
         &self,
@@ -272,6 +280,7 @@ pub trait CuckooHistoryHashTable<T: MemPool> {
         bucket_nums: usize,
     ) -> Self;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
     fn insert(
         &self,
@@ -1174,7 +1183,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     fn gen_scan_iterator(
         &self,
         tid: TransactionId,
-        ts: Timestamp,
+        ts: Option<Timestamp>,
         buckets_read_guard: ArcRwlockReadGuard<Buckets>,
     ) -> ScanTsWithBucketsReadGuard<T> {
         let scan_guard = ScanTsWithBucketsReadGuard::new(
@@ -1200,7 +1209,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             &self.lock_manager,
             tid,
             &self.mem_pool,
-            ts,
+            Some(ts),
             self.c_key,
             buckets_read_guard,
             scan_key,
@@ -1404,7 +1413,17 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
 
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
+        let ts = if ts != Timestamp::MAX {
+            Some(ts)
+        } else {
+            None
+        };
         self.gen_scan_iterator(TransactionId::new(), ts, buckets)
+    }
+
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T> {
+        let buckets = self.rwlock.read_arc();
+        self.gen_scan_iterator(TransactionId::new(), None, buckets)
     }
 
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T> {
@@ -1528,7 +1547,12 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
 
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
-        self.gen_scan_iterator(TransactionId::new(), ts, buckets)
+        self.gen_scan_iterator(TransactionId::new(), Some(ts), buckets)
+    }
+
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T> {
+        let buckets = self.rwlock.read_arc();
+        self.gen_scan_iterator(TransactionId::new(), None, buckets)
     }
 
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T> {

@@ -82,6 +82,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.93"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c95c10ba0b00a02636238b814946408b1322d5ac4760326e6fb8ec956d85775"
+
+[[package]]
 name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -359,6 +365,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "farmhash"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ce9c8fb9891c75ceadbc330752951a4e369b50af10775955aeb9af3eee34b"
+
+[[package]]
 name = "fastbloom"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -380,12 +392,14 @@ checksum = "486f806e73c5707928240ddc295403b1b93c96a02038563881c4a2fd84b81ac4"
 name = "fbtree"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "clap",
  "concurrent-queue",
  "criterion",
  "csv",
  "dashmap",
+ "farmhash",
  "fastbloom",
  "getrandom",
  "io-uring",
