@@ -88,11 +88,7 @@ impl Buckets {
     }
 
     // maybe NOT exist -> None
-    pub fn get_a_second_bucket_index(
-        &self,
-        key: &[u8],
-        first_idx: usize,
-    ) -> Option<usize> {
+    pub fn get_a_second_bucket_index(&self, key: &[u8], first_idx: usize) -> Option<usize> {
         let num_buckets = self.num_buckets as usize;
         let bucket_idxs = HASHER_KEYS
             .iter()

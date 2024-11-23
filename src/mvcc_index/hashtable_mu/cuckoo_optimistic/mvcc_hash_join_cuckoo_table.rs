@@ -1,6 +1,7 @@
 use core::str;
 use std::{
-    sync::{atomic::AtomicU32, Arc, Mutex}, time::Duration
+    sync::{atomic::AtomicU32, Arc, Mutex},
+    time::Duration,
 };
 
 use crate::{
@@ -150,18 +151,15 @@ impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
                                 &slot,
                             );
                         // log_warn!("get slot_id: {:?}, slot_key: {:?}", current_slot_id, slot_key);
-                        let ts_match_result =  {
+                        let ts_match_result = {
                             if let Some(ts) = self.ts {
-                                slot_start_ts <= ts 
-                                    && ts < slot_end_ts 
-                                    && !slot.is_mark_deleted()
+                                slot_start_ts <= ts && ts < slot_end_ts && !slot.is_mark_deleted()
                             } else {
                                 // scan all entry
                                 !slot.is_mark_deleted()
                             }
                         };
-                        if ts_match_result
-                        {
+                        if ts_match_result {
                             if self.scan_key.is_some() {
                                 // scan_key, if key matches -> return
                                 // else continue;
@@ -1413,11 +1411,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
 
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
-        let ts = if ts != Timestamp::MAX {
-            Some(ts)
-        } else {
-            None
-        };
+        let ts = if ts != Timestamp::MAX { Some(ts) } else { None };
         self.gen_scan_iterator(TransactionId::new(), ts, buckets)
     }
 
