@@ -1733,7 +1733,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
+    pub fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
         self.traverse_to_leaf_for_read_from(key, self.root_key)
     }
 

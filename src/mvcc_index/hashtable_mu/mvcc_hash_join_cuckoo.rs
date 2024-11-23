@@ -29,7 +29,7 @@ pub(crate) const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>();
 pub(crate) const BUCKET_ENTRY_SIZE: usize = PAGE_ID_SIZE;
 pub(crate) const DEFAULT_NUM_BUCKETS: usize = 16;
 
-pub struct HashJoinTable<T: MemPool> {
+pub struct MvccHashJoinTable<T: MemPool> {
     mem_pool: Arc<T>, // TODO: check may be deleted
     c_key: ContainerKey,
 
@@ -39,7 +39,7 @@ pub struct HashJoinTable<T: MemPool> {
     history_hash_table: CuckooHashTable<T>,
 }
 
-impl<T: MemPool> MvccIndex<T> for HashJoinTable<T> {
+impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
     type Key = Vec<u8>;
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
@@ -192,14 +192,14 @@ pub struct MyDeltaScanIter<T: MemPool> {
     to_ts_file: BufReader<File>,
     to_ts: Timestamp,
     from_ts: Timestamp,
-    table: Arc<HashJoinTable<T>>,
+    table: Arc<MvccHashJoinTable<T>>,
 }
 
 impl<T: MemPool> MyDeltaScanIter<T> {
     pub fn new(
         from_ts_iter: MyScanIter<T>,
         to_ts_iter: MyScanIter<T>,
-        table: Arc<HashJoinTable<T>>,
+        table: Arc<MvccHashJoinTable<T>>,
         to_ts: Timestamp,
         from_ts: Timestamp,
     ) -> Self {
@@ -386,7 +386,7 @@ impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
     }
 }
 
-impl<T: MemPool> HashJoinTable<T> {
+impl<T: MemPool> MvccHashJoinTable<T> {
     fn recent(&self) -> &impl CuckooRecentHashTable<T> {
         &self.recent_hash_table
     }
@@ -571,6 +571,13 @@ impl<T: MemPool> HashJoinTable<T> {
         let history_scan_iter = self.history().scan(ts);
         let scan_iter = MyScanIter::new(history_scan_iter, recent_scan_iter);
         scan_iter
+    }
+
+    pub fn scan_all(&self) -> Result<MyScanIter<T>, CuckooAccessMethodError> {
+        let recent_scan_iter = self.recent().scan_all();
+        let history_scan_iter = self.history().scan_all();
+        let scan_iter: MyScanIter<T> = MyScanIter::new(history_scan_iter, recent_scan_iter);
+        Ok(scan_iter)
     }
 
     pub fn scan_key_inner(&self, ts: Timestamp, key: &[u8]) -> MyScanKeyIter<T> {
@@ -897,7 +904,7 @@ mod tests {
     fn simple_insert_cuckoo() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = HashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
         hash_join_table
             .insert_inner(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -915,7 +922,7 @@ mod tests {
     fn many_inserts_until_rehash() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool, 1);
+        let hash_join_table = MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1);
 
         let pair_space_need = space_need(&vec![1], &vec![1], &vec![1]);
         let pairs_num_rehash = AVAILABLE_PAGE_SIZE as u32 / pair_space_need + 2;
@@ -939,7 +946,7 @@ mod tests {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(HashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
 
         let hash_join_table_clone = hash_join_table.clone();
         let handle = thread::spawn(move || {
@@ -1003,7 +1010,7 @@ mod tests {
     fn simple_update_cuckoo_same_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = HashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
         hash_join_table
             .insert_inner(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -1029,7 +1036,7 @@ mod tests {
     fn simple_update_cuckoo_different_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = HashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
         hash_join_table
             .insert_inner(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -1057,7 +1064,7 @@ mod tests {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(HashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
 
         let hash_join_table_clone = hash_join_table.clone();
 
@@ -1141,7 +1148,7 @@ mod tests {
     fn simple_delete_cuckoo_same_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = HashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
         hash_join_table
             .insert_inner(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -1177,7 +1184,7 @@ mod tests {
     fn simple_delete_cuckoo_different_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = HashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
         hash_join_table
             .insert_inner(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -1205,7 +1212,7 @@ mod tests {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(HashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
 
         let hash_join_table_clone = hash_join_table.clone();
 
@@ -1285,7 +1292,7 @@ mod tests {
     fn test_insert_and_scan() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(HashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
 
         // 1..100 inserts
         for i in (0..100).into_iter().step_by(1) {
@@ -1313,7 +1320,7 @@ mod tests {
         // Initialize the hash join table using the MvccIndex trait
         let mem_pool = get_in_mem_pool(); // You need to implement or import this function
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = HashJoinTable::create(c_key, mem_pool.clone()).unwrap();
+        let hash_join_table = MvccHashJoinTable::create(c_key, mem_pool.clone()).unwrap();
 
         let data_num = 10000 as usize;
         let data = (0..data_num)

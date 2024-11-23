@@ -72,7 +72,8 @@ macro_rules! log_error {
 macro_rules! log_warn {
     ($($arg:tt)*) => {
         #[cfg(any(feature = "log_warn", feature = "log_info", feature = "log_debug", feature = "log_trace"))]
-        log("WARN ", file!(), line!(), &format!($($arg)*))
+        // log("WARN ", file!(), line!(), &format!($($arg)*))
+        $crate::log("WARN ", file!(), line!(), &format!($($arg)*))
     }
 }
 

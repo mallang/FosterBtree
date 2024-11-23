@@ -494,6 +494,13 @@ pub trait MvccHashJoinCuckooPage {
         ts: Timestamp,
         is_recent_get: bool,
     ) -> Result<Vec<u8>, CuckooAccessMethodError>;
+
+    fn recent_get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Vec<u8>, CuckooAccessMethodError>;
     /// return the free space after compaction.
     fn compact(&mut self) -> u32;
 
@@ -829,6 +836,64 @@ impl MvccHashJoinCuckooPage for Page {
         // );
 
         Ok(())
+    }
+
+    fn recent_get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+        let slot_idx = self.find_slot_idx(key, pkey, ts);
+        if let Some(slot_idx) = slot_idx {
+            let slot_idx = slot_idx as u32;
+            // log_warn!("get idx: {}\n", slot_idx);
+            let slot = self.get_slot(slot_idx).unwrap();
+            if slot.key_size() == key.len() as u32
+                && slot.pkey_size() == pkey.len() as u32
+                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+            {
+                let rec_offset = slot.offset() as usize;
+                let rec_size = slot.val_size()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot
+                        .pkey_size()
+                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                let record = Record::from_bytes(
+                    record_bytes,
+                    slot.key_size(),
+                    slot.pkey_size(),
+                    slot.val_size(),
+                );
+
+                let mut full_key = slot.key_prefix().to_vec();
+                full_key.extend_from_slice(record.remain_key());
+
+                let mut full_pkey = slot.pkey_prefix().to_vec();
+                full_pkey.extend_from_slice(record.remain_pkey());
+
+                if full_key == key && full_pkey == pkey {
+                    // only find once
+                    if ts < slot.end_ts() && ts >= slot.start_ts() {
+                        if !slot.is_mark_deleted() {
+                            // find and not deleted
+                            return Ok(record.val().to_vec());
+                        } else {
+                            // slot deleted
+                            return Err(CuckooAccessMethodError::KeyNotFound);
+                        }
+                    } else {
+                        // find but mismatch ts
+                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                    }
+                }
+            }
+        } else {
+            // not found
+        }
+        return Err(CuckooAccessMethodError::KeyNotFound);
     }
 
     fn get(

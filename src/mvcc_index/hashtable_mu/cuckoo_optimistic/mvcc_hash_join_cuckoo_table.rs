@@ -29,7 +29,7 @@ pub struct ScanTsWithBucketsReadGuard<T: MemPool> {
 
     current_slot_id: u32,
 
-    ts: Timestamp,
+    ts: Option<Timestamp>,
     c_key: ContainerKey,
 
     buckets_read_guard: ArcRwlockReadGuard<Buckets>,
@@ -42,7 +42,7 @@ impl<T: MemPool> ScanTsWithBucketsReadGuard<T> {
         lm: &Arc<Mutex<LockManager>>,
         tid: TransactionId,
         mem_pool: &Arc<T>,
-        ts: Timestamp,
+        ts: Option<Timestamp>,
         c_key: ContainerKey,
         buckets_read_guard: ArcRwlockReadGuard<Buckets>,
         scan_key: Option<Vec<u8>>,
@@ -151,10 +151,15 @@ impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
                                 &slot,
                             );
                         // log_warn!("get slot_id: {:?}, slot_key: {:?}", current_slot_id, slot_key);
-                        if slot_start_ts <= self.ts
-                            && (self.ts < slot_end_ts || /* bench test */ slot_end_ts == Timestamp::MAX)
-                            && !slot.is_mark_deleted()
-                        {
+                        let ts_match_result = {
+                            if let Some(ts) = self.ts {
+                                slot_start_ts <= ts && ts < slot_end_ts && !slot.is_mark_deleted()
+                            } else {
+                                // scan all entry
+                                !slot.is_mark_deleted()
+                            }
+                        };
+                        if ts_match_result {
                             if self.scan_key.is_some() {
                                 // scan_key, if key matches -> return
                                 // else continue;
@@ -228,6 +233,7 @@ pub trait CuckooRecentHashTable<T: MemPool> {
     ) -> Self;
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
     fn insert(
         &self,
@@ -272,6 +278,7 @@ pub trait CuckooHistoryHashTable<T: MemPool> {
         bucket_nums: usize,
     ) -> Self;
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T>;
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T>;
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T>;
     fn insert(
         &self,
@@ -727,7 +734,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 let (key, pkey, val, start_ts, end_ts) =
                     hashed_page.get_key_pkey_val_ts_with_slot_id(slot_idx);
                 if let Some(idx) =
-                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize, true)
+                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize)
                 {
                     // log_warn!("we can get a second idx!!!");
                     assert_eq!(idx as u32, (hashed_bucket_idx + old_entry_num));
@@ -822,7 +829,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 let (key, pkey, val, start_ts, end_ts) =
                     hashed_page.get_key_pkey_val_ts_with_slot_id(slot_idx);
                 if let Some(idx) =
-                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize, true)
+                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize)
                 {
                     // log_warn!("we can get a second idx!!!");
                     assert_eq!(idx as u32, (hashed_bucket_idx + old_entry_num));
@@ -902,7 +909,7 @@ impl<T: MemPool> CuckooHashTable<T> {
 
         for read_page in pages {
             let get_result =
-                <Page as MvccHashJoinCuckooPage>::get(&*read_page, key, pkey, ts, true);
+                <Page as MvccHashJoinCuckooPage>::recent_get(&*read_page, key, pkey, ts);
             match get_result {
                 Ok(val) => {
                     return Ok(val);
@@ -1174,7 +1181,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     fn gen_scan_iterator(
         &self,
         tid: TransactionId,
-        ts: Timestamp,
+        ts: Option<Timestamp>,
         buckets_read_guard: ArcRwlockReadGuard<Buckets>,
     ) -> ScanTsWithBucketsReadGuard<T> {
         let scan_guard = ScanTsWithBucketsReadGuard::new(
@@ -1200,7 +1207,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             &self.lock_manager,
             tid,
             &self.mem_pool,
-            ts,
+            Some(ts),
             self.c_key,
             buckets_read_guard,
             scan_key,
@@ -1404,7 +1411,13 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
 
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
+        let ts = if ts != Timestamp::MAX { Some(ts) } else { None };
         self.gen_scan_iterator(TransactionId::new(), ts, buckets)
+    }
+
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T> {
+        let buckets = self.rwlock.read_arc();
+        self.gen_scan_iterator(TransactionId::new(), None, buckets)
     }
 
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T> {
@@ -1528,7 +1541,12 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
 
     fn scan(&self, ts: Timestamp) -> ScanTsWithBucketsReadGuard<T> {
         let buckets = self.rwlock.read_arc();
-        self.gen_scan_iterator(TransactionId::new(), ts, buckets)
+        self.gen_scan_iterator(TransactionId::new(), Some(ts), buckets)
+    }
+
+    fn scan_all(&self) -> ScanTsWithBucketsReadGuard<T> {
+        let buckets = self.rwlock.read_arc();
+        self.gen_scan_iterator(TransactionId::new(), None, buckets)
     }
 
     fn scan_key(&self, ts: Timestamp, key: &[u8]) -> ScanTsWithBucketsReadGuard<T> {
