@@ -62,6 +62,14 @@ python3 "$SCRIPT_DIR/gen_data_after_txs.py" \
     --recent_data_after_ops_file "$SCRIPT_DIR/recent_data_after_ops.csv" \
     --history_data_after_ops_file "$SCRIPT_DIR/history_data_after_ops.csv"
 
+# Generate scan operations
+echo "Running gen_scan_ops.py..."
+python3 "$SCRIPT_DIR/gen_scan_ops.py" \
+    --recent_data_file "$SCRIPT_DIR/recent_data_after_txs.csv" \
+    --history_data_file "$SCRIPT_DIR/history_data_after_txs.csv" \
+    --scan_ops_file "$SCRIPT_DIR/scan_ops.csv" \
+    --num_scans 5
+
 # Check if recent and history data files were generated
 if [ -f "$SCRIPT_DIR/recent_data_after_txs.csv" ] && [ -f "$SCRIPT_DIR/history_data_after_txs.csv" ] && \
    [ -f "$SCRIPT_DIR/recent_data_after_ops.csv" ] && [ -f "$SCRIPT_DIR/history_data_after_ops.csv" ]; then

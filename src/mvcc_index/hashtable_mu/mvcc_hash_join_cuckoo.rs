@@ -39,16 +39,16 @@ pub struct HashJoinTable<T: MemPool> {
     history_hash_table: CuckooHashTable<T>,
 }
 
-impl<T: MemPool> MvccIndex for HashJoinTable<T> {
+impl<T: MemPool> MvccIndex<T> for HashJoinTable<T> {
     type Key = Vec<u8>;
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
     type Error = CuckooAccessMethodError;
-    type MemPoolType = T;
+    // type MemPoolType = T;
     type DeltaIter = MyDeltaScanIter<T>;
     type Iter = MyScanIter<T>;
     type ScanKeyIter = MyScanKeyIter<T>;
-    fn create(c_key: ContainerKey, mem_pool: Arc<Self::MemPoolType>) -> Result<Self, Self::Error>
+    fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {

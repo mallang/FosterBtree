@@ -58,18 +58,18 @@ impl Hash for MvccEntry {
     }
 }
 
-pub trait MvccIndex {
+pub trait MvccIndex<T: MemPool> {
     type Key: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync;
     type PKey: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync;
     type Value: Clone + Debug + Send + Sync;
     type Error: Error + Debug + Send + Sync;
-    type MemPoolType: MemPool;
+    // type MemPoolType: MemPool;
     type Iter: Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send;
     type DeltaIter: Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send;
     type ScanKeyIter: Iterator<Item = (Self::PKey, Self::Value)> + Send;
 
     /// Creates a new instance of the index.
-    fn create(c_key: ContainerKey, mem_pool: Arc<Self::MemPoolType>) -> Result<Self, Self::Error>
+    fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
     where
         Self: Sized;
 

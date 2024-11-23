@@ -50,12 +50,12 @@ pub struct MvccHashJoinTable<T: MemPool> {
     // tx_status: HashMap<TxId, TxStatus>, // Neet to written down to disk later...
 }
 
-impl<T: MemPool> MvccIndex for MvccHashJoinTable<T> {
+impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
     type Key = Vec<u8>;
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
     type Error = AccessMethodError;
-    type MemPoolType = T;
+    // type MemPoolType = T;
     type Iter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>;
     type DeltaIter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>;
     type ScanKeyIter = Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>;
@@ -382,8 +382,8 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         (hasher.finish() as usize) % self.num_buckets
     }
 
-    pub fn scan(&self, ts: Timestamp) -> Result<MvccHashJoinTableScanner<T>, AccessMethodError> {
-        Ok(MvccHashJoinTableScanner::new(Arc::new(self.clone()), ts))
+    pub fn scan(&self, ts: Timestamp) -> Result<HashJoinTableScanner<T>, AccessMethodError> {
+        Ok(HashJoinTableScanner::new(Arc::new(self.clone()), ts))
     }
 
     pub fn scan_all(&self) -> Result<HashJoinTableFullScanner<T>, AccessMethodError> {
@@ -515,7 +515,7 @@ impl<T: MemPool> Clone for MvccHashJoinTable<T> {
     }
 }
 
-pub struct MvccHashJoinTableScanner<T: MemPool> {
+pub struct HashJoinTableScanner<T: MemPool> {
     table: Arc<MvccHashJoinTable<T>>,
     ts: Timestamp,
     bucket_index: usize,
@@ -526,7 +526,7 @@ pub struct MvccHashJoinTableScanner<T: MemPool> {
     seen_entries: HashSet<(Vec<u8>, Vec<u8>)>, // To track (key, pkey) pairs (to avoid duplicate)
 }
 
-impl<T: MemPool> MvccHashJoinTableScanner<T> {
+impl<T: MemPool> HashJoinTableScanner<T> {
     pub fn new(table: Arc<MvccHashJoinTable<T>>, ts: Timestamp) -> Self {
         Self {
             table,
@@ -541,7 +541,7 @@ impl<T: MemPool> MvccHashJoinTableScanner<T> {
     }
 }
 
-impl<T: MemPool> Iterator for MvccHashJoinTableScanner<T> {
+impl<T: MemPool> Iterator for HashJoinTableScanner<T> {
     type Item = MvccEntry;
 
     fn next(&mut self) -> Option<Self::Item> {

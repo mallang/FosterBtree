@@ -483,12 +483,11 @@ pub trait MvccHashJoinRecentPage {
     fn space_need(key: &[u8], pkey: &[u8], val: &[u8]) -> u32;
     fn free_space_without_compaction(&self) -> u32 {
         let header = self.header();
-        header.rec_start_offset()
-            - (header.slot_count() * SLOT_SIZE as u32 + PAGE_HEADER_SIZE as u32)
+        header.rec_start_offset() - header.slot_count() * SLOT_SIZE as u32
     }
     fn free_space_with_compaction(&self) -> u32 {
         let header = self.header();
-        AVAILABLE_PAGE_SIZE as u32 - header.total_bytes_used()
+        header.total_bytes_used()
     }
 
     fn slot_count(&self) -> u32 {

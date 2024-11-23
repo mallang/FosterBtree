@@ -1,7 +1,6 @@
 use core::panic;
 use std::{
     collections::BTreeMap,
-    f32::consts::E,
     sync::{
         atomic::{self, AtomicU32},
         Arc,
@@ -96,7 +95,7 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                     log_debug!("Reached end of chain, inserting into end of chain");
                 }
             }
-            if space_need < MvccHashJoinRecentPage::free_space_with_compaction(&*page) - 1 {
+            if space_need < MvccHashJoinRecentPage::free_space_with_compaction(&*page) {
                 if space_need > MvccHashJoinRecentPage::free_space_without_compaction(&*page) {
                     log_debug!("Compaction needed");
                     // Compaction needed, now just add new page.
@@ -113,9 +112,8 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                                 Ok(_) => {
                                     return Ok(());
                                 }
-                                Err(e) => {
-                                    // panic with priting error
-                                    panic!("Unexpected error: {:?}", e);
+                                Err(_) => {
+                                    panic!("Unexpected error");
                                 }
                             }
                         }
