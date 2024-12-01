@@ -5,9 +5,7 @@ use std::{
 };
 
 use crate::{
-    bp::MemPoolStatus,
-    lockmanager::{LockManager, TransactionId, ValueId},
-    mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HASHER_KEYS,
+    bp::MemPoolStatus, log_warn, mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HASHER_KEYS,
     page::PageId,
 };
 
@@ -100,6 +98,8 @@ impl Buckets {
             })
             .collect::<Vec<_>>();
 
+        // log_warn!("hash_result: {:?}, bucket_hash_result: {:?}", bucket_idxs, bucket_idxs.iter().map(|x| (x % num_buckets, x % (num_buckets * 2))).collect::<Vec<_>>() );
+
         for idx in bucket_idxs {
             if (idx % num_buckets) == first_idx {
                 let second_idx = idx % (num_buckets * 2);
@@ -189,8 +189,6 @@ pub mod arcrwlock {
     use std::{
         ops::Deref,
         sync::{self, atomic::AtomicI16},
-        thread,
-        time::Duration,
     };
 
     use crate::rwlatch::RwLatch;
@@ -259,7 +257,7 @@ pub mod arcrwlock {
         let c = a.clone();
         let b = FinalStruct::new(a);
 
-        let handle = thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let try_result = c.try_write();
             assert!(try_result.is_none());
         });
@@ -268,30 +266,30 @@ pub mod arcrwlock {
     }
 }
 
-// guard is a non-Send version of RAII of LockManager
-// TODO: may optimize with FrameGuard
-pub struct LockManagerGuard {
-    lock_manager: Arc<Mutex<LockManager>>,
-    tid: TransactionId,
-    pid: ValueId,
-}
+// // guard is a non-Send version of RAII of LockManager
+// // TODO: may optimize with FrameGuard
+// pub struct LockManagerGuard {
+//     lock_manager: Arc<Mutex<LockManager>>,
+//     tid: TransactionId,
+//     pid: ValueId,
+// }
 
-impl LockManagerGuard {
-    pub fn new(lock_manager: &Arc<Mutex<LockManager>>, tid: TransactionId, pid: ValueId) -> Self {
-        Self {
-            lock_manager: lock_manager.clone(),
-            tid,
-            pid,
-        }
-    }
-}
+// impl LockManagerGuard {
+//     pub fn new(lock_manager: &Arc<Mutex<LockManager>>, tid: TransactionId, pid: ValueId) -> Self {
+//         Self {
+//             lock_manager: lock_manager.clone(),
+//             tid,
+//             pid,
+//         }
+//     }
+// }
 
-impl Drop for LockManagerGuard {
-    fn drop(&mut self) {
-        self.lock_manager
-            .lock()
-            .unwrap()
-            .release_lock(self.tid, self.pid)
-            .unwrap();
-    }
-}
+// impl Drop for LockManagerGuard {
+//     fn drop(&mut self) {
+//         self.lock_manager
+//             .lock()
+//             .unwrap()
+//             .release_lock(self.tid, self.pid)
+//             .unwrap();
+//     }
+// }

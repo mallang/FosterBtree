@@ -286,7 +286,7 @@ mod mvcctxn {
                 )
                 .expect("can NOT commit in a committed txn");
 
-            let _commit_lk = self.txn_hash_table.mvcc.commit_lock.lock().unwrap();
+            let commit_lk = self.txn_hash_table.mvcc.commit_lock.lock().unwrap();
 
             let txn_key_hash = self.key_hashes.lock().unwrap();
 
@@ -329,6 +329,8 @@ mod mvcctxn {
             } else {
                 anyhow::bail!("serializable check failed");
             }
+            self.txn_hash_table.mvcc.update_commit_ts(committed_ts);
+            drop(commit_lk);
 
             for (k_pk, delta) in self.local_storage.lock().unwrap().iter() {
                 let (k, pk) = k_pk.clone();
@@ -350,8 +352,6 @@ mod mvcctxn {
                     }
                 }
             }
-
-            self.txn_hash_table.mvcc.update_commit_ts(committed_ts);
 
             Ok(committed_ts)
         }
@@ -388,7 +388,7 @@ impl<T: MemPool, M: MvccIndex<T>> TxnMvccHashTable<T, M> {
         })
     }
 
-    pub fn txn_new(self: &Arc<Self>) -> Transaction<T, M> {
+    fn txn_new(self: &Arc<Self>) -> Transaction<T, M> {
         let mut ts = self.mvcc.ts.lock().unwrap();
         let read_ts = ts.0;
         ts.1.add_reader(read_ts);
@@ -400,6 +400,16 @@ impl<T: MemPool, M: MvccIndex<T>> TxnMvccHashTable<T, M> {
             key_hashes: Mutex::new((HashSet::new(), HashSet::new())),
         };
         txn
+    }
+}
+
+pub trait TxnStorage<T: MemPool, M: MvccIndex<T>>: Send + Sync {
+    fn txn_new(self: &Arc<Self>) -> Transaction<T, M>;
+}
+
+impl<T: MemPool, M: MvccIndex<T>> TxnStorage<T, M> for TxnMvccHashTable<T, M> {
+    fn txn_new(self: &Arc<Self>) -> Transaction<T, M> {
+        self.txn_new()
     }
 }
 
@@ -429,7 +439,7 @@ mod tests {
         let c_key = ContainerKey::new(100, 100);
 
         let table_inner = Arc::new(MvccHashJoinTable::new(c_key, mem_pool.clone()));
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
         let txn = txn_hash_table.txn_new();
         assert!(txn.commit().is_ok());
         Ok(())
@@ -441,7 +451,7 @@ mod tests {
         let c_key = ContainerKey::new(100, 100);
 
         let table_inner = Arc::new(MvccHashJoinTable::new(c_key, mem_pool.clone()));
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
         let txn = txn_hash_table.txn_new();
 
         let key = b"key".to_vec();
@@ -462,7 +472,7 @@ mod tests {
         let c_key = ContainerKey::new(100, 100);
 
         let table_inner = Arc::new(MvccHashJoinTable::new(c_key, mem_pool.clone()));
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
         let txn = txn_hash_table.txn_new();
 
         let key = b"key".to_vec();
@@ -487,7 +497,7 @@ mod tests {
         let c_key = ContainerKey::new(100, 100);
 
         let table_inner = Arc::new(MvccHashJoinTable::new(c_key, mem_pool.clone()));
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
         let txn = txn_hash_table.txn_new();
 
         let key = b"key".to_vec();
@@ -510,7 +520,7 @@ mod tests {
         let c_key = ContainerKey::new(100, 100);
 
         let table_inner = Arc::new(MvccHashJoinTable::new(c_key, mem_pool.clone()));
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
         let txn = txn_hash_table.txn_new();
 
         let key = b"key".to_vec();
@@ -546,7 +556,7 @@ mod tests {
         table_inner
             .insert(key.clone(), pkey.clone(), 0, 0, value.clone())
             .unwrap();
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
         let txn = txn_hash_table.txn_new();
 
         let new_value = b"new_value".to_vec();
@@ -581,7 +591,7 @@ mod tests {
         table_inner
             .insert(key.clone(), pkey.clone(), 0, 0, value.clone())
             .unwrap();
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
         let txn = txn_hash_table.txn_new();
 
         txn.delete(key.clone(), pkey.clone()).unwrap();
@@ -618,7 +628,7 @@ mod tests {
             table_inner.insert(entry.0, entry.1, 0, 0, entry.2).unwrap();
         }
 
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
 
         let txn1_key = b"key_txn1".to_vec();
         let txn1_pkey = b"pkey_txn1".to_vec();
@@ -691,7 +701,7 @@ mod tests {
             table_inner.insert(entry.0, entry.1, 0, 0, entry.2).unwrap();
         }
 
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
 
         let conflict_key = b"key_txn1".to_vec();
         let conflict_pkey = b"pkey_txn1".to_vec();
@@ -739,7 +749,7 @@ mod tests {
             table_inner.insert(entry.0, entry.1, 0, 0, entry.2).unwrap();
         }
 
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
 
         let conflict_key = b"key_txn1".to_vec();
         let conflict_pkey = b"pkey_txn1".to_vec();
@@ -786,7 +796,7 @@ mod tests {
             table_inner.insert(entry.0, entry.1, 0, 0, entry.2).unwrap();
         }
 
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
 
         let conflict_key1 = b"conflict1".to_vec();
         let conflict_pkey1 = b"conflict1".to_vec();
@@ -843,7 +853,7 @@ mod tests {
             table_inner.insert(entry.0, entry.1, 0, 0, entry.2).unwrap();
         }
 
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
 
         let conflict_key1 = b"conflict1".to_vec();
         let conflict_pkey1 = b"conflict1".to_vec();
@@ -892,7 +902,7 @@ mod tests {
         let c_key = ContainerKey::new(100, 100);
 
         let table_inner = Arc::new(MvccHashJoinTable::new(c_key, mem_pool.clone()));
-        let txn_hash_table = Arc::new(TxnMvccHashTable::new(&table_inner));
+        let txn_hash_table = TxnMvccHashTable::new(&table_inner);
 
         let txn1 = txn_hash_table.txn_new();
         let txn2 = txn_hash_table.txn_new();

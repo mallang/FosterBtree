@@ -9,7 +9,6 @@ pub mod write_ahead_log;
 
 mod file_manager;
 mod hybrid_latch;
-mod lockmanager;
 mod logger;
 mod page;
 mod rwlatch;
