@@ -1,3 +1,5 @@
+/// a read committed txn handle
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -58,7 +60,7 @@ use mvcctxn::{MvccInner, Transaction};
 use watermark::Watermark;
 
 mod mvcctxn {
-    use crate::bp::MemPool;
+    use crate::{bp::MemPool, log_warn};
 
     use super::{Delta, MvccIndex, TxnMvccHashTable, Watermark};
     use anyhow::Result;
@@ -69,8 +71,6 @@ mod mvcctxn {
     };
     pub struct CommittedTxnData {
         pub key_hashes: HashSet<u32>,
-        pub read_ts: u64,
-        pub commit_ts: u64,
     }
 
     pub struct MvccInner {
@@ -112,11 +112,11 @@ mod mvcctxn {
             let ats = ts.0;
             ts.1.add_reader(ats);
             let txn = Transaction {
-                read_ts: ts.0,
+                begin_ts: ts.0,
                 txn_hash_table: inner,
                 local_storage: Mutex::new(HashMap::new()),
                 committed: false.into(),
-                key_hashes: Mutex::new((HashSet::new(), HashSet::new())),
+                write_key_hashes: Mutex::new(HashSet::new()),
             };
             Arc::new(txn)
         }
@@ -125,12 +125,14 @@ mod mvcctxn {
     /// thread_local transaction (serializable) \
     ///
     pub struct Transaction<T: MemPool, M: MvccIndex<T>> {
-        pub(super) read_ts: u64,
+        pub(super) begin_ts: u64,
         pub(super) txn_hash_table: Arc<TxnMvccHashTable<T, M>>,
         pub(super) local_storage: Mutex<HashMap<(M::Key, M::PKey), Delta<M::Value>>>,
         pub(super) committed: AtomicBool,
-        pub(super) key_hashes: Mutex<(HashSet<u32>, HashSet<u32>)>,
+        pub(super) write_key_hashes: Mutex<HashSet<u32>>,
     }
+
+    const READ_COMMITTED_TS: u64 = crate::mvcc_index::Timestamp::MAX;
 
     impl<T: MemPool, InnerIndex: MvccIndex<T>> Transaction<T, InnerIndex> {
         pub fn get(
@@ -141,11 +143,6 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT get in a committed txn");
             }
-            self.key_hashes
-                .lock()
-                .unwrap()
-                .1
-                .insert(farmhash::hash32(pkey.as_ref()));
             if let Some(value) = self
                 .local_storage
                 .lock()
@@ -162,7 +159,8 @@ mod mvcctxn {
             let value = self
                 .txn_hash_table
                 .inner_hash_table()
-                .get(key, pkey, self.read_ts)?;
+                .get(key, pkey, READ_COMMITTED_TS)?;
+
             Ok(value)
         }
 
@@ -178,10 +176,9 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT insert in a committed txn");
             }
-            self.key_hashes
+            self.write_key_hashes
                 .lock()
                 .unwrap()
-                .0
                 .insert(farmhash::hash32(&pkey.as_ref()));
             self.local_storage
                 .lock()
@@ -204,9 +201,8 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT update in a committed txn");
             }
-            let mut key_hashes = self.key_hashes.lock().unwrap();
-            key_hashes.0.insert(farmhash::hash32(&pkey.as_ref()));
-            key_hashes.1.insert(farmhash::hash32(&pkey.as_ref()));
+            let mut key_hashes = self.write_key_hashes.lock().unwrap();
+            key_hashes.insert(farmhash::hash32(&pkey.as_ref()));
 
             let local_find_result = {
                 match self
@@ -220,7 +216,7 @@ mod mvcctxn {
                     _ => self
                         .txn_hash_table
                         .inner_hash_table()
-                        .get(&key, &pkey, self.read_ts)?
+                        .get(&key, &pkey, self.begin_ts)?
                         .is_some(),
                 }
             };
@@ -243,9 +239,8 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT update in a committed txn");
             }
-            let mut key_hashes = self.key_hashes.lock().unwrap();
-            key_hashes.0.insert(farmhash::hash32(&pkey.as_ref()));
-            key_hashes.1.insert(farmhash::hash32(&pkey.as_ref()));
+            let mut key_hashes = self.write_key_hashes.lock().unwrap();
+            key_hashes.insert(farmhash::hash32(&pkey.as_ref()));
 
             let local_find_result = {
                 match self
@@ -259,7 +254,7 @@ mod mvcctxn {
                     _ => self
                         .txn_hash_table
                         .inner_hash_table()
-                        .get(&key, &pkey, self.read_ts)?
+                        .get(&key, &pkey, self.begin_ts)?
                         .is_some(),
                 }
             };
@@ -288,11 +283,12 @@ mod mvcctxn {
 
             let commit_lk = self.txn_hash_table.mvcc.commit_lock.lock().unwrap();
 
-            let txn_key_hash = self.key_hashes.lock().unwrap();
+            let txn_key_hash = self.write_key_hashes.lock().unwrap();
 
-            if txn_key_hash.0.is_empty() {
+            if txn_key_hash.is_empty() {
                 // only read
-                return Ok(self.read_ts);
+                log_warn!("only read!");
+                return Ok(self.begin_ts);
             }
 
             let committed_ts = self.txn_hash_table.mvcc.latest_commit_ts() + 1;
@@ -300,13 +296,13 @@ mod mvcctxn {
             let has_overlap = {
                 let committed_txns_lock = self.txn_hash_table.mvcc.committed_txns.lock().unwrap();
                 let committed_txns = committed_txns_lock
-                    .range((Bound::Excluded(self.read_ts), Bound::Excluded(committed_ts)));
+                    .range((Bound::Excluded(self.begin_ts), Bound::Excluded(committed_ts)));
                 committed_txns
                     .into_iter()
                     .map(|(_, committed_txn_data)| {
                         committed_txn_data
                             .key_hashes
-                            .intersection(&txn_key_hash.1)
+                            .intersection(&txn_key_hash)
                             .count()
                     })
                     .sum::<usize>()
@@ -321,9 +317,7 @@ mod mvcctxn {
                     .insert(
                         committed_ts,
                         CommittedTxnData {
-                            key_hashes: txn_key_hash.0.clone(),
-                            read_ts: self.read_ts,
-                            commit_ts: committed_ts,
+                            key_hashes: txn_key_hash.clone(),
                         },
                     );
             } else {
@@ -334,6 +328,7 @@ mod mvcctxn {
 
             for (k_pk, delta) in self.local_storage.lock().unwrap().iter() {
                 let (k, pk) = k_pk.clone();
+
                 match delta.clone() {
                     Delta::Inserted(v) => {
                         self.txn_hash_table
@@ -365,7 +360,7 @@ mod mvcctxn {
                 .lock()
                 .unwrap()
                 .1
-                .remove_reader(self.read_ts);
+                .remove_reader(self.begin_ts);
         }
     }
 }
@@ -393,11 +388,11 @@ impl<T: MemPool, M: MvccIndex<T>> TxnMvccHashTable<T, M> {
         let read_ts = ts.0;
         ts.1.add_reader(read_ts);
         let txn = Transaction {
-            read_ts,
+            begin_ts: read_ts,
             txn_hash_table: self.clone(),
             local_storage: Mutex::new(HashMap::new()),
             committed: false.into(),
-            key_hashes: Mutex::new((HashSet::new(), HashSet::new())),
+            write_key_hashes: Mutex::new(HashSet::new()),
         };
         txn
     }
@@ -418,8 +413,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        bp::{get_in_mem_pool, ContainerKey, InMemPool},
-        mvcc_index::MvccIndex,
+        bp::{get_in_mem_pool, ContainerKey, InMemPool}, log_warn, mvcc_index::MvccIndex
     };
     use anyhow::Result;
 
@@ -611,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn test_txn_repeatable_read() -> Result<()> {
+    fn test_txn_read_committed_6() -> Result<()> {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(100, 100);
 
@@ -661,7 +655,7 @@ mod tests {
         }
 
         // check repeatable read of TXN2 before commit of TXN1
-        let txn2_get_result = txn2.get(&txn1_key, &txn1_pkey).unwrap();
+        let txn2_get_result: Option<Vec<u8>> = txn2.get(&txn1_key, &txn1_pkey).unwrap();
         assert_eq!(txn2_get_result, None);
 
         for old_entry in &prefill_entries {
@@ -670,21 +664,20 @@ mod tests {
         }
 
         txn1.commit().unwrap();
-
         // check repeatable read of TXN2 after commit of TXN1
         let txn2_get_result = txn2.get(&txn1_key, &txn1_pkey).unwrap();
-        assert_eq!(txn2_get_result, None);
+        assert_eq!(txn2_get_result, Some(txn1_value));
 
         for old_entry in &prefill_entries {
             let txn2_get_result = txn2.get(&old_entry.0, &old_entry.1).unwrap();
-            assert_eq!(txn2_get_result.as_ref().unwrap(), &old_entry.2);
+            assert_eq!(txn2_get_result.as_ref().unwrap(), &txn1_update_value);
         }
 
         Ok(())
     }
 
     #[test]
-    fn test_txn_serializable() -> Result<()> {
+    fn test_txn_read_committed_1() -> Result<()> {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(100, 100);
 
@@ -732,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn test_txn_serializable2() -> Result<()> {
+    fn test_txn_read_committed_2() -> Result<()> {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(100, 100);
 
@@ -779,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn test_txn_serializable3() -> Result<()> {
+    fn test_txn_read_committed_3() -> Result<()> {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(100, 100);
 
@@ -816,8 +809,12 @@ mod tests {
             conflict_value1.clone(),
         )
         .unwrap();
+        txn1.commit().unwrap();
 
-        txn2.get(&conflict_key1, &conflict_pkey1).unwrap();
+        // txn2 should read committed value
+        let get_res = txn2.get(&conflict_key1, &conflict_pkey1).unwrap();
+        assert!(get_res.is_some());
+        assert_eq!(get_res.unwrap(), conflict_value1);
         txn2.insert(
             conflict_key2.clone(),
             conflict_pkey2.clone(),
@@ -825,18 +822,16 @@ mod tests {
         )
         .unwrap();
 
-        txn1.commit().unwrap();
 
-        // txn2 can not be committed
-        // because it read value before txn1 committed, but it commits after commit of txn1,
+
+        // txn2 can be committed
         let txn2_commit_result = txn2.commit();
-        assert!(txn2_commit_result.is_err());
-
+        assert!(txn2_commit_result.is_ok());
         Ok(())
     }
 
     #[test]
-    fn test_txn_serializable4() -> Result<()> {
+    fn test_txn_read_committed_4() -> Result<()> {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(100, 100);
 
@@ -897,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn test_txn_integration() -> Result<()> {
+    fn test_txn_read_committed_5() -> Result<()> {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(100, 100);
 
@@ -927,11 +922,11 @@ mod tests {
         assert!(txn3
             .get(&b"test1".to_vec(), &b"test1".to_vec())
             .unwrap()
-            .is_none());
+            .is_some());
         assert!(txn3
             .get(&b"test2".to_vec(), &b"test2".to_vec())
             .unwrap()
-            .is_none());
+            .is_some());
 
         drop(txn3);
 
@@ -964,7 +959,7 @@ mod tests {
             b"2333".to_vec()
         );
 
-        txn4.delete(b"test2".to_vec(), b"test2".to_vec());
+        txn4.delete(b"test2".to_vec(), b"test2".to_vec()).unwrap();
         assert_eq!(
             txn4.get(&b"test1".to_vec(), &b"test1".to_vec())
                 .unwrap()
