@@ -495,12 +495,12 @@ impl<T: MemPool> MvccHashJoinTable<T> {
     ) -> Result<(), CuckooAccessMethodError> {
         let insert_res = self.recent().insert(&key, &pkey, ts, &value);
         match insert_res {
-            Ok(old_delete_marker) => {
-                if let Some(old_delete_start_ts) = old_delete_marker {
-                    self.history()
-                        .insert_deleted(&key, &pkey, old_delete_start_ts, ts)
-                        .unwrap();
-                }
+            Ok(_old_delete_marker) => {
+                // if let Some(old_delete_start_ts) = old_delete_marker {
+                //     self.history()
+                //         .insert_deleted(&key, &pkey, old_delete_start_ts, ts)
+                //         .unwrap();
+                // }
                 Ok(())
             }
             Err(e) => Err(e),
@@ -560,6 +560,7 @@ impl<T: MemPool> MvccHashJoinTable<T> {
                 } else {
                     // update in the same ts => need not insert in history
                     // DO NOTHING HERE
+                    log_warn!("[update] same ts do nothing!");
                 }
                 Ok(())
             }
@@ -577,19 +578,21 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         let old_result = self.recent().delete(&key, &pkey, ts);
         match old_result {
             Ok((old_ts, old_val)) => {
-                // log_warn!(
-                //     "old_ts: {:?}, old_val: {:?}",
-                //     old_ts,
-                //     str::from_utf8(&old_val[..])
-                // );
-
-                let history_insert_res = self.history().insert(&key, &pkey, old_ts, ts, &old_val);
-                match history_insert_res {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        panic!("should not happen! err: {:?}", e);
+                if old_ts < ts {
+                    let history_insert_res = self.history().insert(&key, &pkey, old_ts, ts, &old_val);
+                    match history_insert_res {
+                        Ok(()) => {},
+                        Err(e) => {
+                            panic!("should not happen! err: {:?}", e);
+                        }
                     }
+                } else {
+                    // update in the same ts => need not insert in history
+                    // DO NOTHING HERE
+                    log_warn!("[delete] same ts do nothing!");
                 }
+                Ok(())
+                
             }
             Err(e) => Err(e),
         }
