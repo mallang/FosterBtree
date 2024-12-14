@@ -24,12 +24,12 @@ use crate::{
 /* --------------------------- Scanner START ---------------------------------- */
 
 use super::{
-    mvcc_hash_join_cuckoo_common::{arcrwlock::*, BucketEntry, Buckets, CuckooAccessMethodError},
-    mvcc_hash_join_page::MvccHashJoinCuckooPage,
+    double_hash_common::{arcrwlock::*, BucketEntry, Buckets, CuckooAccessMethodError},
+    double_hash_data_page::MvccHashJoinCuckooPage,
 };
 
 pub struct CuckooHashJoinTableScanner<T: MemPool> {
-    table: Arc<CuckooHashTable<T>>,
+    table: Arc<DoubleHashTable<T>>,
     ts: Timestamp,
     current_bucket_index: usize,
     initial_bucket_num: u32,
@@ -41,7 +41,7 @@ pub struct CuckooHashJoinTableScanner<T: MemPool> {
 }
 
 impl<T: MemPool> CuckooHashJoinTableScanner<T> {
-    pub fn new(table: &Arc<CuckooHashTable<T>>, ts: Timestamp, scan_all_flag: bool) -> Self {
+    pub fn new(table: &Arc<DoubleHashTable<T>>, ts: Timestamp, scan_all_flag: bool) -> Self {
         Self {
             table: table.clone(),
             ts,
@@ -318,8 +318,7 @@ impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
 }
 
 /// responsible for update meta page of HashJoinTable<T>
-pub struct CuckooHashTable<T: MemPool> {
-    // hasher_idx: usize,
+pub struct DoubleHashTable<T: MemPool> {
     c_key: ContainerKey,
 
     mem_pool: Arc<T>,
@@ -423,7 +422,7 @@ pub trait CuckooHistoryHashTable<T: MemPool> {
 }
 
 /// Recent & History basic functions
-impl<T: MemPool> CuckooHashTable<T> {
+impl<T: MemPool> DoubleHashTable<T> {
     /// assume buckets is not locked!
     ///
     pub fn bucket_num(&self) -> u32 {
@@ -1481,7 +1480,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     }
 }
 
-impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
+impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
     fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
         Self::new_with_bucket_num_inner(c_key, mem_pool, 1, meta)
     }
@@ -1707,7 +1706,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
     }
 }
 
-impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
+impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
     fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
         Self::new_with_bucket_num_inner(c_key, mem_pool, 1, meta)
     }
@@ -1898,7 +1897,7 @@ fn test_delete_two_markers() {
     let c_key = ContainerKey::new(0, 0);
     let meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
     let meta = Arc::new((meta_page.get_id(), AtomicU32::new(0)));
-    let table = <CuckooHashTable<_> as CuckooRecentHashTable<_>>::new_with_bucket_num(
+    let table = <DoubleHashTable<_> as CuckooRecentHashTable<_>>::new_with_bucket_num(
         c_key, mem_pool1, &meta, 16,
     );
 
@@ -1906,10 +1905,10 @@ fn test_delete_two_markers() {
     let pkey = b"pkey1".to_vec();
     let value = b"233".to_vec();
 
-    <CuckooHashTable<_> as CuckooRecentHashTable<_>>::insert(&table, &key, &pkey, 0, &value)
+    <DoubleHashTable<_> as CuckooRecentHashTable<_>>::insert(&table, &key, &pkey, 0, &value)
         .unwrap();
     let old_res =
-        <CuckooHashTable<_> as CuckooRecentHashTable<_>>::delete(&table, &key, &pkey, 1).unwrap();
+        <DoubleHashTable<_> as CuckooRecentHashTable<_>>::delete(&table, &key, &pkey, 1).unwrap();
     assert_eq!(old_res.0, 0);
     assert_eq!(old_res.1, b"233".to_vec());
 
