@@ -1,34 +1,23 @@
-use core::str;
 use std::{
-    fs::File,
-    io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write},
-    mem::size_of,
     sync::{atomic::AtomicU32, Arc},
     time::Duration,
 };
 
-use tempfile::tempfile;
 
 use crate::{
     bp::{ContainerKey, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{MvccEntry, MvccIndex, Timestamp, TxId},
-    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
-};
-
-use super::cuckoo_optimistic::{
-    mvcc_hash_join_cuckoo_common::CuckooAccessMethodError,
-    mvcc_hash_join_cuckoo_table::{
-        CuckooHashJoinTableScanner, CuckooHashTable, CuckooHistoryHashTable, CuckooRecentHashTable,
-        ScanTsWithBucketsReadGuard,
+    mvcc_index::{
+        hashtable_mu::hash_join_table_common::{CuckooAccessMethodError, DEFAULT_NUM_BUCKETS}, MvccIndex, Timestamp, TxId
     },
+    page::PageId,
 };
 
-pub(crate) const HASHER_KEYS: [(u64, u64); 2] = [(0, 0), (1, 1)];
-pub(crate) const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
-pub(crate) const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>();
-pub(crate) const BUCKET_ENTRY_SIZE: usize = PAGE_ID_SIZE;
-pub(crate) const DEFAULT_NUM_BUCKETS: usize = 256;
+use super::{
+    double_hash::double_hash_table::DoubleHashTable, hash_join_table_common::{CuckooHistoryHashTable, CuckooRecentHashTable, MvccHashJoinCuckooMetaPage, RecentHistoryTable}
+};
+
+type TableStruct<T> = DoubleHashTable<T>;
 
 pub struct MvccHashJoinTable<T: MemPool> {
     mem_pool: Arc<T>,
@@ -36,8 +25,8 @@ pub struct MvccHashJoinTable<T: MemPool> {
 
     meta: Arc<(PageId, AtomicU32)>,
 
-    recent_hash_table: Arc<CuckooHashTable<T>>,
-    history_hash_table: Arc<CuckooHashTable<T>>,
+    recent_hash_table: Arc<TableStruct<T>>,
+    history_hash_table: Arc<TableStruct<T>>,
 }
 
 impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
@@ -45,10 +34,9 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
     type Error = CuckooAccessMethodError;
-    // type MemPoolType = T;
-    type DeltaIter = MyDeltaScanIter<T>;
-    type Iter = MyScanIter<T>;
-    type ScanKeyIter = MyScanKeyIter<T, Self>;
+    type DeltaIter = CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanDeltaIter>;
+    type Iter = CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanIter>;
+    type ScanKeyIter = CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanKeyIter>;
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
     where
         Self: Sized,
@@ -133,22 +121,22 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
     }
 }
 
-pub struct MyScanIter<T: MemPool> {
-    history: ScanTsWithBucketsReadGuard<T>,
-    recent: ScanTsWithBucketsReadGuard<T>,
+pub struct CuckooHashJoinTableMergeScanner<Ite: Iterator> {
+    history: Ite,
+    recent: Ite,
 }
 
-impl<T: MemPool> MyScanIter<T> {
+impl<Ite: Iterator> CuckooHashJoinTableMergeScanner<Ite> {
     pub fn new(
-        history: ScanTsWithBucketsReadGuard<T>,
-        recent: ScanTsWithBucketsReadGuard<T>,
+        history: Ite,
+        recent: Ite,
     ) -> Self {
         Self { history, recent }
     }
 }
 
-impl<T: MemPool> Iterator for MyScanIter<T> {
-    type Item = (Vec<u8>, Vec<u8>, Vec<u8>);
+impl<Ite: Iterator> Iterator for CuckooHashJoinTableMergeScanner<Ite> {
+    type Item = Ite::Item;
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.recent.next();
         if item.is_none() {
@@ -158,277 +146,15 @@ impl<T: MemPool> Iterator for MyScanIter<T> {
     }
 }
 
-pub struct CuckooHashJoinTableMergeScanner<T: MemPool> {
-    history: CuckooHashJoinTableScanner<T>,
-    recent: CuckooHashJoinTableScanner<T>,
-}
 
-impl<T: MemPool> CuckooHashJoinTableMergeScanner<T> {
-    pub fn new(
-        history: CuckooHashJoinTableScanner<T>,
-        recent: CuckooHashJoinTableScanner<T>,
-    ) -> Self {
-        Self { history, recent }
-    }
-}
-
-impl<T: MemPool> Iterator for CuckooHashJoinTableMergeScanner<T> {
-    type Item = MvccEntry;
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.recent.next();
-        if item.is_none() {
-            return self.history.next();
-        }
-        return item;
-    }
-}
-
-/// TODO: aborted, to be re-do
-pub struct MyScanKeyIter<T: MemPool, Index: MvccIndex<T>> {
-    history: ScanTsWithBucketsReadGuard<T>,
-    recent: ScanTsWithBucketsReadGuard<T>,
-
-    table: Arc<Index>,
-}
-
-impl<T: MemPool, Index: MvccIndex<T>> MyScanKeyIter<T, Index> {
-    pub fn new(
-        history: ScanTsWithBucketsReadGuard<T>,
-        recent: ScanTsWithBucketsReadGuard<T>,
-        table: &Arc<Index>,
-    ) -> Self {
-        Self {
-            history,
-            recent,
-            table: table.clone(),
-        }
-    }
-}
-
-impl<T: MemPool, Index: MvccIndex<T>> Iterator for MyScanKeyIter<T, Index> {
-    type Item = (Index::PKey, Index::Value);
-    fn next(&mut self) -> Option<Self::Item> {
-        // let mut item = self.recent.next();
-        // if item.is_none() {
-        //     item = self.history.next();
-        // }
-
-        // if item.is_none() {
-        //     return None;
-        // } else {
-        //     let (_k, pk, v) = item.unwrap();
-        //     return Some((pk, v));
-        // }
-        todo!()
-    }
-}
-
-pub struct MyDeltaScanIter<T: MemPool> {
-    from_ts_file: BufReader<File>,
-    to_ts_file: BufReader<File>,
-    to_ts: Timestamp,
-    from_ts: Timestamp,
-    table: Arc<MvccHashJoinTable<T>>,
-}
-
-impl<T: MemPool> MyDeltaScanIter<T> {
-    pub fn new(
-        from_ts_iter: MyScanIter<T>,
-        to_ts_iter: MyScanIter<T>,
-        table: Arc<MvccHashJoinTable<T>>,
-        to_ts: Timestamp,
-        from_ts: Timestamp,
-    ) -> Self {
-        Self {
-            from_ts_file: Self::create_temp_file(from_ts_iter),
-            to_ts_file: Self::create_temp_file(to_ts_iter),
-            table,
-            to_ts,
-            from_ts,
-        }
-    }
-    // key, pkey, val
-    fn create_temp_file(iter: MyScanIter<T>) -> BufReader<File> {
-        let tmp_file = tempfile::tempfile().unwrap();
-        let mut tmp_writer = BufWriter::new(&tmp_file);
-        for (key, pkey, value) in iter {
-            let mut encode_bytes = Vec::<u8>::new();
-            let space_need_pair = Self::space_need_pair(&key, &pkey, &value);
-            encode_bytes.resize(space_need_pair, 0);
-            encode_bytes[0..size_of::<u32>()].copy_from_slice(&((key.len() as u32).to_be_bytes()));
-            encode_bytes[0..size_of::<u32>()].copy_from_slice(&((pkey.len() as u32).to_be_bytes()));
-            encode_bytes[0..size_of::<u32>()]
-                .copy_from_slice(&((value.len() as u32).to_be_bytes()));
-            encode_bytes.extend(key);
-            encode_bytes.extend(pkey);
-            encode_bytes.extend(value);
-            assert_eq!(encode_bytes.len(), space_need_pair);
-            tmp_writer.write_all(&encode_bytes).unwrap();
-        }
-        tmp_writer.flush().unwrap();
-        drop(tmp_writer);
-        BufReader::new(tmp_file)
-    }
-    fn space_need_pair(key: &[u8], pkey: &[u8], val: &[u8]) -> usize {
-        size_of::<u32>() * 3 + key.len() + pkey.len() + val.len()
-    }
-}
-
-impl<T: MemPool> Iterator for MyDeltaScanIter<T> {
-    type Item = (Vec<u8>, Vec<u8>, crate::mvcc_index::Delta<Vec<u8>>);
-    fn next(&mut self) -> Option<Self::Item> {
-        /*
-            first read whole to_ts_file
-            * to_ts exist and from_ts no exist: insert
-            * to_ts exist and from_ts exist: check update
-            * if not update: search a new to_ts_pair
-        */
-        '_find_delta_in_to_ts_pairs: loop {
-            let to_ts_pair = {
-                let is_eof = self.to_ts_file.fill_buf().unwrap().is_empty();
-                if is_eof {
-                    None
-                } else {
-                    let mut len_meta_buffer = [0_u8; size_of::<u32>() * 3];
-                    match self.to_ts_file.read_exact(&mut len_meta_buffer) {
-                        Err(_e) => {
-                            panic!("should not occur!");
-                        }
-                        Ok(_) => {
-                            let key_len = u32::from_be_bytes(
-                                len_meta_buffer[0..size_of::<u32>()].try_into().unwrap(),
-                            );
-                            let pkey_len = u32::from_be_bytes(
-                                len_meta_buffer[size_of::<u32>()..size_of::<u32>() * 2]
-                                    .try_into()
-                                    .unwrap(),
-                            );
-                            let val_len = u32::from_be_bytes(
-                                len_meta_buffer[size_of::<u32>() * 2..size_of::<u32>() * 3]
-                                    .try_into()
-                                    .unwrap(),
-                            );
-                            let mut k_buffer = Vec::<u8>::new();
-                            let mut pk_buffer = Vec::<u8>::new();
-                            let mut v_buffer = Vec::<u8>::new();
-                            k_buffer.resize(key_len as usize, 0);
-                            pk_buffer.resize(pkey_len as usize, 0);
-                            v_buffer.resize(val_len as usize, 0);
-
-                            self.to_ts_file.read_exact(&mut k_buffer).unwrap();
-                            self.to_ts_file.read_exact(&mut pk_buffer).unwrap();
-                            self.to_ts_file.read_exact(&mut v_buffer).unwrap();
-
-                            Some((k_buffer, pk_buffer, v_buffer))
-                        }
-                    }
-                }
-            };
-
-            if let Some((key, pkey, to_ts_val)) = to_ts_pair {
-                let from_ts_get_result = self.table.get_inner(&key, &pkey, self.from_ts);
-                match from_ts_get_result {
-                    Ok(None) => {
-                        // inserted
-                        return Some((key, pkey, crate::mvcc_index::Delta::Inserted(to_ts_val)));
-                    }
-                    Ok(Some(from_ts_val)) => {
-                        // check if updated
-
-                        if &to_ts_val != &from_ts_val {
-                            // updated
-                            return Some((key, pkey, crate::mvcc_index::Delta::Updated(to_ts_val)));
-                        }
-                        // not updated
-                        continue;
-                    }
-                    Err(_) => {
-                        panic!("should not occur!");
-                    }
-                }
-            } else {
-                // to_ts read all pairs out
-                break;
-            }
-        }
-
-        /*
-            second read whole from_ts_file
-            * from_ts exist and to_ts no exist: delete
-        */
-        '_find_delta_in_from_ts_pairs: loop {
-            let from_ts_pair = {
-                let is_eof = self.from_ts_file.fill_buf().unwrap().is_empty();
-                if is_eof {
-                    None
-                } else {
-                    let mut len_meta_buffer = [0_u8; size_of::<u32>() * 3];
-                    match self.from_ts_file.read_exact(&mut len_meta_buffer) {
-                        Err(_e) => {
-                            panic!("should not occur!");
-                        }
-                        Ok(_) => {
-                            let key_len = u32::from_be_bytes(
-                                len_meta_buffer[0..size_of::<u32>()].try_into().unwrap(),
-                            );
-                            let pkey_len = u32::from_be_bytes(
-                                len_meta_buffer[size_of::<u32>()..size_of::<u32>() * 2]
-                                    .try_into()
-                                    .unwrap(),
-                            );
-                            let val_len = u32::from_be_bytes(
-                                len_meta_buffer[size_of::<u32>() * 2..size_of::<u32>() * 3]
-                                    .try_into()
-                                    .unwrap(),
-                            );
-                            let mut k_buffer = Vec::<u8>::new();
-                            let mut pk_buffer = Vec::<u8>::new();
-                            let mut v_buffer = Vec::<u8>::new();
-                            k_buffer.resize(key_len as usize, 0);
-                            pk_buffer.resize(pkey_len as usize, 0);
-                            v_buffer.resize(val_len as usize, 0);
-
-                            self.from_ts_file.read_exact(&mut k_buffer).unwrap();
-                            self.from_ts_file.read_exact(&mut pk_buffer).unwrap();
-                            self.from_ts_file.read_exact(&mut v_buffer).unwrap();
-
-                            Some((k_buffer, pk_buffer, v_buffer))
-                        }
-                    }
-                }
-            };
-
-            if let Some((key, pkey, _)) = from_ts_pair {
-                let to_ts_get_result = self.table.get_inner(&key, &pkey, self.to_ts);
-                match to_ts_get_result {
-                    Ok(None) => {
-                        // deleted
-                        return Some((key, pkey, crate::mvcc_index::Delta::Deleted));
-                    }
-                    Ok(_) => {
-                        continue;
-                    }
-                    Err(_) => {
-                        panic!("should not occur!");
-                    }
-                }
-            } else {
-                // from_ts read all pairs out
-                break;
-            }
-        }
-
-        return None;
-    }
-}
 
 impl<T: MemPool> MvccHashJoinTable<T> {
-    fn recent(&self) -> &impl CuckooRecentHashTable<T> {
-        &*self.recent_hash_table
+    fn recent(&self) -> &Arc<impl CuckooRecentHashTable<T>> {
+        &self.recent_hash_table
     }
 
-    fn history(&self) -> &impl CuckooHistoryHashTable<T> {
-        &*self.history_hash_table
+    fn history(&self) -> &Arc<impl CuckooHistoryHashTable<T>> {
+        &self.history_hash_table
     }
 
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
@@ -443,13 +169,13 @@ impl<T: MemPool> MvccHashJoinTable<T> {
 
         MvccHashJoinCuckooMetaPage::init(&mut *meta_page, num_buckets);
 
-        let recent_table = <CuckooHashTable<T> as CuckooRecentHashTable<T>>::new_with_bucket_num(
+        let recent_table = TableStruct::<T>::new_with_bucket_num(
             c_key,
             mem_pool.clone(),
             &meta,
             num_buckets,
         );
-        let history_table = <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::new_with_bucket_num(
+        let history_table = TableStruct::<T>::new_with_bucket_num(
             c_key,
             mem_pool.clone(),
             &meta,
@@ -457,22 +183,22 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         );
 
         let recent_page_ids =
-            <CuckooHashTable<T> as CuckooRecentHashTable<T>>::get_all_bucket_page_ids(
+            <TableStruct<T> as CuckooRecentHashTable<T>>::get_all_bucket_page_ids(
                 &recent_table,
             );
         let history_page_ids =
-            <CuckooHashTable<T> as CuckooHistoryHashTable<T>>::get_all_bucket_page_ids(
+            <TableStruct<T> as CuckooHistoryHashTable<T>>::get_all_bucket_page_ids(
                 &history_table,
             );
 
-        <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_recent(
-            &mut *meta_page,
-            &recent_page_ids,
-        );
-        <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_history(
-            &mut *meta_page,
-            &history_page_ids,
-        );
+        // <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_recent(
+        //     &mut *meta_page,
+        //     &recent_page_ids,
+        // );
+        // <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_history(
+        //     &mut *meta_page,
+        //     &history_page_ids,
+        // );
 
         drop(meta_page);
 
@@ -522,11 +248,11 @@ impl<T: MemPool> MvccHashJoinTable<T> {
                 Ok(None)
             }
             Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                // log_warn!(
-                //     "[HashJoinTable::get_inner] return KeyFoundButInvalidTS in recent table!"
-                // );
+                log_warn!(
+                    "[HashJoinTable::get_inner] return KeyFoundButInvalidTS in recent table!"
+                );
                 let history_val = self.history().get(key, pkey, ts);
-                // log_warn!("try to find in history");
+                log_warn!("try to find in history");
                 match history_val {
                     Ok(val) => Ok(Some(val)),
                     Err(CuckooAccessMethodError::KeyNotFound) => Ok(None),
@@ -549,6 +275,7 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         match old_result {
             Ok((old_ts, old_val)) => {
                 if old_ts < ts {
+                    log_warn!("old update result: {:?}", (&old_ts, &old_val));
                     let history_insert_res =
                         self.history().insert(&key, &pkey, old_ts, ts, &old_val);
                     match history_insert_res {
@@ -598,41 +325,35 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         }
     }
 
-    pub fn scan_inner(&self, ts: Timestamp) -> MyScanIter<T> {
-        let recent_scan_iter = self.recent().scan(ts);
-        let history_scan_iter = self.history().scan(ts);
-        let scan_iter = MyScanIter::new(history_scan_iter, recent_scan_iter);
-        scan_iter
+    fn scan_inner(&self, ts: Timestamp) 
+        -> CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanIter> 
+    {
+        let recent_scan_iter = self.recent_hash_table.scan(ts);
+        let history_scan_iter = self.history_hash_table.scan(ts);
+        CuckooHashJoinTableMergeScanner::new(history_scan_iter, recent_scan_iter)
     }
 
-    pub fn scan_all(&self) -> Result<CuckooHashJoinTableMergeScanner<T>, CuckooAccessMethodError> {
-        let recent_scan_iter =
-            CuckooHashJoinTableScanner::new(&self.recent_hash_table, Timestamp::MAX, true);
-        let history_scan_iter =
-            CuckooHashJoinTableScanner::new(&self.history_hash_table, Timestamp::MAX, true);
+    pub fn scan_all(&self) 
+        -> Result<CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanAllIter>, CuckooAccessMethodError> 
+    {
+        let recent_scan_iter = self.recent_hash_table.scan_all();
+        let history_scan_iter = self.history_hash_table.scan_all();
         let scan_iter = CuckooHashJoinTableMergeScanner::new(history_scan_iter, recent_scan_iter);
         Ok(scan_iter)
     }
 
-    pub fn scan(
-        &self,
-        ts: Timestamp,
-    ) -> Result<CuckooHashJoinTableMergeScanner<T>, CuckooAccessMethodError> {
-        let recent_scan_iter = CuckooHashJoinTableScanner::new(&self.recent_hash_table, ts, false);
-        let history_scan_iter =
-            CuckooHashJoinTableScanner::new(&self.history_hash_table, ts, false);
-        let scan_iter = CuckooHashJoinTableMergeScanner::new(history_scan_iter, recent_scan_iter);
-        Ok(scan_iter)
-    }
 
-    pub fn scan_key_inner(self: &Arc<Self>, ts: Timestamp, key: &[u8]) -> MyScanKeyIter<T, Self> {
-        let recent_scan_iter = self.recent().scan_key(ts, key);
-        let history_scan_iter = self.history().scan_key(ts, key);
-        let scan_iter = MyScanKeyIter::new(history_scan_iter, recent_scan_iter, &self);
+    fn scan_key_inner(self: &Arc<Self>, ts: Timestamp, key: &[u8]) 
+        -> CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanKeyIter> 
+    {
+        let recent_scan_iter = self.recent_hash_table.scan_key(ts, key);
+        let history_scan_iter = self.history_hash_table.scan_key(ts, key);
+        let scan_iter = CuckooHashJoinTableMergeScanner::new(history_scan_iter, recent_scan_iter);
         scan_iter
     }
 
-    pub fn delta_scan_inner(&self, from_ts: Timestamp, to_ts: Timestamp) -> MyDeltaScanIter<T> {
+    pub fn delta_scan_inner(&self, from_ts: Timestamp, to_ts: Timestamp) 
+        -> CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanDeltaIter>  {
         todo!()
     }
 
@@ -660,178 +381,18 @@ impl<T: MemPool> MvccHashJoinTable<T> {
             }
         }
     }
-}
 
-/*
-    <Recent Bucket Num> <History Bucket Num> [Recent Page Id ...] [History Page Id...]
-
-*/
-pub(crate) trait MvccHashJoinCuckooMetaPage {
-    /// Initializes the meta page with the specified number of buckets.
-    fn init(&mut self, num_buckets: usize);
-    fn set_history_bucket_num(&mut self, num_buckets: usize);
-    fn set_recent_bucket_num(&mut self, num_buckets: usize);
-    fn get_recent_bucket_num(&self) -> usize;
-    fn get_history_bucket_num(&self) -> usize;
-
-    fn get_recent_bucket_entry(&self, index: usize) -> PageId;
-    fn set_recent_bucket_entry(&mut self, index: usize, entry: &PageId);
-    fn get_history_bucket_entry(&self, index: usize) -> PageId;
-    fn set_history_bucket_entry(&mut self, index: usize, entry: &PageId);
-
-    fn read_all_entries_recent(&self) -> Vec<PageId>;
-    fn write_all_entries_recent(&mut self, entries: &[PageId]);
-
-    fn read_all_entries_history(&self) -> Vec<PageId>;
-    fn write_all_entries_history(&mut self, entries: &[PageId]);
-
-    fn rehash_update_recent(&mut self, entries: &[PageId]);
-    fn rehash_update_history(&mut self, entries: &[PageId]);
-}
-
-impl MvccHashJoinCuckooMetaPage for Page {
-    fn init(&mut self, num_buckets: usize) {
-        let required_size = BUCKET_NUM_SIZE * 2 + (num_buckets * BUCKET_ENTRY_SIZE) * 2;
-        assert!(
-            required_size <= AVAILABLE_PAGE_SIZE,
-            "Page size is insufficient for the number of buckets",
-        );
-        self.set_recent_bucket_num(num_buckets);
-        self.set_history_bucket_num(num_buckets);
-        // only set bucket num here cause we need mem_pool to allocate pages
-    }
-
-    fn set_recent_bucket_num(&mut self, num_buckets: usize) {
-        let bytes = &mut self[..BUCKET_NUM_SIZE];
-        bytes.copy_from_slice(&(num_buckets as u64).to_be_bytes());
-    }
-
-    fn set_history_bucket_num(&mut self, num_buckets: usize) {
-        let bytes = &mut self[BUCKET_NUM_SIZE..BUCKET_NUM_SIZE * 2];
-        bytes.copy_from_slice(&(num_buckets as u64).to_be_bytes());
-    }
-
-    fn get_recent_bucket_num(&self) -> usize {
-        let bytes = &self[..BUCKET_NUM_SIZE];
-        u64::from_be_bytes(bytes.try_into().unwrap()) as usize
-    }
-
-    fn get_history_bucket_num(&self) -> usize {
-        let bytes = &self[BUCKET_NUM_SIZE..BUCKET_NUM_SIZE * 2];
-        u64::from_be_bytes(bytes.try_into().unwrap()) as usize
-    }
-
-    fn get_recent_bucket_entry(&self, index: usize) -> PageId {
-        let recent_num_buckets = self.get_recent_bucket_num();
-        assert!(index < recent_num_buckets, "Bucket index out of bounds");
-
-        let offset = (2 * BUCKET_NUM_SIZE) + index * BUCKET_ENTRY_SIZE;
-        let bytes = &self[offset..offset + BUCKET_ENTRY_SIZE];
-
-        let recent_pid = PageId::from_be_bytes(bytes[0..PAGE_ID_SIZE].try_into().unwrap());
-
-        recent_pid
-    }
-    fn set_recent_bucket_entry(&mut self, index: usize, entry: &PageId) {
-        let recent_num_buckets = self.get_recent_bucket_num();
-        assert!(index < recent_num_buckets, "Bucket index out of bounds");
-
-        let offset = (2 * BUCKET_NUM_SIZE) + index * BUCKET_ENTRY_SIZE;
-        let bytes = &mut self[offset..offset + BUCKET_ENTRY_SIZE];
-
-        bytes[0..PAGE_ID_SIZE].copy_from_slice(&entry.to_be_bytes());
-    }
-    fn get_history_bucket_entry(&self, index: usize) -> PageId {
-        let recent_num_buckets = self.get_recent_bucket_num();
-        let history_num_buckets = self.get_history_bucket_num();
-        assert!(index < history_num_buckets, "Bucket index out of bounds");
-
-        let offset = (2 * BUCKET_NUM_SIZE)
-            + recent_num_buckets * BUCKET_ENTRY_SIZE
-            + index * BUCKET_ENTRY_SIZE;
-        let bytes = &self[offset..offset + BUCKET_ENTRY_SIZE];
-
-        let history_pid = PageId::from_be_bytes(bytes[0..PAGE_ID_SIZE].try_into().unwrap());
-
-        history_pid
-    }
-    fn set_history_bucket_entry(&mut self, index: usize, entry: &PageId) {
-        let recent_num_buckets = self.get_recent_bucket_num();
-        let history_num_buckets = self.get_history_bucket_num();
-        assert!(index < history_num_buckets, "Bucket index out of bounds");
-
-        let offset = (2 * BUCKET_NUM_SIZE)
-            + recent_num_buckets * BUCKET_ENTRY_SIZE
-            + index * BUCKET_ENTRY_SIZE;
-        let bytes = &mut self[offset..offset + BUCKET_ENTRY_SIZE];
-
-        bytes[0..PAGE_ID_SIZE].copy_from_slice(&entry.to_be_bytes());
-    }
-
-    fn read_all_entries_recent(&self) -> Vec<PageId> {
-        let num_buckets = self.get_recent_bucket_num();
-        let mut entries = Vec::with_capacity(num_buckets);
-        for index in 0..num_buckets {
-            entries.push(self.get_recent_bucket_entry(index));
-        }
-        entries
-    }
-
-    fn write_all_entries_recent(&mut self, entries: &[PageId]) {
-        let num_buckets = self.get_recent_bucket_num();
-        assert!(
-            entries.len() == num_buckets,
-            "Number of entries does not match number of buckets"
-        );
-        for (index, entry) in entries.iter().enumerate() {
-            self.set_recent_bucket_entry(index, entry);
-        }
-    }
-
-    fn read_all_entries_history(&self) -> Vec<PageId> {
-        let num_buckets = self.get_history_bucket_num();
-        let mut entries = Vec::with_capacity(num_buckets);
-        for index in 0..num_buckets {
-            entries.push(self.get_history_bucket_entry(index));
-        }
-        entries
-    }
-
-    fn write_all_entries_history(&mut self, entries: &[PageId]) {
-        let num_buckets = self.get_history_bucket_num();
-        assert!(
-            entries.len() == num_buckets,
-            "Number of entries does not match number of buckets"
-        );
-        for (index, entry) in entries.iter().enumerate() {
-            self.set_history_bucket_entry(index, entry);
-        }
-    }
-
-    fn rehash_update_history(&mut self, entries: &[PageId]) {
-        // rehash into meta page
-        let old_history_entries_num = self.get_history_bucket_num();
-        if old_history_entries_num < entries.len() {
-            assert_eq!(old_history_entries_num * 2, entries.len());
-            self.set_history_bucket_num(old_history_entries_num * 2);
-            self.write_all_entries_history(&entries);
-        }
-    }
-
-    fn rehash_update_recent(&mut self, entries: &[PageId]) {
-        // rehash into meta page
-        let old_recent_entries_num = self.get_recent_bucket_num();
-        if old_recent_entries_num < entries.len() {
-            assert_eq!(old_recent_entries_num * 2, entries.len());
-            self.set_recent_bucket_num(old_recent_entries_num * 2);
-            self.write_all_entries_recent(&entries);
-        }
+    pub fn dump_all_entry(&self) {
+        self.recent_hash_table.dump_all_entry();
     }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mvcc_index::hashtable_mu::hash_join_table_common::{BUCKET_NUM_SIZE, BUCKET_ENTRY_SIZE};
+    use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
     use crate::bp::get_in_mem_pool;
 
     #[test]
@@ -967,7 +528,7 @@ mod tests {
     fn many_inserts_until_rehash() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1);
+        let hash_join_table = MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16);
 
         let pair_space_need = space_need(
             &format!("{:06}", 1).as_bytes().to_vec(),
@@ -1006,22 +567,22 @@ mod tests {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
 
-        // let hash_join_table_clone = hash_join_table.clone();
-        // let handle = thread::spawn(move || {
-        //     // Insert entries in a separate thread
-        //     for i in (0..1000).into_iter().step_by(2) {
-        //         let key = format!("key{}", i).into_bytes();
-        //         let pkey = format!("pkey{}", i).into_bytes();
-        //         let value = format!("value{}", i).into_bytes();
-        //         hash_join_table_clone
-        //             .insert_inner(key, pkey, i as u64, 1, value)
-        //             .unwrap();
-        //     }
-        // });
+        let hash_join_table_clone = hash_join_table.clone();
+        let handle = thread::spawn(move || {
+            // Insert entries in a separate thread
+            for i in (0..1000).into_iter().step_by(2) {
+                let key = format!("key__{}", i).into_bytes();
+                let pkey = format!("pkey__{}", i).into_bytes();
+                let value = format!("value__{}", i).into_bytes();
+                hash_join_table_clone
+                    .insert_inner(key, pkey, i as u64, 1, value)
+                    .unwrap();
+            }
+        });
 
-        for i in (0..200).into_iter().step_by(2) {
+        for i in (1..1000).into_iter().step_by(2) {
             let key = format!("key__{}", i).into_bytes();
             let pkey = format!("pkey__{}", i).into_bytes();
             let value = format!("value__{}", i).into_bytes();
@@ -1030,41 +591,32 @@ mod tests {
                 .unwrap();
         }
 
-        for i in (1..200).into_iter().step_by(2) {
+        // Read entries while inserts are happening
+        for i in 0..1000 {
             let key = format!("key__{}", i).into_bytes();
             let pkey = format!("pkey__{}", i).into_bytes();
-            let value = format!("value__{}", i).into_bytes();
-            hash_join_table
-                .insert_inner(key, pkey, i as u64, 1, value)
-                .unwrap();
+            // It's possible that the key hasn't been inserted yet
+            let _ = hash_join_table.get_inner(&key, &pkey, i as u64);
         }
 
-        // // Read entries while inserts are happening
-        // for i in 0..1000 {
-        //     let key = format!("key{}", i).into_bytes();
-        //     let pkey = format!("pkey{}", i).into_bytes();
-        //     // It's possible that the key hasn't been inserted yet
-        //     let _ = hash_join_table.get_inner(&key, &pkey, i as u64);
-        // }
-
-        // handle.join().unwrap();
+        handle.join().unwrap();
         // log_warn!("FINISH JOIN!!!!!!!!!!");
-        // let hash_join_table_clone = hash_join_table.clone();
+        let hash_join_table_clone = hash_join_table.clone();
 
-        // let handle = thread::spawn(move || {
-        //     // Verify all entries after insertions are complete
-        //     for i in 0..1000 {
-        //         let key = format!("key{}", i).into_bytes();
-        //         let pkey = format!("pkey{}", i).into_bytes();
-        //         let expected_value = format!("value{}", i).into_bytes();
-        //         let retrieved_val = hash_join_table_clone
-        //             .get_inner(&key, &pkey, i as u64)
-        //             .unwrap();
-        //         assert_eq!(retrieved_val.unwrap(), expected_value);
-        //     }
-        // });
+        let handle = thread::spawn(move || {
+            // Verify all entries after insertions are complete
+            for i in 0..1000 {
+                let key = format!("key__{}", i).into_bytes();
+                let pkey = format!("pkey__{}", i).into_bytes();
+                let expected_value = format!("value__{}", i).into_bytes();
+                let retrieved_val = hash_join_table_clone
+                    .get_inner(&key, &pkey, i as u64)
+                    .unwrap();
+                assert_eq!(retrieved_val.unwrap(), expected_value);
+            }
+        });
         // Verify all entries after insertions are complete
-        for i in 0..100 {
+        for i in 0..1000 {
             log_warn!("get {i}");
             let key = format!("key__{}", i).into_bytes();
             let pkey = format!("pkey__{}", i).into_bytes();
@@ -1073,14 +625,14 @@ mod tests {
             assert_eq!(retrieved_val.unwrap(), expected_value);
         }
 
-        // handle.join().unwrap();
+        handle.join().unwrap();
     }
 
     #[test]
     fn simple_update_cuckoo_same_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
+        let hash_join_table: MvccHashJoinTable<crate::prelude::InMemPool> = MvccHashJoinTable::new(c_key, mem_pool);
         hash_join_table
             .insert_inner(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -1134,7 +686,7 @@ mod tests {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         let hash_join_table_clone = hash_join_table.clone();
 
@@ -1281,7 +833,7 @@ mod tests {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         let hash_join_table_clone = hash_join_table.clone();
 
@@ -1361,7 +913,7 @@ mod tests {
     fn test_insert_and_scan() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 1));
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         // 1..100 inserts
         for i in (0..100).into_iter().step_by(1) {

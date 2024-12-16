@@ -465,9 +465,10 @@ use crate::{
     log_debug, log_warn,
     mvcc_index::Timestamp,
     page::{Page, AVAILABLE_PAGE_SIZE},
+    mvcc_index::hashtable_mu::hash_join_table_common::CuckooAccessMethodError,
 };
 
-use super::mvcc_hash_join_cuckoo_common::CuckooAccessMethodError;
+
 
 pub trait MvccHashJoinCuckooPage {
     fn init(&mut self) {
@@ -973,7 +974,7 @@ impl MvccHashJoinCuckooPage for Page {
         header.increase_total_bytes_used(space_need);
         header.set_rec_start_offset(rec_offset);
         self.set_header(&header);
-        log_warn!("insert at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), space_need, self.free_space_with_compaction(), self.free_space_without_compaction());
+        // log_warn!("insert at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), space_need, self.free_space_with_compaction(), self.free_space_without_compaction());
         // log_warn!(
         //     "insert key{:?} at slot id {:?} slot count{:?}",
         //     key,

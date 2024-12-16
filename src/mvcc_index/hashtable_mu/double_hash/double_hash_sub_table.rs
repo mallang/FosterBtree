@@ -2,7 +2,7 @@ use core::str;
 use std::{
     collections::HashSet,
     iter::Enumerate,
-    sync::{atomic::AtomicU32, Arc, Mutex},
+    sync::{atomic::AtomicU32, Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -15,21 +15,37 @@ use crate::{
     log_debug,
     log_warn,
     mvcc_index::{
-        hashtable_mu::hash_join_table_common::{CuckooAccessMethodError, CuckooHistoryHashTable, CuckooRecentHashTable, MvccHashJoinCuckooMetaPage, RecentHistoryTable},
+        hashtable_mu::hash_join_table_common::CuckooAccessMethodError,
         MvccEntry, Timestamp,
     },
     page::{Page, PageId},
 };
 
-/* --------------------------- Scanner START ---------------------------------- */
-
 use super::{
-    mvcc_hash_join_cuckoo_common::{arcrwlock::*, BucketEntry, Buckets},
-    mvcc_hash_join_page::MvccHashJoinCuckooPage,
+    double_hash_common::{ BucketEntry, Buckets},
+    double_hash_data_page::DoubleHashPage,
 };
 
-pub struct CuckooHashJoinTableScanner<T: MemPool> {
-    table: Arc<CuckooHashTable<T>>,
+/// responsible for update meta page of HashJoinTable<T>
+pub struct DoubleHashSubTable<T: MemPool> {
+    c_key: ContainerKey,
+
+    mem_pool: Arc<T>,
+
+    meta: Arc<(PageId, AtomicU32)>,
+
+    /// shared: read & update & insert & delete & get \
+    /// exclusive: rehash \
+    /// ensure atomic of (num_buckets, BucketEntry.page_id, BucketEntry.frame_id)
+    buckets_rwlock: RwLock<Buckets>, // isolation btw re-hash and get/insert/update/...
+
+    rehash_mutex: Mutex<()>, // re-hash only once
+}
+
+// ----------------- SCANNER START ------------------------------
+
+pub struct DoubleHashSubTableScanner<T: MemPool> {
+    table: Arc<DoubleHashSubTable<T>>,
     ts: Timestamp,
     current_bucket_index: usize,
     initial_bucket_num: u32,
@@ -40,8 +56,8 @@ pub struct CuckooHashJoinTableScanner<T: MemPool> {
     current_entry_index: usize,
 }
 
-impl<T: MemPool> CuckooHashJoinTableScanner<T> {
-    pub fn new(table: &Arc<CuckooHashTable<T>>, ts: Timestamp, scan_all_flag: bool) -> Self {
+impl<T: MemPool> DoubleHashSubTableScanner<T> {
+    pub fn new(table: &Arc<DoubleHashSubTable<T>>, ts: Timestamp, scan_all_flag: bool) -> Self {
         Self {
             table: table.clone(),
             ts,
@@ -58,7 +74,7 @@ impl<T: MemPool> CuckooHashJoinTableScanner<T> {
     }
 }
 
-impl<T: MemPool> Iterator for CuckooHashJoinTableScanner<T> {
+impl<T: MemPool> Iterator for DoubleHashSubTableScanner<T> {
     type Item = MvccEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -75,7 +91,7 @@ impl<T: MemPool> Iterator for CuckooHashJoinTableScanner<T> {
                 self.all_entries.clear();
                 self.current_entry_index = 0;
 
-                let buckets = self.table.rwlock.read();
+                let buckets = self.table.buckets_rwlock.read().unwrap();
                 let current_bucket_num = buckets.get_bucket_num();
                 assert!(
                     current_bucket_num >= self.initial_bucket_num
@@ -97,16 +113,16 @@ impl<T: MemPool> Iterator for CuckooHashJoinTableScanner<T> {
                     );
                     let cuckoo_page = self.table.read_page(pfkey);
 
-                    let slot_cnt = <Page as MvccHashJoinCuckooPage>::slot_count(&*cuckoo_page);
+                    let slot_cnt = <Page as DoubleHashPage>::slot_count(&*cuckoo_page);
                     for slot_id in 0..slot_cnt {
                         let slot =
-                            <Page as MvccHashJoinCuckooPage>::get_slot(&*cuckoo_page, slot_id)
+                            <Page as DoubleHashPage>::get_slot(&*cuckoo_page, slot_id)
                                 .unwrap();
                         if slot.is_mark_deleted() {
                             continue;
                         }
                         let (k, pk, v, sts, ets) =
-                            <Page as MvccHashJoinCuckooPage>::get_key_pkey_val_ts_with_slot_id(
+                            <Page as DoubleHashPage>::get_key_pkey_val_ts_with_slot_id(
                                 &*cuckoo_page,
                                 slot_id,
                             );
@@ -133,228 +149,74 @@ impl<T: MemPool> Iterator for CuckooHashJoinTableScanner<T> {
     }
 }
 
-pub struct ScanTsWithBucketsReadGuard<T: MemPool> {
-    current_entry: u32,
 
-    mem_pool: Arc<T>,
+// ----------------- SCANNER END ------------------------------
 
-    current_slot_id: u32,
+pub trait RecentSubHashTable<T: MemPool> {
+    fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
 
-    ts: Option<Timestamp>,
-    c_key: ContainerKey,
-
-    buckets_read_guard: ArcRwlockReadGuard<Buckets>,
-    scan_key: Option<Vec<u8>>,
+    fn insert(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        val: &[u8],
+    ) -> Result<Option<Timestamp>, CuckooAccessMethodError>;
+    fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Vec<u8>, CuckooAccessMethodError>;
+    fn update(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        val: &[u8],
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+    fn delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
 }
 
-impl<T: MemPool> ScanTsWithBucketsReadGuard<T> {
-    /// assume has get lock for that tid+vid
-    pub fn new(
-        mem_pool: &Arc<T>,
-        ts: Option<Timestamp>,
-        c_key: ContainerKey,
-        buckets_read_guard: ArcRwlockReadGuard<Buckets>,
-        scan_key: Option<Vec<u8>>,
-    ) -> Self {
-        Self {
-            // lock_manager: lm.clone(),
-            // tid,
-            current_entry: 0,
-            mem_pool: mem_pool.clone(),
-            current_slot_id: 0,
-            ts,
-            c_key,
-            buckets_read_guard,
-            scan_key,
-        }
-    }
+pub trait HistorySubHashTable<T: MemPool> {
+    fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
+
+    fn insert(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+        val: &[u8],
+    ) -> Result<(), CuckooAccessMethodError>;
+    fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Vec<u8>, CuckooAccessMethodError>;
+   
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError>;
+    fn insert_deleted(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), CuckooAccessMethodError>;
 }
-
-impl<T: MemPool> ScanTsWithBucketsReadGuard<T> {
-    fn read_page(&self) -> FrameReadGuard {
-        loop {
-            let page = self.mem_pool.get_page_for_read(self.page_key());
-            // protected by LockManager, only acceptable error is "CannotEvictPage"
-            match page {
-                Ok(page) => {
-                    return page;
-                }
-                Err(MemPoolStatus::CannotEvictPage) => {
-                    log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", self.page_key());
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(e) => {
-                    panic!("Unexpected error: {:?}", e);
-                }
-            }
-        }
-    }
-
-    // fn valueid(&self) -> ValueId {
-    //     let page_id = self
-    //         .buckets_read_guard
-    //         .get_bucket_entry(self.current_entry as usize)
-    //         .page_id();
-    //     ValueId {
-    //         container_id: 0,
-    //         segment_id: None,
-    //         page_id: Some(page_id),
-    //         slot_id: None,
-    //     }
-    // }
-
-    fn page_key(&self) -> PageFrameKey {
-        let page_id = self
-            .buckets_read_guard
-            .get_bucket_entry(self.current_entry as usize)
-            .page_id();
-        PageFrameKey::new(self.c_key, page_id)
-    }
-}
-
-/// Ensure no re-hash by acquire read lock of buckets \
-///
-impl<T: MemPool> Iterator for ScanTsWithBucketsReadGuard<T> {
-    type Item = (Vec<u8>, Vec<u8>, Vec<u8>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            // log_warn!("current entry: {:?}", self.current_entry);
-            if self.current_entry >= self.buckets_read_guard.get_bucket_num() {
-                // log_warn!("bucket num: {:?}", self.buckets_read_guard.get_bucket_num());
-                // scan ends
-                return None;
-            }
-
-            let base = 2;
-            let mut attempts = 0;
-
-            // if self.current_slot_id == 0 {
-            //     // new page to scan, get lock from lock_manager
-            //     '_acquire_page_lock: loop {
-            //         let ret = self.lock_manager.lock().unwrap().acquire_lock(
-            //             self.tid,
-            //             self.valueid(),
-            //             Permissions::ReadOnly,
-            //         );
-            //         if !ret {
-            //             // log_debug!("acquire write lock of page failed, re-do");
-            //             attempts += 1;
-            //             std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
-            //             continue;
-            //         } else {
-            //             break;
-            //         }
-            //     }
-            // }
-
-            let read_page = self.read_page();
-            let mut current_slot_id = self.current_slot_id;
-            let mut ret = Option::<Self::Item>::None;
-            '_scan_a_page: loop {
-                match <Page as MvccHashJoinCuckooPage>::get_slot(&*read_page, current_slot_id) {
-                    Some(slot) => {
-                        let (slot_key, slot_pkey, slot_val, slot_start_ts, slot_end_ts) =
-                            <Page as MvccHashJoinCuckooPage>::get_key_pkey_val_ts_with_slot(
-                                &*read_page,
-                                &slot,
-                            );
-                        // log_warn!("get slot_id: {:?}, slot_key: {:?}", current_slot_id, slot_key);
-                        let ts_match_result = {
-                            if let Some(ts) = self.ts {
-                                slot_start_ts <= ts && ts < slot_end_ts && !slot.is_mark_deleted()
-                            } else {
-                                // scan all entry
-                                !slot.is_mark_deleted()
-                            }
-                        };
-                        if ts_match_result {
-                            if self.scan_key.is_some() {
-                                // scan_key, if key matches -> return
-                                // else continue;
-                                if self.scan_key.as_ref().unwrap() == &slot_key {
-                                    // match -> return
-                                    ret = Some((vec![], slot_pkey, slot_val));
-                                    break;
-                                }
-                            } else {
-                                // simple scan
-                                ret = Some((slot_key, slot_pkey, slot_val));
-                                break;
-                            }
-                        }
-                        current_slot_id += 1;
-                    }
-                    None => {
-                        break;
-                    }
-                }
-            }
-            drop(read_page);
-
-            if ret.is_none() {
-                // // release current page locks
-                // self.lock_manager
-                //     .lock()
-                //     .unwrap()
-                //     .release_lock(self.tid, self.valueid())
-                //     .unwrap();
-                // // current page scan ends
-                // // log_warn!("read a page end!!");
-                // self.current_slot_id = 0;
-                // self.current_entry += 1;
-                // continue;
-            } else {
-                self.current_slot_id = current_slot_id + 1;
-                // find a next value for iterator
-                return ret;
-            }
-        }
-    }
-}
-
-/// responsible for update meta page of HashJoinTable<T>
-pub struct CuckooHashTable<T: MemPool> {
-    // hasher_idx: usize,
-    c_key: ContainerKey,
-
-    mem_pool: Arc<T>,
-
-    meta: Arc<(PageId, AtomicU32)>,
-
-    /// shared: read & update & insert & delete & get \
-    /// exclusive: rehash \
-    /// ensure atomic of (num_buckets, BucketEntry.page_id, BucketEntry.frame_id)
-    rwlock: ArcRwlock<Buckets>, // isolation btw re-hash and get/insert/update/...
-
-    rehash_mutex: Mutex<()>, // re-hash only once
-}
-
 
 /// Recent & History basic functions
-impl<T: MemPool> CuckooHashTable<T> {
-
-    pub fn scan(self: &Arc<Self>, ts: Timestamp) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let buckets = self.rwlock.read_arc();
-        let ts = if ts != Timestamp::MAX { Some(ts) } else { None };
-        // self.gen_scan_iterator(TransactionId::new(), ts, buckets)
-        self.gen_scan_iterator(ts, buckets)
-    }
-
-    pub fn scan_key(self: &Arc<Self>, ts: Timestamp, key: &[u8]) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let buckets = self.rwlock.read_arc();
-        // self.gen_scan_key_iterator(TransactionId::new(), ts, buckets, Some(key.to_vec()))
-        self.gen_scan_key_iterator(ts, buckets, Some(key.to_vec()))
-    }
-
-    pub fn scan_all(self: &Arc<Self>) -> impl Iterator<Item = MvccEntry> {
-        CuckooHashJoinTableScanner::new(self, Timestamp::MAX, true)
-    }
-
+impl<T: MemPool> DoubleHashSubTable<T> {
     /// assume buckets is not locked!
     ///
     pub fn bucket_num(&self) -> u32 {
-        self.rwlock.read().num_buckets
+        self.buckets_rwlock.read().unwrap().num_buckets
     }
 
     pub fn new_with_bucket_num(
@@ -369,7 +231,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let pid = page.get_id();
             let fid = page.frame_id();
 
-            MvccHashJoinCuckooPage::init(&mut *page);
+            DoubleHashPage::init(&mut *page);
             drop(page);
 
             bucket_entry_vec.push(BucketEntry::new_with_frame_id(pid, fid));
@@ -381,9 +243,8 @@ impl<T: MemPool> CuckooHashTable<T> {
         Self {
             c_key,
             mem_pool,
-            rwlock: new_arc_rw_lock(buckets),
+            buckets_rwlock: RwLock::new(buckets),
             rehash_mutex: Mutex::new(()),
-            // lock_manager: Arc::new(Mutex::new(LockManager::new())),
             meta: meta.clone(),
         }
     }
@@ -391,15 +252,17 @@ impl<T: MemPool> CuckooHashTable<T> {
     // helper function
     fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard {
         loop {
-            let page = self.mem_pool.get_page_for_write(page_key);
+            let page = self.try_write_page(page_key);
             // protected by LockManager, only acceptable error is "CannotEvictPage"
             match page {
                 Ok(page) => {
                     return page;
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
-                    log_warn!("All frames are latched and cannot evict page to write the page: {:?}. Will retry", page_key);
                     std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
+                    std::hint::spin_loop();
                 }
                 Err(e) => {
                     panic!("Unexpected error: {:?}", e);
@@ -431,15 +294,16 @@ impl<T: MemPool> CuckooHashTable<T> {
     // helper function
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         loop {
-            let page = self.mem_pool.get_page_for_read(page_key);
-            // protected by LockManager, , only acceptable error is "CannotEvictPage"
+            let page = self.try_read_page(page_key);
             match page {
                 Ok(page) => {
                     return page;
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
-                    log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);
                     std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                    std::hint::spin_loop();
                 }
                 Err(e) => {
                     panic!("Unexpected error: {:?}", e);
@@ -470,10 +334,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     }
     // helper function
     /// assert have gotten buckets lock
-    fn try_acq_write_page(&self, page_f_key: PageFrameKey) -> Option<FrameWriteGuard> {
-        // let mut write_guard = self.lock_manager.lock().unwrap();
-        // let vid = Self::gen_valueid(page_f_key.p_key().page_id);
-        // let acq_result = write_guard.acquire_lock(tid, vid, Permissions::ReadWrite);
+    fn fused_try_write_page(&self, page_f_key: PageFrameKey) -> Option<FrameWriteGuard> {
         let write_res = self.try_write_page(page_f_key);
         match write_res {
             Ok(page) => return Some(page),
@@ -487,7 +348,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     }
     // helper function
     /// assert have gotten buckets lock
-    fn try_acq_read_page(&self, page_f_key: PageFrameKey) -> Option<FrameReadGuard> {
+    fn fused_try_read_page(&self, page_f_key: PageFrameKey) -> Option<FrameReadGuard> {
         let read_res = self.try_read_page(page_f_key);
         match read_res {
             Ok(page) => return Some(page),
@@ -502,7 +363,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     /* NEW
        if have free space -> insert
        if free space after compaction -> compact
-       else -> rehash(Err(CuckooOutOfSpace))
+       else -> rehash(Err(HashPageOutOfSpace))
 
        1. get buckets' read lock
        2. access buckets, get 2 buckets from 2 hash functions;
@@ -510,7 +371,7 @@ impl<T: MemPool> CuckooHashTable<T> {
            if failed -> Err(AckLockFailed)
        4. try find delete mark of key, if find -> add to history and delete
        5. randomly choose one page to insert and check space
-           if failed -> Err(CuckooOutOfSpace(new_hash_size))
+           if failed -> Err(HashPageOutOfSpace(new_hash_size))
        5. do insert or compact-and-insert
     */
     fn recent_insert_inner(
@@ -520,56 +381,33 @@ impl<T: MemPool> CuckooHashTable<T> {
         ts: Timestamp,
         val: &[u8],
     ) -> Result<Option<Timestamp>, CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
         let bucket_num = buckets.get_bucket_num();
 
-        let bucket_idx = buckets.get_bucket_index_random(key);
+        let bucket_idx = buckets.get_bucket_index(pkey);
 
         let pid = buckets.get_bucket_entry(bucket_idx).page_id();
         let fid = buckets.get_bucket_entry(bucket_idx).frame_id();
         let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
-        let acq_result = self.try_acq_write_page(page_f_key);
+        let acq_result = self.fused_try_write_page(page_f_key);
         let mut inserted_page = match acq_result {
             None => {
                 return Err(CuckooAccessMethodError::AcquireLockFailed);
             }
             Some(p) => {
-                // lock_manager_guards.push(guard);
-                // pages.push(page);
                 p
             }
         };
 
-        // match MvccHashJoinCuckooPage::get_delete_mark_slot_id(& *inserted_page, key, pkey, ts) {
-        //     Ok(slot_id) => {
-        //         // Value found
-        //         match MvccHashJoinCuckooPage::delete_slot_at_id(&mut *inserted_page, slot_id) {
-        //             Ok((old_ts, _)) => {
-        //                 old_delete_marker = Some(old_ts);
-        //                 break;
-        //             }
-        //             Err(x) => {
-        //                 panic!("should not happen for that error! {:?}", x);
-        //             }
-        //         }
-        //     }
-        //     Err(CuckooAccessMethodError::KeyNotFound) => {
-        //         continue;
-        //     }
-        //     Err(_) => {
-        //         panic!("should not happen!");
-        //     }
-        // };
-
         let check_insert_result = {
-            let insert_space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
+            let insert_space_need = <Page as DoubleHashPage>::space_need(key, pkey, val);
             let page_free_space =
-                <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&*inserted_page);
+                <Page as DoubleHashPage>::free_space_with_compaction(&*inserted_page);
             page_free_space >= insert_space_need
         };
         if check_insert_result {
             // can insert
-            let insert_result = <Page as MvccHashJoinCuckooPage>::insert(
+            let insert_result = <Page as DoubleHashPage>::insert(
                 &mut *inserted_page,
                 key,
                 pkey,
@@ -591,7 +429,6 @@ impl<T: MemPool> CuckooHashTable<T> {
             }
         } else {
             return Err(CuckooAccessMethodError::HashPageOutOfSpace(bucket_num * 2));
-            // rehash
         }
     }
 
@@ -599,7 +436,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         if have free space -> insert
         if free space after compaction -> compaction
 
-        else -> rehash: Err(CuckooOutOfSpace)
+        else -> rehash: Err(HashPageOutOfSpace)
 
 
         1. get buckets' read lock
@@ -607,7 +444,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         3. get write lock of page
             if failed -> Err(AcquireLockFailed)
         4. check space
-            if failed -> Err(CuckooOutOfSpace(new_rehash_size: u32))
+            if failed -> Err(HashPageOutOfSpace(new_rehash_size: u32))
         5. do insert or compaction-and-insert or re-hash
     */
     fn history_insert_inner(
@@ -618,16 +455,16 @@ impl<T: MemPool> CuckooHashTable<T> {
         end_ts: Timestamp,
         val: &[u8],
     ) -> Result<(), CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
         let bucket_num = buckets.get_bucket_num();
         // log_warn!("[history::insert_inner] insert key: {:?}", key);
 
-        let bucket_idx: usize = buckets.get_bucket_index_random(key);
+        let bucket_idx: usize = buckets.get_bucket_index(pkey);
         let inserted_pid = buckets.get_bucket_entry(bucket_idx).page_id();
         let inserted_fid = buckets.get_bucket_entry(bucket_idx).frame_id();
         let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, inserted_pid, inserted_fid);
         // try to acquire lock
-        let mut inserted_page = match self.try_acq_write_page(page_f_key) {
+        let mut inserted_page = match self.fused_try_write_page(page_f_key) {
             None => {
                 return Err(CuckooAccessMethodError::AcquireLockFailed); // REDO
             }
@@ -635,9 +472,9 @@ impl<T: MemPool> CuckooHashTable<T> {
         };
 
         let check_insert_result = {
-            let insert_space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
+            let insert_space_need = <Page as DoubleHashPage>::space_need(key, pkey, val);
             let page_free_space =
-                <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&*inserted_page);
+                <Page as DoubleHashPage>::free_space_with_compaction(&*inserted_page);
             // log_warn!(
             //     "[history::insert_inner] page free space: {:?}, insert_size: {:?}",
             //     page_free_space,
@@ -648,7 +485,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         };
         if check_insert_result {
             // can insert
-            let insert_result = <Page as MvccHashJoinCuckooPage>::insert(
+            let insert_result = <Page as DoubleHashPage>::insert(
                 &mut *inserted_page,
                 key,
                 pkey,
@@ -680,16 +517,16 @@ impl<T: MemPool> CuckooHashTable<T> {
         start_ts: Timestamp,
         end_ts: Timestamp,
     ) -> Result<(), CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
         let bucket_num = buckets.get_bucket_num();
         // log_warn!("[history::insert_inner] insert key: {:?}", key);
 
-        let bucket_idx: usize = buckets.get_bucket_index_random(key);
+        let bucket_idx: usize = buckets.get_bucket_index(pkey);
         let inserted_pid = buckets.get_bucket_entry(bucket_idx).page_id();
         let inserted_fid = buckets.get_bucket_entry(bucket_idx).frame_id();
         let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, inserted_pid, inserted_fid);
         // try to acquire lock
-        let mut inserted_page = match self.try_acq_write_page(page_f_key) {
+        let mut inserted_page = match self.fused_try_write_page(page_f_key) {
             None => {
                 return Err(CuckooAccessMethodError::AcquireLockFailed); // REDO
             }
@@ -698,9 +535,9 @@ impl<T: MemPool> CuckooHashTable<T> {
 
         let check_insert_result = {
             let insert_space_need =
-                <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, &vec![]);
+                <Page as DoubleHashPage>::space_need(key, pkey, &vec![]);
             let page_free_space =
-                <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&*inserted_page);
+                <Page as DoubleHashPage>::free_space_with_compaction(&*inserted_page);
             // log_warn!(
             //     "[history::insert_inner] page free space: {:?}, insert_size: {:?}",
             //     page_free_space,
@@ -711,7 +548,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         };
         if check_insert_result {
             // can insert
-            let insert_result = <Page as MvccHashJoinCuckooPage>::insert_deleted(
+            let insert_result = <Page as DoubleHashPage>::insert_deleted(
                 &mut *inserted_page,
                 key,
                 pkey,
@@ -740,7 +577,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         let _rehash_guard = self.rehash_mutex.lock().unwrap();
 
         {
-            let buckets = self.rwlock.read();
+            let buckets = self.buckets_rwlock.read().unwrap();
             // may have duplicate rehash call
             // check if hash re-hashed before
             {
@@ -753,7 +590,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
 
         // we need to rehash
-        let mut buckets = self.rwlock.write();
+        let mut buckets = self.buckets_rwlock.write().unwrap();
         let old_entry_num = buckets.get_bucket_num();
         for _ in 0..old_entry_num {
             buckets.buckets.push(BucketEntry::new(
@@ -767,7 +604,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
             let new_pid = new_page.get_id();
             let new_fid = new_page.frame_id();
-            MvccHashJoinCuckooPage::init(&mut *new_page);
+            DoubleHashPage::init(&mut *new_page);
 
             buckets.buckets[(hashed_bucket_idx + old_entry_num) as usize] =
                 BucketEntry::new_with_frame_id(new_pid, new_fid);
@@ -794,7 +631,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 let (key, pkey, val, start_ts, end_ts) =
                     hashed_page.get_key_pkey_val_ts_with_slot_id(slot_idx);
                 if let Some(idx) =
-                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize)
+                    buckets.get_a_second_bucket_index(&pkey, hashed_bucket_idx as usize)
                 {
                     assert_eq!(idx as u32, (hashed_bucket_idx + old_entry_num));
                     match new_page.insert_at_slot_id(
@@ -851,18 +688,18 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
 
         buckets.num_buckets = old_entry_num * 2;
-        let meta_page_key = PageFrameKey::new_with_frame_id(
-            self.c_key,
-            self.meta.0,
-            self.meta.1.load(std::sync::atomic::Ordering::Acquire),
-        );
-        let mut meta_page = self.write_page(meta_page_key);
-        let new_page_ids = buckets
-            .buckets
-            .iter()
-            .map(|x| x.page_id())
-            .collect::<Vec<_>>();
-        <Page as MvccHashJoinCuckooMetaPage>::rehash_update_recent(&mut *meta_page, &new_page_ids);
+        // let meta_page_key = PageFrameKey::new_with_frame_id(
+        //     self.c_key,
+        //     self.meta.0,
+        //     self.meta.1.load(std::sync::atomic::Ordering::Acquire),
+        // );
+        // let mut meta_page = self.write_page(meta_page_key);
+        // let new_page_ids = buckets
+        //     .buckets
+        //     .iter()
+        //     .map(|x| x.page_id())
+        //     .collect::<Vec<_>>();
+        // <Page as MvccHashJoinCuckooMetaPage>::rehash_update_recent(&mut *meta_page, &new_page_ids);
         return true;
     }
 
@@ -871,7 +708,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         let _rehash_guard = self.rehash_mutex.lock().unwrap();
 
         {
-            let buckets = self.rwlock.read();
+            let buckets = self.buckets_rwlock.read().unwrap();
             // may have duplicate rehash call
             // check if hash re-hashed before
             {
@@ -884,7 +721,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
 
         // we need to rehash
-        let mut buckets = self.rwlock.write();
+        let mut buckets = self.buckets_rwlock.write().unwrap();
         let old_entry_num = buckets.get_bucket_num();
         for _ in 0..old_entry_num {
             buckets.buckets.push(BucketEntry::new(
@@ -898,7 +735,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
             let new_pid = new_page.get_id();
             let new_fid = new_page.frame_id();
-            MvccHashJoinCuckooPage::init(&mut *new_page);
+            DoubleHashPage::init(&mut *new_page);
 
             buckets.buckets[(hashed_bucket_idx + old_entry_num) as usize] =
                 BucketEntry::new_with_frame_id(new_pid, new_fid);
@@ -925,7 +762,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 let (key, pkey, val, start_ts, end_ts) =
                     hashed_page.get_key_pkey_val_ts_with_slot_id(slot_idx);
                 if let Some(idx) =
-                    buckets.get_a_second_bucket_index(&key, hashed_bucket_idx as usize)
+                    buckets.get_a_second_bucket_index(&pkey, hashed_bucket_idx as usize)
                 {
                     assert_eq!(idx as u32, (hashed_bucket_idx + old_entry_num));
                     match new_page.insert_at_slot_id(
@@ -979,18 +816,18 @@ impl<T: MemPool> CuckooHashTable<T> {
         }
 
         buckets.num_buckets = old_entry_num * 2;
-        let meta_page_key = PageFrameKey::new_with_frame_id(
-            self.c_key,
-            self.meta.0,
-            self.meta.1.load(std::sync::atomic::Ordering::Acquire),
-        );
-        let mut meta_page = self.write_page(meta_page_key);
-        let new_page_ids = buckets
-            .buckets
-            .iter()
-            .map(|x| x.page_id())
-            .collect::<Vec<_>>();
-        <Page as MvccHashJoinCuckooMetaPage>::rehash_update_history(&mut *meta_page, &new_page_ids);
+        // let meta_page_key = PageFrameKey::new_with_frame_id(
+        //     self.c_key,
+        //     self.meta.0,
+        //     self.meta.1.load(std::sync::atomic::Ordering::Acquire),
+        // );
+        // let mut meta_page = self.write_page(meta_page_key);
+        // let new_page_ids = buckets
+        //     .buckets
+        //     .iter()
+        //     .map(|x| x.page_id())
+        //     .collect::<Vec<_>>();
+        // <Page as MvccHashJoinCuckooMetaPage>::rehash_update_history(&mut *meta_page, &new_page_ids);
         return true;
     }
 
@@ -1007,45 +844,42 @@ impl<T: MemPool> CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<u8>, CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
 
-        let indexes = buckets.get_all_bucket_index(key);
-        let mut pages = vec![];
-        for bucket_idx in indexes {
+        let bucket_idx = buckets.get_bucket_index(pkey);
+        let read_page = {
             let pid = buckets.get_bucket_entry(bucket_idx).page_id();
             let fid = buckets.get_bucket_entry(bucket_idx).frame_id();
 
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
-            let acq_result = self.try_acq_read_page(page_f_key);
+            let acq_result = self.fused_try_read_page(page_f_key);
             match acq_result {
                 None => {
                     return Err(CuckooAccessMethodError::AcquireLockFailed);
                 }
                 Some(page) => {
-                    pages.push(page);
+                    page
                 }
             }
-        }
+        };
 
-        for read_page in pages {
-            let get_result =
-                <Page as MvccHashJoinCuckooPage>::recent_get(&*read_page, key, pkey, ts);
-            match get_result {
-                Ok(val) => {
-                    return Ok(val);
-                }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    continue;
-                }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                }
-                Err(e) => {
-                    panic!("Should not happen! error: {:?}", e);
-                }
+   
+        let get_result =
+            <Page as DoubleHashPage>::recent_get(&*read_page, key, pkey, ts);
+        match get_result {
+            Ok(val) => {
+                return Ok(val);
+            }
+            Err(CuckooAccessMethodError::KeyNotFound) => {
+                return Err(CuckooAccessMethodError::KeyNotFound);
+            }
+            Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+            }
+            Err(e) => {
+                panic!("Should not happen! error: {:?}", e);
             }
         }
-        Err(CuckooAccessMethodError::KeyNotFound)
     }
 
     /*
@@ -1060,77 +894,56 @@ impl<T: MemPool> CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<u8>, CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
 
-        let indexes = buckets.get_all_bucket_index(key);
-        let mut pages = vec![];
-        for bucket_idx in indexes {
+        let bucket_idx: usize = buckets.get_bucket_index(pkey);
+        let read_page = {
             let pid = buckets.get_bucket_entry(bucket_idx).page_id();
             let fid = buckets.get_bucket_entry(bucket_idx).frame_id();
-
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
-            let acq_result = self.try_acq_read_page(page_f_key);
+
+            let acq_result = self.fused_try_read_page(page_f_key);
             match acq_result {
                 None => {
-                    return Err(CuckooAccessMethodError::AcquireLockFailed);
+                    return Err(CuckooAccessMethodError::AcquireLockFailed); // REDO
                 }
-                Some(page) => {
-                    pages.push(page);
-                }
+                Some(x) => x,
             }
-        }
+        };
 
-        for read_page in pages {
-            let get_result =
-                <Page as MvccHashJoinCuckooPage>::get(&*read_page, key, pkey, ts, false);
-            match get_result {
-                Ok(val) => {
-                    return Ok(val);
-                }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    continue;
-                }
-                Err(e) => {
-                    panic!("Should not happen! error: {:?}", e);
-                }
+       
+        let get_result =
+            <Page as DoubleHashPage>::get(&*read_page, key, pkey, ts, false);
+        match get_result {
+            Ok(val) => {
+                return Ok(val);
+            }
+            Err(CuckooAccessMethodError::KeyNotFound) => {
+                return Err(CuckooAccessMethodError::KeyNotFound);
+            }
+            Err(e) => {
+                panic!("Should not happen! error: {:?}", e);
             }
         }
-        Err(CuckooAccessMethodError::KeyNotFound)
     }
 
-    /*
-        BOTH HISTORY and RECENT are the same in get_all_inner
-        acquire 2 pages lock at the same time
-        if acquire lock failed -> Err(AcquireLockFailed): REDO
-        return Vector
-    */
-    fn get_all_inner(
+    pub fn get_all(
         &self,
         key: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
 
-        let indexes = buckets.get_all_bucket_index(key);
-        let mut pages = vec![];
-        for bucket_idx in indexes {
+        let bucket_num = buckets.buckets.len();
+        let mut ret = vec![];
+
+        for bucket_idx in 0..bucket_num {
             let pid = buckets.get_bucket_entry(bucket_idx).page_id();
             let fid = buckets.get_bucket_entry(bucket_idx).frame_id();
 
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
-            let acq_result = self.try_acq_read_page(page_f_key);
-            match acq_result {
-                None => {
-                    return Err(CuckooAccessMethodError::AcquireLockFailed);
-                }
-                Some(page) => {
-                    pages.push(page);
-                }
-            }
-        }
-        let mut ret = vec![];
-        for read_page in pages {
-            let get_result = <Page as MvccHashJoinCuckooPage>::get_all(&*read_page, key, ts);
+            let read_page = self.read_page(page_f_key);
+            let get_result = <Page as DoubleHashPage>::get_all(&*read_page, key, ts);
             match get_result {
                 Ok(val) => {
                     ret.extend_from_slice(&val);
@@ -1140,6 +953,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 }
             }
         }
+        
         return Ok(ret);
     }
 
@@ -1149,7 +963,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         if find but invalid timestamp -> return Err(KeyFoundButInvalidTimestamp)
         if not find -> return Err(KeyNotFound)
         if find -> try to update value
-            if space not enough -> Err(CuckooOutOfSpace(new_bucket_num:u32)): RE-HASH
+            if space not enough -> Err(HashPageOutOfSpace(new_bucket_num:u32)): RE-HASH
             else return OK
 
         return Err(keynotfound)
@@ -1161,64 +975,60 @@ impl<T: MemPool> CuckooHashTable<T> {
         ts: Timestamp,
         val: &[u8],
     ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
         let bucket_num = buckets.get_bucket_num();
 
-        let indexes: Vec<usize> = buckets.get_all_bucket_index(key);
-        let mut pages = vec![];
-        for bucket_idx in indexes {
+        let bucket_idx = buckets.get_bucket_index(pkey);
+
+        let mut write_page = {
             let pid = buckets.get_bucket_entry(bucket_idx).page_id();
             let fid = buckets.get_bucket_entry(bucket_idx).frame_id();
 
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
-            let acq_result = self.try_acq_write_page(page_f_key);
+            let acq_result = self.fused_try_write_page(page_f_key);
             match acq_result {
                 None => {
                     return Err(CuckooAccessMethodError::AcquireLockFailed);
                 }
                 Some(page) => {
-                    pages.push(page);
+                    page
                 }
             }
-        }
+        };
 
-        for mut write_page in pages {
-            // Attempt to retrieve the value from the current page
-            match MvccHashJoinCuckooPage::get_slot_id(&*write_page, key, pkey, ts) {
-                Ok(slot_id) => {
-                    // Value found
-                    match MvccHashJoinCuckooPage::check_and_update_at_slot_id(
-                        &mut *write_page,
-                        slot_id,
-                        key,
-                        pkey,
-                        val,
-                        ts,
-                    ) {
-                        Ok(old_res) => {
-                            return Ok(old_res);
-                        }
-                        Err(CuckooAccessMethodError::OutOfSpace) => {
-                            return Err(CuckooAccessMethodError::HashPageOutOfSpace(bucket_num * 2));
-                        }
-                        Err(x) => {
-                            panic!("should not happen for that error! {:?}", x);
-                        }
+        // Attempt to retrieve the value from the current page
+        match DoubleHashPage::get_slot_id(&*write_page, key, pkey, ts) {
+            Ok(slot_id) => {
+                // Value found
+                match DoubleHashPage::check_and_update_at_slot_id(
+                    &mut *write_page,
+                    slot_id,
+                    key,
+                    pkey,
+                    val,
+                    ts,
+                ) {
+                    Ok(old_res) => {
+                        return Ok(old_res);
+                    }
+                    Err(CuckooAccessMethodError::OutOfSpace) => {
+                        return Err(CuckooAccessMethodError::HashPageOutOfSpace(bucket_num * 2));
+                    }
+                    Err(x) => {
+                        panic!("should not happen for that error! {:?}", x);
                     }
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    continue;
-                }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                }
-                Err(_) => {
-                    panic!("should not happen!");
-                }
-            };
-        }
-
-        return Err(CuckooAccessMethodError::KeyNotFound);
+            }
+            Err(CuckooAccessMethodError::KeyNotFound) => {
+                return Err(CuckooAccessMethodError::KeyNotFound);
+            }
+            Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+            }
+            Err(_) => {
+                panic!("should not happen!");
+            }
+        };
     }
 
     /*
@@ -1235,165 +1045,86 @@ impl<T: MemPool> CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
 
-        let indexes: Vec<usize> = buckets.get_all_bucket_index(key);
-        let mut page_vec = vec![];
-        for bucket_idx in indexes {
+        let bucket_idx = buckets.get_bucket_index(pkey);
+
+        let mut write_page = {
             let pid = buckets.get_bucket_entry(bucket_idx).page_id();
-            let fid = buckets.get_bucket_entry(bucket_idx).frame_id();
+            let fid: u32 = buckets.get_bucket_entry(bucket_idx).frame_id();
 
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
-            let acq_result = self.try_acq_write_page(page_f_key);
+            let acq_result = self.fused_try_write_page(page_f_key);
             match acq_result {
                 None => {
                     return Err(CuckooAccessMethodError::AcquireLockFailed);
                 }
-                Some(p) => {
-                    page_vec.push(p);
+                Some(page) => {
+                    page
                 }
             }
-        }
-        let mut found_flag = None;
-        for (idx, page) in (page_vec).iter().enumerate() {
-            let write_page = page;
-            // Attempt to retrieve the value from the current page
-            match <Page as MvccHashJoinCuckooPage>::get_slot_id(&**write_page, key, pkey, ts) {
-                Ok(slot_id) => {
-                    // Value found
-                    found_flag = Some((idx, slot_id));
-                    // log_warn!("idx: {:?}, found!!!", idx);
-                    continue;
-                }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    let delete_marker_space_need =
-                        <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, &vec![]);
-                    let free_without_compaction =
-                        <Page as MvccHashJoinCuckooPage>::free_space_without_compaction(
-                            &**write_page,
-                        );
-                    let free_with_compaction: u32 =
-                        <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&**write_page);
-                    if free_without_compaction < delete_marker_space_need {
-                        if free_with_compaction < delete_marker_space_need {
-                            return Err(CuckooAccessMethodError::HashPageOutOfSpace(
-                                buckets.num_buckets * 2,
-                            ));
-                        }
+        };
+       
+        // Attempt to retrieve the value from the current page
+        match <Page as DoubleHashPage>::get_slot_id(& *write_page, key, pkey, ts) {
+            Ok(slot_id) => {
+                match <Page as DoubleHashPage>::mark_delete_slot_at_id(
+                    &mut *write_page,
+                    slot_id,
+                    ts,
+                ) {
+                    Ok(old_res) => {
+                        return Ok(old_res);
                     }
-                    // log_warn!("idx: {:?}, NOT found!!!", idx);
-                    continue;
-                }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                }
-                Err(_) => {
-                    panic!("should not happen!");
-                }
-            };
-        }
-        // log_warn!("found flag is {:?}", found_flag);
-
-        if let Some((vec_idx, slot_id)) = found_flag {
-            let mut get_old_res = (0, vec![]);
-            for (idx, guard_with_page) in page_vec.into_iter().enumerate() {
-                let mut write_page = guard_with_page;
-                if idx == vec_idx {
-                    match <Page as MvccHashJoinCuckooPage>::mark_delete_slot_at_id(
-                        &mut *write_page,
-                        slot_id,
-                        ts,
-                    ) {
-                        Ok(old_res) => {
-                            get_old_res = old_res;
-                        }
-                        Err(x) => {
-                            panic!("should not happen for that error! {:?}", x);
-                        }
+                    Err(x) => {
+                        panic!("should not happen for that error! {:?}", x);
                     }
                 }
-                // else {
-                //     match <Page as MvccHashJoinCuckooPage>::insert_deleted(
-                //         &mut *write_page,
-                //         key,
-                //         pkey,
-                //         ts,
-                //         Timestamp::MAX,
-                //     ) {
-                //         Ok(_) => {}
-                //         Err(e) => {
-                //             panic!("should not have error! error: {:?}", e);
-                //         }
-                //     }
-                // }
             }
-            return Ok(get_old_res);
-        } else {
-            return Err(CuckooAccessMethodError::KeyNotFound);
-        }
+            Err(CuckooAccessMethodError::KeyNotFound) => {
+                return Err(CuckooAccessMethodError::KeyNotFound);
+            }
+            Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+            }
+            Err(_) => {
+                panic!("should not happen!");
+            }
+        };
     }
 
-    fn gen_scan_iterator(
-        &self,
-        // tid: TransactionId,
-        ts: Option<Timestamp>,
-        buckets_read_guard: ArcRwlockReadGuard<Buckets>,
-    ) -> ScanTsWithBucketsReadGuard<T> {
-        let scan_guard = ScanTsWithBucketsReadGuard::new(
-            // &self.lock_manager,
-            // tid,
-            &self.mem_pool,
-            ts,
-            self.c_key,
-            buckets_read_guard,
-            None,
-        );
-        scan_guard
-    }
-
-    fn gen_scan_key_iterator(
-        &self,
-        // tid: TransactionId,
-        ts: Timestamp,
-        buckets_read_guard: ArcRwlockReadGuard<Buckets>,
-        scan_key: Option<Vec<u8>>,
-    ) -> ScanTsWithBucketsReadGuard<T> {
-        let scan_guard = ScanTsWithBucketsReadGuard::new(
-            // &self.lock_manager,
-            // tid,
-            &self.mem_pool,
-            Some(ts),
-            self.c_key,
-            buckets_read_guard,
-            scan_key,
-        );
-        scan_guard
-    }
-
-    fn dump_all_entry(&self) {
-        let buckets = self.rwlock.read();
+    pub fn dump_all_entry(&self) -> usize {
+        let buckets = self.buckets_rwlock.read().unwrap();
         let mut entr_id = 0;
+        let mut num = 0_usize;
+        log_warn!("<<DUMP HASH TABLE>> ------------ START AN SUBTABLE! -------");
         for entry in &buckets.buckets {
             let pfkey = PageFrameKey::new(self.c_key, entry.page_id());
             let page = self.read_page(pfkey);
-            log_warn!("<<DUMP HASH TABLE>> ENTRY: {entr_id}, rec_start_offset: {:?}, slot_end: {:?}, free_without_compaction: {:?}, free_with_compaction: {:?}", page.rec_start_offset(), page.slot_offset(page.slot_count()),  page.free_space_without_compaction(), page.free_space_with_compaction());
+            log_warn!("<<DUMP HASH TABLE>> ENTRY: {entr_id}, SLOT COUNT: {}, rec_start_offset: {:?}, slot_end: {:?}, free_without_compaction: {:?}, free_with_compaction: {:?}",page.slot_count(), page.rec_start_offset(), page.slot_offset(page.slot_count()),  page.free_space_without_compaction(), page.free_space_with_compaction());
             entr_id += 1;
-            for i in 0..page.slot_count() {
-                let slot = page.get_slot(i).unwrap();
-                let mvcc_entry = page.get_key_pkey_val_ts_with_slot(&slot);
-                log_warn!(
-                    "<<DUMP HASH TABLE>> [slot in ID: {:?}]: key: {:?}",
-                    i,
-                    String::from_utf8(mvcc_entry.0)
-                );
-            }
+            num += page.slot_count() as usize;
+            // for i in 0..page.slot_count() {
+            //     let slot = page.get_slot(i).unwrap();
+            //     let mvcc_entry = page.get_key_pkey_val_ts_with_slot(&slot);
+            //     log_warn!(
+            //         "<<DUMP HASH TABLE>> [slot in ID: {:?}]: key: {:?}",
+            //         i,
+            //         String::from_utf8(mvcc_entry.0)
+            //     );
+            // }
         }
+        return num;
+    }
+    fn scan_all(self: &Arc<Self>) -> impl Iterator<Item = MvccEntry>{
+        let scanner = DoubleHashSubTableScanner::new(self, Timestamp::MAX, true);
+        scanner
     }
 }
 
-impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
+impl<T: MemPool> RecentSubHashTable<T> for DoubleHashSubTable<T> {
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
         let ret = buckets
             .buckets
             .iter()
@@ -1472,30 +1203,6 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         }
     }
 
-    fn get_all(
-        &self,
-        key: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
-        let base = 2;
-        let mut attempts = 0;
-        loop {
-            match self.get_all_inner(key, ts) {
-                Ok(val) => {
-                    return Ok(val);
-                }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
-                    log_debug!("acquire read lock of pages failed, re-do");
-                    attempts += 1;
-                    std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
-                    continue;
-                }
-                Err(_) => {
-                    panic!("should not happen");
-                }
-            }
-        }
-    }
 
     /*
         if not find => Err(KeyNotFound)
@@ -1571,14 +1278,6 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
                     continue;
                 }
-                Err(CuckooAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
-                    self.rehash_recent(new_hash_size);
-                    // log_warn!("Page insert out of space, re-hash");
-                    log_debug!("Page delete out of space, re-hash");
-                    // attempts += 1;
-                    // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
-                    continue;
-                }
                 Err(_) => {
                     panic!("should not happen");
                 }
@@ -1587,9 +1286,16 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
     }
 
 
+
+
+    // fn scan_key(&self, ts: Timestamp, key: &[u8]) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> {
+    //     let buckets = self.rwlock.read_arc();
+    //     // self.gen_scan_key_iterator(TransactionId::new(), ts, buckets, Some(key.to_vec()))
+    //     self.gen_scan_key_iterator(ts, buckets, Some(key.to_vec()))
+    // }
 }
 
-impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
+impl<T: MemPool> HistorySubHashTable<T> for DoubleHashSubTable<T> {
     fn insert(
         &self,
         key: &[u8],
@@ -1666,33 +1372,10 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         }
     }
 
-    fn get_all(
-        &self,
-        key: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
-        let base = 2;
-        let mut attempts = 0;
-        loop {
-            match self.get_all_inner(key, ts) {
-                Ok(val) => {
-                    return Ok(val);
-                }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
-                    log_debug!("acquire read lock of pages failed, re-do");
-                    attempts += 1;
-                    std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
-                    continue;
-                }
-                Err(_) => {
-                    panic!("should not happen");
-                }
-            }
-        }
-    }
+    
 
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
-        let buckets = self.rwlock.read();
+        let buckets = self.buckets_rwlock.read().unwrap();
         let ret = buckets
             .buckets
             .iter()
@@ -1742,5 +1425,29 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
             }
         }
     }
+}
 
+#[test]
+fn test_delete_two_markers() {
+    let mem_pool = get_in_mem_pool();
+    let mem_pool1 = mem_pool.clone();
+    let c_key = ContainerKey::new(0, 0);
+    let meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+    let meta = Arc::new((meta_page.get_id(), AtomicU32::new(0)));
+    let table = DoubleHashSubTable::new_with_bucket_num(
+        c_key, mem_pool1, 16, &meta
+    );
+
+    let key = b"key111".to_vec();
+    let pkey = b"pkey1".to_vec();
+    let value = b"233".to_vec();
+
+    <DoubleHashSubTable<_> as RecentSubHashTable<_>>::insert(&table, &key, &pkey, 0, &value)
+        .unwrap();
+    let old_res =
+        <DoubleHashSubTable<_> as RecentSubHashTable<_>>::delete(&table, &key, &pkey, 1).unwrap();
+    assert_eq!(old_res.0, 0);
+    assert_eq!(old_res.1, b"233".to_vec());
+
+    // table.dump_all_entry();
 }

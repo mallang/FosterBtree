@@ -461,13 +461,11 @@ use record::*;
 
 use crate::{
     log_debug, log_warn,
-    mvcc_index::Timestamp,
+    mvcc_index::{hashtable_mu::hash_join_table_common::CuckooAccessMethodError, Timestamp},
     page::{Page, AVAILABLE_PAGE_SIZE},
 };
 
-use super::double_hash_common::CuckooAccessMethodError;
-
-pub trait MvccHashJoinCuckooPage {
+pub trait DoubleHashPage {
     fn init(&mut self) {
         let header = Header::new();
         self.set_header(&header);
@@ -876,7 +874,7 @@ pub trait MvccHashJoinCuckooPage {
         val: &[u8],
         slot_id: u32,
     ) -> Result<(), CuckooAccessMethodError> {
-        let space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
+        let space_need = <Page as DoubleHashPage>::space_need(key, pkey, val);
         let mut header = self.header();
         let record_size = space_need - SLOT_SIZE as u32;
         let rec_offset = header.rec_start_offset() - record_size;
@@ -903,7 +901,7 @@ pub trait MvccHashJoinCuckooPage {
     }
 }
 
-impl MvccHashJoinCuckooPage for Page {
+impl DoubleHashPage for Page {
     fn rehash_truncate_for_new_page(&mut self, src_st_id: u32, src_ed_id: u32) {
         let src_start_offset = self.slot_offset(src_st_id) as usize;
         let bytes_len = (src_ed_id - src_st_id) as usize * SLOT_SIZE;
@@ -921,7 +919,7 @@ impl MvccHashJoinCuckooPage for Page {
         end_ts: Timestamp,
         val: &[u8],
     ) -> Result<(), CuckooAccessMethodError> {
-        let space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, val);
+        let space_need = <Page as DoubleHashPage>::space_need(key, pkey, val);
 
         if space_need > self.free_space_with_compaction() {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
@@ -971,7 +969,7 @@ impl MvccHashJoinCuckooPage for Page {
         header.increase_total_bytes_used(space_need);
         header.set_rec_start_offset(rec_offset);
         self.set_header(&header);
-        log_warn!("insert at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), space_need, self.free_space_with_compaction(), self.free_space_without_compaction());
+        // log_warn!("insert at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), space_need, self.free_space_with_compaction(), self.free_space_without_compaction());
         // log_warn!(
         //     "insert key{:?} at slot id {:?} slot count{:?}",
         //     key,
@@ -1553,7 +1551,7 @@ impl MvccHashJoinCuckooPage for Page {
         end_ts: Timestamp,
     ) -> Result<(), CuckooAccessMethodError> {
         // log_warn!("insert deleted at id: {}", self.get_id());
-        let space_need = <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, &vec![]);
+        let space_need = <Page as DoubleHashPage>::space_need(key, pkey, &vec![]);
         if space_need > self.free_space_with_compaction() {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
             return Err(CuckooAccessMethodError::OutOfSpace);
@@ -1676,7 +1674,7 @@ mod tests {
         let val = b"value1";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -1695,7 +1693,7 @@ mod tests {
         let val = b"value2";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -1714,7 +1712,7 @@ mod tests {
         let val = b"value3";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -1733,7 +1731,7 @@ mod tests {
         let val = b"value4";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -1754,7 +1752,7 @@ mod tests {
         ];
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
         // Insert entries
         for (key, pkey, ts, val) in &entries {
             page.insert(key, pkey, *ts, Timestamp::MAX, val).unwrap();
@@ -1777,7 +1775,7 @@ mod tests {
         let val = b"value_test";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts_insert, Timestamp::MAX, val)
@@ -1807,7 +1805,7 @@ mod tests {
         let ts2: Timestamp = 2;
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert first entry
         page.insert(key, pkey1, ts1, Timestamp::MAX, val1).unwrap();
@@ -1828,7 +1826,7 @@ mod tests {
     fn test_insert_when_page_full() {
         // Fill the page to capacity and attempt to insert another entry
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Use fixed-length keys and pkeys
         let key = b"key_full_full"; // Length 12 bytes
@@ -1859,7 +1857,7 @@ mod tests {
         let val_update = b"value2"; // Length 6 (same as val_insert)
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
@@ -1891,7 +1889,7 @@ mod tests {
         let val_update = b"short"; // Length 5 (smaller than val_insert)
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
@@ -1923,7 +1921,7 @@ mod tests {
         let val_update = b"value_is_longer"; // Length 14 (larger than val_insert)
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
@@ -1957,7 +1955,7 @@ mod tests {
         let val_update = vec![b'a'; (AVAILABLE_PAGE_SIZE / 2) as usize]; // Large value
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Fill the page to limit the available space
         page.insert(
@@ -1990,7 +1988,7 @@ mod tests {
         let val_update = b"value";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Attempt to update a non-existent key
         let slot_id = page.get_slot_id(key, pkey, ts_update);
@@ -2010,7 +2008,7 @@ mod tests {
         let val_update = b"value2";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts_insert, Timestamp::MAX, val_insert)
@@ -2038,7 +2036,7 @@ mod tests {
         let val = b"value1";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -2071,7 +2069,7 @@ mod tests {
         let val = b"value2";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -2103,7 +2101,7 @@ mod tests {
         let val = b"value3";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -2135,7 +2133,7 @@ mod tests {
         let val = b"value4";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
@@ -2169,7 +2167,7 @@ mod tests {
         ];
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert entries
         for (key, pkey, ts, val) in &entries {
@@ -2204,7 +2202,7 @@ mod tests {
         let val = b"value_test";
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert the entry
         page.insert(key, pkey, ts_insert, Timestamp::MAX, val)
@@ -2231,7 +2229,7 @@ mod tests {
         let ts2: Timestamp = 2;
 
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert first entry
         page.insert(key, pkey1, ts1, Timestamp::MAX, val1).unwrap();
@@ -2266,7 +2264,7 @@ mod tests {
     fn test_insert_and_delete_when_page_full() {
         // Fill the page to capacity and attempt to insert another entry
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Use fixed-length keys and pkeys
         let key = b"key_full_full"; // Length 12 bytes
@@ -2300,7 +2298,7 @@ mod tests {
     #[test]
     fn test_update_with_smaller_value() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
@@ -2328,7 +2326,7 @@ mod tests {
     #[test]
     fn test_update_with_larger_value() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
@@ -2357,7 +2355,7 @@ mod tests {
     #[test]
     fn test_update_with_equal_size_value() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
@@ -2386,7 +2384,7 @@ mod tests {
     #[test]
     fn test_update_with_large_value_out_of_space() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert a key-value pair
         let key = vec![1, 2, 3];
@@ -2411,7 +2409,7 @@ mod tests {
     #[test]
     fn test_insert_multiple_and_update_multiple() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2464,7 +2462,7 @@ mod tests {
     #[test]
     fn test_insert_multiple_update_mixed_sizes_and_get() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         // Insert multiple key-value pairs
         let keys = vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
@@ -2511,7 +2509,7 @@ mod tests {
     #[test]
     fn test_insert_update_and_get_mixed() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2564,7 +2562,7 @@ mod tests {
     #[test]
     fn test_update_large_keys() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2610,7 +2608,7 @@ mod tests {
     #[test]
     fn test_insert_update_and_get_with_large_keys() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2663,7 +2661,7 @@ mod tests {
     #[test]
     fn test_get_delete_mark() {
         let mut page = Page::new_empty();
-        <Page as MvccHashJoinCuckooPage>::init(&mut page);
+        <Page as DoubleHashPage>::init(&mut page);
 
         let pkey = vec![1, 2, 3];
         let ts: Timestamp = 2;
@@ -2703,7 +2701,7 @@ mod tests {
         }
 
         for i in 0..6 {
-            let delete_mark_result = <Page as MvccHashJoinCuckooPage>::get_delete_mark_slot_id(
+            let delete_mark_result = <Page as DoubleHashPage>::get_delete_mark_slot_id(
                 &page,
                 &keys[i],
                 &pkey,

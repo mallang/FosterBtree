@@ -216,7 +216,7 @@ mod mvcctxn {
                     _ => self
                         .txn_hash_table
                         .inner_hash_table()
-                        .get(&key, &pkey, self.begin_ts)?
+                        .get(&key, &pkey, READ_COMMITTED_TS)?
                         .is_some(),
                 }
             };
@@ -254,7 +254,7 @@ mod mvcctxn {
                     _ => self
                         .txn_hash_table
                         .inner_hash_table()
-                        .get(&key, &pkey, self.begin_ts)?
+                        .get(&key, &pkey, READ_COMMITTED_TS)?
                         .is_some(),
                 }
             };
