@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::{atomic::AtomicU32, Arc, Mutex, RwLock}};
+use std::{collections::HashMap, marker::PhantomData, sync::{atomic::AtomicU32, Arc, Mutex, RwLock}};
 
 use crate::{bp::{ContainerKey, MemPool}, log_debug, log_warn, mvcc_index::{hashtable_mu::{hash_join_table_common::{CuckooAccessMethodError, CuckooHistoryHashTable, CuckooRecentHashTable, RecentHistoryTable, DEFAULT_NUM_BUCKETS}, mvcc_hash_join_table::CuckooHashJoinTableMergeScanner}, Delta, MvccEntry, Timestamp}, page::PageId};
 
@@ -124,23 +124,123 @@ impl<T: MemPool> Iterator for DoubleHashTableSmallTupleScanner<T> {
 
 
 
-pub struct DoubleHashTableDeltaScanner<T: MemPool> {
-    is_end: bool,
-    ph: PhantomData<T>,
+pub struct DoubleHashTableMergeDeltaScanner<T: MemPool> {
+    from_ts: Timestamp,
+    to_ts: Timestamp,
+    // is_end: bool,
+    recent_table: Arc<DoubleHashTable<T>>,
+    history_table: Arc<DoubleHashTable<T>>,
+    cur_sub_idx: usize,
+    num_sub_tables: usize,
+
+    cur_entry_idx: usize,
+    sub_table_deltas: Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
 }
 
-impl<T: MemPool> DoubleHashTableDeltaScanner<T> {
-    pub fn new() -> Self {
+impl<T: MemPool> DoubleHashTableMergeDeltaScanner<T> {
+    pub fn new(
+        recent_table: &Arc<DoubleHashTable<T>>,
+        history_table: &Arc<DoubleHashTable<T>>,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Self {
+        let recent = DoubleHashSubTableScanner::new(
+            &recent_table.buckets_rwlock[0], Timestamp::MAX, true);
+        let history = DoubleHashSubTableScanner::new(
+            &history_table.buckets_rwlock[0], Timestamp::MAX, true);
+        let deltas = Self::gen_deltas(recent, history, from_ts, to_ts);
+
         Self {
-            is_end: false,
-            ph: PhantomData,
+            from_ts,
+            to_ts,
+            // is_end: false,
+            recent_table: recent_table.clone(),
+            history_table: history_table.clone(),
+            cur_sub_idx: 0,
+            num_sub_tables: recent_table.buckets_rwlock.len(),
+
+            cur_entry_idx: 0,
+            sub_table_deltas: deltas,
         }
+    }
+
+    fn gen_deltas(
+        mut recent: DoubleHashSubTableScanner<T>, 
+        mut history: DoubleHashSubTableScanner<T>,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)> {
+        let mut from_ts_tuples = HashMap::new();
+        let mut to_ts_tuples = HashMap::new();
+        let mut ret = vec![];
+        let ts_within = |entry: &MvccEntry, ts: Timestamp| -> bool {
+            ts >= entry.start_ts && ts < entry.end_ts
+        };
+        while let Some(item) = recent.next() {
+            if ts_within(&item, from_ts) && ts_within(&item, to_ts) {
+                continue;
+            }
+            if ts_within(&item, from_ts) {
+                from_ts_tuples.insert((item.key, item.pkey), item.value);
+            } else if ts_within(&item, to_ts) {
+                to_ts_tuples.insert((item.key, item.pkey), item.value);
+            }
+        }
+        while let Some(item) = history.next() {
+            if ts_within(&item, from_ts) && ts_within(&item, to_ts) {
+                continue;
+            }
+            if ts_within(&item, from_ts) {
+                from_ts_tuples.insert((item.key, item.pkey), item.value);
+            } else if ts_within(&item, to_ts) {
+                to_ts_tuples.insert((item.key, item.pkey), item.value);
+            }
+        }
+
+        for (k_pk, from_v) in from_ts_tuples {
+            if to_ts_tuples.contains_key(&k_pk) {
+                let to_v = to_ts_tuples.remove(&k_pk).unwrap();
+                if &to_v != &from_v {
+                    ret.push((k_pk.0, k_pk.1, Delta::Updated(to_v)));
+                }
+            } else {
+                ret.push((k_pk.0, k_pk.1, Delta::Deleted));
+            }
+        }
+
+        for (k_pk, to_v) in to_ts_tuples {
+            ret.push((k_pk.0, k_pk.1, Delta::Inserted(to_v)));
+        }
+
+        return ret;
     }
 }
 
-impl<T: MemPool> Iterator for DoubleHashTableDeltaScanner<T> {
+impl<T: MemPool> Iterator for DoubleHashTableMergeDeltaScanner<T> {
     type Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>);
     fn next(&mut self) -> Option<Self::Item> {
+        if self.cur_sub_idx >= self.num_sub_tables {
+            return None;
+        }
+        if self.cur_entry_idx < self.sub_table_deltas.len() {
+            self.cur_entry_idx += 1;
+            return Some(self.sub_table_deltas[self.cur_entry_idx - 1].clone());
+        } else {
+            self.cur_sub_idx += 1;
+            self.cur_entry_idx = 0;
+            self.sub_table_deltas.clear();
+
+            if self.cur_sub_idx >= self.num_sub_tables {
+                return None;
+            }
+
+            let recent = DoubleHashSubTableScanner::new(
+                &self.recent_table.buckets_rwlock[self.cur_sub_idx], Timestamp::MAX, true);
+            let history = DoubleHashSubTableScanner::new(
+                &self.history_table.buckets_rwlock[self.cur_sub_idx], Timestamp::MAX, true);
+            self.sub_table_deltas = Self::gen_deltas(recent, history, self.from_ts, self.to_ts);
+        }
+
         todo!()
     }
 }
@@ -152,19 +252,13 @@ pub struct DoubleHashTable<T: MemPool> {
 
     meta: Arc<(PageId, AtomicU32)>,
 
-    /// shared: read & update & insert & delete & get \
-    /// exclusive: rehash \
-    /// ensure atomic of (num_buckets, BucketEntry.page_id, BucketEntry.frame_id)
-    buckets_rwlock: Vec<Arc<DoubleHashSubTable<T>>>, // isolation btw re-hash and get/insert/update/...
-
-    rehash_mutex: Mutex<()>, // re-hash only once
+    buckets_rwlock: Vec<Arc<DoubleHashSubTable<T>>>,
 }
 
 impl<T: MemPool> RecentHistoryTable<T> for DoubleHashTable<T> {
     type ScanAllIter = DoubleHashTableScanner<T>;
     type ScanIter = DoubleHashTableTupleScanner<T>;
     type ScanKeyIter = DoubleHashTableSmallTupleScanner<T>;
-    type ScanDeltaIter = DoubleHashTableDeltaScanner<T>;
 
     fn scan(self: &Arc<Self>, ts: Timestamp) -> Self::ScanIter {
         let scanner = DoubleHashTableScanner::new(self, ts, false);
@@ -184,9 +278,6 @@ impl<T: MemPool> RecentHistoryTable<T> for DoubleHashTable<T> {
 
 
 impl<T: MemPool> DoubleHashTable<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, meta: &Arc<(PageId, AtomicU32)>) -> Self {
-        Self::new_with_bucket_num(c_key, mem_pool, meta, DEFAULT_NUM_BUCKETS)
-    }
     pub fn new_with_bucket_num(
         c_key: ContainerKey,
         mem_pool: Arc<T>,
@@ -205,7 +296,7 @@ impl<T: MemPool> DoubleHashTable<T> {
             mem_pool,
             meta: meta.clone(),
             buckets_rwlock,
-            rehash_mutex: Mutex::new(()),
+            // rehash_mutex: Mutex::new(()),
         }
     }
 
@@ -346,7 +437,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
     }
 
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
-        return vec![0]
+        vec![]
     }
 
  
@@ -442,11 +533,14 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError> {
-        todo!()
+        for bucket_idx in 0..self.buckets_rwlock.len() {
+            <DoubleHashSubTable<T> as HistorySubHashTable<T>>::garbage_collect(&self.buckets_rwlock[bucket_idx], safe_ts)?;
+        }
+        Ok(())
     }
 
 
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
-        return vec![0]
+        vec![]
     }
 }

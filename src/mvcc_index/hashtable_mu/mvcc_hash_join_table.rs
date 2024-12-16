@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    double_hash::double_hash_table::DoubleHashTable, hash_join_table_common::{CuckooHistoryHashTable, CuckooRecentHashTable, MvccHashJoinCuckooMetaPage, RecentHistoryTable}
+    double_hash::double_hash_table::{DoubleHashTable, DoubleHashTableMergeDeltaScanner}, hash_join_table_common::{CuckooHistoryHashTable, CuckooRecentHashTable, MvccHashJoinCuckooMetaPage, RecentHistoryTable}
 };
 
 type TableStruct<T> = DoubleHashTable<T>;
@@ -34,7 +34,7 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
     type Error = CuckooAccessMethodError;
-    type DeltaIter = CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanDeltaIter>;
+    type DeltaIter = DoubleHashTableMergeDeltaScanner<T>;
     type Iter = CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanIter>;
     type ScanKeyIter = CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanKeyIter>;
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
@@ -48,8 +48,8 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         &self,
         key: Self::Key,
         pkey: Self::PKey,
-        ts: crate::mvcc_index::Timestamp,
-        tx_id: crate::mvcc_index::TxId,
+        ts: Timestamp,
+        tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         self.insert_inner(key, pkey, ts, tx_id, value)
@@ -59,7 +59,7 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         &self,
         key: &Self::Key,
         pkey: &Self::PKey,
-        ts: crate::mvcc_index::Timestamp,
+        ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
         self.get_inner(key, pkey, ts)
     }
@@ -86,8 +86,8 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         &self,
         key: Self::Key,
         pkey: Self::PKey,
-        ts: crate::mvcc_index::Timestamp,
-        tx_id: crate::mvcc_index::TxId,
+        ts: Timestamp,
+        tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         self.update_inner(key, pkey, ts, tx_id, value)
@@ -97,8 +97,8 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         &self,
         key: &Self::Key,
         pkey: &Self::PKey,
-        ts: crate::mvcc_index::Timestamp,
-        tx_id: crate::mvcc_index::TxId,
+        ts: Timestamp,
+        tx_id: TxId,
     ) -> Result<(), Self::Error> {
         self.delete_inner(key, pkey, ts, tx_id)
     }
@@ -112,12 +112,11 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
     }
 
     fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error> {
-        // Ok(self.scan_key_inner(ts, key))
-        todo!()
+        Ok(self.scan_key_inner(ts, key))
     }
 
-    fn garbage_collect(&self, safe_ts: crate::mvcc_index::Timestamp) -> Result<(), Self::Error> {
-        todo!()
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
+        self.history().garbage_collect(safe_ts)
     }
 }
 
@@ -215,7 +214,7 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         &self,
         key: Vec<u8>,
         pkey: Vec<u8>,
-        ts: crate::mvcc_index::Timestamp,
+        ts: Timestamp,
         _tx_id: TxId,
         value: Vec<u8>,
     ) -> Result<(), CuckooAccessMethodError> {
@@ -248,11 +247,10 @@ impl<T: MemPool> MvccHashJoinTable<T> {
                 Ok(None)
             }
             Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                log_warn!(
-                    "[HashJoinTable::get_inner] return KeyFoundButInvalidTS in recent table!"
-                );
+                // log_warn!(
+                //     "[HashJoinTable::get_inner] return KeyFoundButInvalidTS in recent table!"
+                // );
                 let history_val = self.history().get(key, pkey, ts);
-                log_warn!("try to find in history");
                 match history_val {
                     Ok(val) => Ok(Some(val)),
                     Err(CuckooAccessMethodError::KeyNotFound) => Ok(None),
@@ -343,8 +341,8 @@ impl<T: MemPool> MvccHashJoinTable<T> {
     }
 
 
-    fn scan_key_inner(self: &Arc<Self>, ts: Timestamp, key: &[u8]) 
-        -> CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanKeyIter> 
+    fn scan_key_inner(&self, ts: Timestamp, key: &[u8]) 
+        -> <Self as MvccIndex<T>>::ScanKeyIter 
     {
         let recent_scan_iter = self.recent_hash_table.scan_key(ts, key);
         let history_scan_iter = self.history_hash_table.scan_key(ts, key);
@@ -353,8 +351,14 @@ impl<T: MemPool> MvccHashJoinTable<T> {
     }
 
     pub fn delta_scan_inner(&self, from_ts: Timestamp, to_ts: Timestamp) 
-        -> CuckooHashJoinTableMergeScanner<<TableStruct<T> as RecentHistoryTable<T>>::ScanDeltaIter>  {
-        todo!()
+        -> <Self as MvccIndex<T>>::DeltaIter  {
+        let delta_scan_iter = DoubleHashTableMergeDeltaScanner::new(
+            &self.recent_hash_table, 
+            &self.history_hash_table, 
+            from_ts, 
+            to_ts,
+        );
+        delta_scan_iter
     }
 
     fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard {
@@ -390,6 +394,8 @@ impl<T: MemPool> MvccHashJoinTable<T> {
 
 #[cfg(test)]
 mod tests {
+    use core::str;
+
     use super::*;
     use crate::mvcc_index::hashtable_mu::hash_join_table_common::{BUCKET_NUM_SIZE, BUCKET_ENTRY_SIZE};
     use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
@@ -1005,5 +1011,87 @@ mod tests {
             let a = hash_join_table.get(key, pkey, 1).unwrap();
             assert_eq!(a.as_ref().unwrap(), new_value);
         }
+    }
+
+    #[test]
+    fn test_garbage_collect() {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
+
+        let hash_join_table_clone = hash_join_table.clone();
+
+        // 0..1000 inserts at ts 1
+        for i in (0..1000).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            hash_join_table
+                .insert_inner(key, pkey, 1, 1, value)
+                .unwrap();
+        }
+
+        // 0..1000 deletes at ts 2
+        for i in (0..1000).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            hash_join_table_clone
+                .delete_inner(&key[..], &pkey[..], 2, 1)
+                .unwrap();
+        }
+
+        // Verify all entries after deletes are complete
+        for i in 0..1000 {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let get_result = hash_join_table_clone.get_inner(&key, &pkey, 2);
+            assert_eq!(get_result.unwrap(), None);
+        }
+
+        for i in 0..1000 {
+            let key: Vec<u8> = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let expected_value = format!("value{}", i).into_bytes();
+            let get_result = hash_join_table.get_inner(&key, &pkey, 1);
+            assert_eq!(get_result.unwrap().unwrap(), expected_value);
+        }
+
+        let mut scan_all_iter = hash_join_table.scan_all().unwrap();
+        let mut item_count = 0;
+        while let Some(item) = scan_all_iter.next() {
+            item_count += 1;
+            log_warn!("item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}", 
+                str::from_utf8(&item.key), str::from_utf8(&item.pkey), str::from_utf8(&item.value),
+                item.start_ts, item.end_ts
+            );
+        }
+        assert_eq!(item_count, 1000);
+        hash_join_table.garbage_collect(1).unwrap();
+
+        let mut scan_all_iter = hash_join_table.scan_all().unwrap();
+        let mut item_count = 0;
+        while let Some(item) = scan_all_iter.next() {
+            item_count += 1;
+            log_warn!("item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}", 
+                str::from_utf8(&item.key), str::from_utf8(&item.pkey), str::from_utf8(&item.value),
+                item.start_ts, item.end_ts
+            );
+        }
+        assert_eq!(item_count, 1000);
+
+        hash_join_table.garbage_collect(2).unwrap();
+
+        let mut scan_all_iter = hash_join_table.scan_all().unwrap();
+        let mut item_count = 0;
+        while let Some(item) = scan_all_iter.next() {
+            item_count += 1;
+            log_warn!("item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}", 
+                str::from_utf8(&item.key), str::from_utf8(&item.pkey), str::from_utf8(&item.value),
+                item.start_ts, item.end_ts
+            );
+        }
+        assert_eq!(item_count, 0);
+
+
     }
 }

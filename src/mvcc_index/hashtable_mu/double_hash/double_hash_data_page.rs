@@ -1248,7 +1248,7 @@ impl DoubleHashPage for Page {
         slot.mark_deleted();
         slot.set_start_ts(end_ts);
         self.set_slot(slot_id, &slot);
-        log_warn!("mark delete at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), dbg_decrease_bytes, self.free_space_with_compaction(), self.free_space_without_compaction());
+        // log_warn!("mark delete at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), dbg_decrease_bytes, self.free_space_with_compaction(), self.free_space_without_compaction());
 
         // log_warn!(
         //     "[mark delete] total_bytes_used for deleted slot page: {:?}",
@@ -1538,7 +1538,32 @@ impl DoubleHashPage for Page {
     // only history
     /// delete all record with end_ts <= safe_ts
     fn garbage_collect(&mut self, safe_ts: Timestamp) {
-        todo!()
+        let hashed_page_old_slot_count = self.slot_count();
+
+        let mut invalid_idxes = std::collections::HashSet::new();
+        
+        for slot_idx in (0..hashed_page_old_slot_count).rev() {
+            let slot_start_offset_in_page = self.slot_offset(slot_idx) as usize;
+            let slot_start_ptr = &self[slot_start_offset_in_page] as *const u8 as *const Slot;
+            let end_ts = unsafe { (*slot_start_ptr).end_ts() };
+            if end_ts <= safe_ts {
+                self.decrease_bytes_for_rehash(slot_idx);
+                invalid_idxes.insert(slot_idx);
+            }
+        }
+
+        let hashed_page_new_slot_count =
+            hashed_page_old_slot_count - invalid_idxes.len() as u32;
+        let mut i: u32 = 0;
+        for j in 0..hashed_page_old_slot_count {
+            if invalid_idxes.contains(&j) {
+                continue;
+            }
+            self.swap_slot(i, j);
+            i += 1;
+        }
+        assert_eq!(i, hashed_page_new_slot_count);
+        self.set_slot_count(hashed_page_new_slot_count);
     }
     /// only history and recent::delete \
     /// when deleted is inserted again in recent table \
@@ -1634,15 +1659,6 @@ impl DoubleHashPage for Page {
     }
 
     fn get_slot(&self, slot_id: u32) -> Option<Slot> {
-        // fn get_slot(&self, slot_id: u32) -> Slot {
-        //     let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
-        //     let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *mut Slot;
-        //     let len = self.slot_count();
-        //     assert!(slot_id <= len);
-        //     unsafe {
-        //         std::ptr::copy_nonoverlapping(slot as *const Slot, slots_start_ptr, 1);
-        //     }
-        // }
         if slot_id < self.slot_count() {
             let slots_start_offset_in_page = self.slot_offset(slot_id) as usize;
             let slots_start_ptr = &self[slots_start_offset_in_page] as *const u8 as *const Slot;

@@ -153,8 +153,6 @@ impl<T: MemPool> Iterator for DoubleHashSubTableScanner<T> {
 // ----------------- SCANNER END ------------------------------
 
 pub trait RecentSubHashTable<T: MemPool> {
-    fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
-
     fn insert(
         &self,
         key: &[u8],
@@ -184,8 +182,6 @@ pub trait RecentSubHashTable<T: MemPool> {
 }
 
 pub trait HistorySubHashTable<T: MemPool> {
-    fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
-
     fn insert(
         &self,
         key: &[u8],
@@ -202,6 +198,8 @@ pub trait HistorySubHashTable<T: MemPool> {
     ) -> Result<Vec<u8>, CuckooAccessMethodError>;
    
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError>;
+    /// NOT used, only if deleted tuple is inserted again will this function be used.
+    #[warn(unused)]
     fn insert_deleted(
         &self,
         key: &[u8],
@@ -1123,15 +1121,6 @@ impl<T: MemPool> DoubleHashSubTable<T> {
 }
 
 impl<T: MemPool> RecentSubHashTable<T> for DoubleHashSubTable<T> {
-    fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
-        let buckets = self.buckets_rwlock.read().unwrap();
-        let ret = buckets
-            .buckets
-            .iter()
-            .map(|x| x.page_id())
-            .collect::<Vec<_>>();
-        ret
-    }
     fn insert(
         &self,
         key: &[u8],
@@ -1151,12 +1140,9 @@ impl<T: MemPool> RecentSubHashTable<T> for DoubleHashSubTable<T> {
 
                     // log_warn!("BEFORE REHASH");
                     // self.dump_all_entry();
-
                     self.rehash_recent(new_hash_size);
-
                     // log_warn!("AFTER REHASH");
                     // self.dump_all_entry();
-
                     continue;
                 }
                 Err(CuckooAccessMethodError::AcquireLockFailed) => {
@@ -1372,20 +1358,21 @@ impl<T: MemPool> HistorySubHashTable<T> for DoubleHashSubTable<T> {
         }
     }
 
-    
-
-    fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
-        let buckets = self.buckets_rwlock.read().unwrap();
-        let ret = buckets
-            .buckets
-            .iter()
-            .map(|x| x.page_id())
-            .collect::<Vec<_>>();
-        ret
-    }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError> {
-        todo!()
+        let buckets = self.buckets_rwlock.read().unwrap();
+
+        for bucket_idx in 0..buckets.buckets.len() {
+            let pid = buckets.get_bucket_entry(bucket_idx).page_id();
+            let fid: u32 = buckets.get_bucket_entry(bucket_idx).frame_id();
+
+            let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
+            let mut write_page = self.write_page(page_f_key);
+
+            write_page.garbage_collect(safe_ts);
+        }
+
+        Ok(())
     }
 
     fn insert_deleted(

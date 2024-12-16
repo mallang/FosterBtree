@@ -149,7 +149,6 @@ pub trait RecentHistoryTable<T: MemPool> {
     type ScanIter: Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)>;
     type ScanKeyIter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
     type ScanAllIter: Iterator<Item = MvccEntry>;
-    type ScanDeltaIter: Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>;
 
     fn scan(self: &Arc<Self>, ts: Timestamp) -> Self::ScanIter;
 

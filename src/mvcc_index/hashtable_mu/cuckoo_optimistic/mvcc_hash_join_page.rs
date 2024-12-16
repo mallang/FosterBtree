@@ -1253,7 +1253,7 @@ impl MvccHashJoinCuckooPage for Page {
         slot.mark_deleted();
         slot.set_start_ts(end_ts);
         self.set_slot(slot_id, &slot);
-        log_warn!("mark delete at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), dbg_decrease_bytes, self.free_space_with_compaction(), self.free_space_without_compaction());
+        // log_warn!("mark delete at id: {}, space need: {}, free_space_with_compaction: {} free_space_without_compaction: {}", self.get_id(), dbg_decrease_bytes, self.free_space_with_compaction(), self.free_space_without_compaction());
 
         // log_warn!(
         //     "[mark delete] total_bytes_used for deleted slot page: {:?}",
