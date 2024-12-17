@@ -1,8 +1,31 @@
-use std::{collections::HashMap, marker::PhantomData, sync::{atomic::AtomicU32, Arc, Mutex, RwLock}};
+use std::{
+    collections::HashMap,
+    marker::PhantomData,
+    sync::{atomic::AtomicU32, Arc, Mutex, RwLock},
+};
 
-use crate::{bp::{ContainerKey, MemPool}, log_debug, log_warn, mvcc_index::{hashtable_mu::{hash_join_table_common::{CuckooAccessMethodError, CuckooHistoryHashTable, CuckooRecentHashTable, RecentHistoryTable, DEFAULT_NUM_BUCKETS}, mvcc_hash_join_table::CuckooHashJoinTableMergeScanner}, Delta, MvccEntry, Timestamp}, page::PageId};
+use crate::{
+    bp::{ContainerKey, MemPool},
+    log_debug, log_warn,
+    mvcc_index::{
+        hashtable_mu::{
+            hash_join_table_common::{
+                HashTableAccessMethodError, HistoryHashTable, RecentHashTable, RecentHistoryTable,
+                DEFAULT_NUM_BUCKETS,
+            },
+            mvcc_hash_join_table::CuckooHashJoinTableMergeScanner,
+        },
+        Delta, MvccEntry, Timestamp,
+    },
+    page::PageId,
+};
 
-use super::{double_hash_common::get_first_hash_idx, double_hash_sub_table::{DoubleHashSubTable, DoubleHashSubTableScanner, HistorySubHashTable, RecentSubHashTable}};
+use super::{
+    double_hash_common::get_first_hash_idx,
+    double_hash_sub_table::{
+        DoubleHashSubTable, DoubleHashSubTableScanner, HistorySubHashTable, RecentSubHashTable,
+    },
+};
 
 pub struct DoubleHashTableScanner<T: MemPool> {
     table_idx: u32,
@@ -34,22 +57,26 @@ impl<T: MemPool> Iterator for DoubleHashTableScanner<T> {
             match self.scanner.next() {
                 Some(entry) => {
                     return Some(entry);
-                },
+                }
                 None => {
                     self.table_idx += 1;
                     if self.table_idx >= self.table.buckets_rwlock.len() as u32 {
                         return None;
                     }
-                    self.scanner = DoubleHashSubTableScanner::new(&self.table.buckets_rwlock[self.table_idx as usize], self.ts, self.scan_all_flag);
+                    self.scanner = DoubleHashSubTableScanner::new(
+                        &self.table.buckets_rwlock[self.table_idx as usize],
+                        self.ts,
+                        self.scan_all_flag,
+                    );
                 }
-            } 
+            }
         }
     }
 }
 
 pub struct DoubleHashTableTupleScanner<T: MemPool> {
     scanner: DoubleHashTableScanner<T>,
-    is_end: bool
+    is_end: bool,
 }
 
 impl<T: MemPool> DoubleHashTableTupleScanner<T> {
@@ -76,7 +103,7 @@ impl<T: MemPool> Iterator for DoubleHashTableTupleScanner<T> {
             }
 
             let item = item.unwrap();
-            return Some((item.key, item.pkey, item.value))
+            return Some((item.key, item.pkey, item.value));
         }
     }
 }
@@ -84,7 +111,7 @@ impl<T: MemPool> Iterator for DoubleHashTableTupleScanner<T> {
 pub struct DoubleHashTableSmallTupleScanner<T: MemPool> {
     key: Vec<u8>,
     scanner: DoubleHashTableScanner<T>,
-    is_end: bool
+    is_end: bool,
 }
 
 impl<T: MemPool> DoubleHashTableSmallTupleScanner<T> {
@@ -114,15 +141,13 @@ impl<T: MemPool> Iterator for DoubleHashTableSmallTupleScanner<T> {
             let item = item.unwrap();
             // scan_key
             if &item.key == &self.key {
-                return Some((item.pkey, item.value))
+                return Some((item.pkey, item.value));
             } else {
                 continue;
             }
         }
     }
 }
-
-
 
 pub struct DoubleHashTableMergeDeltaScanner<T: MemPool> {
     from_ts: Timestamp,
@@ -144,10 +169,10 @@ impl<T: MemPool> DoubleHashTableMergeDeltaScanner<T> {
         from_ts: Timestamp,
         to_ts: Timestamp,
     ) -> Self {
-        let recent = DoubleHashSubTableScanner::new(
-            &recent_table.buckets_rwlock[0], Timestamp::MAX, true);
-        let history = DoubleHashSubTableScanner::new(
-            &history_table.buckets_rwlock[0], Timestamp::MAX, true);
+        let recent =
+            DoubleHashSubTableScanner::new(&recent_table.buckets_rwlock[0], Timestamp::MAX, true);
+        let history =
+            DoubleHashSubTableScanner::new(&history_table.buckets_rwlock[0], Timestamp::MAX, true);
         let deltas = Self::gen_deltas(recent, history, from_ts, to_ts);
 
         Self {
@@ -165,7 +190,7 @@ impl<T: MemPool> DoubleHashTableMergeDeltaScanner<T> {
     }
 
     fn gen_deltas(
-        mut recent: DoubleHashSubTableScanner<T>, 
+        mut recent: DoubleHashSubTableScanner<T>,
         mut history: DoubleHashSubTableScanner<T>,
         from_ts: Timestamp,
         to_ts: Timestamp,
@@ -235,9 +260,15 @@ impl<T: MemPool> Iterator for DoubleHashTableMergeDeltaScanner<T> {
             }
 
             let recent = DoubleHashSubTableScanner::new(
-                &self.recent_table.buckets_rwlock[self.cur_sub_idx], Timestamp::MAX, true);
+                &self.recent_table.buckets_rwlock[self.cur_sub_idx],
+                Timestamp::MAX,
+                true,
+            );
             let history = DoubleHashSubTableScanner::new(
-                &self.history_table.buckets_rwlock[self.cur_sub_idx], Timestamp::MAX, true);
+                &self.history_table.buckets_rwlock[self.cur_sub_idx],
+                Timestamp::MAX,
+                true,
+            );
             self.sub_table_deltas = Self::gen_deltas(recent, history, self.from_ts, self.to_ts);
         }
 
@@ -276,7 +307,6 @@ impl<T: MemPool> RecentHistoryTable<T> for DoubleHashTable<T> {
     }
 }
 
-
 impl<T: MemPool> DoubleHashTable<T> {
     pub fn new_with_bucket_num(
         c_key: ContainerKey,
@@ -284,13 +314,17 @@ impl<T: MemPool> DoubleHashTable<T> {
         meta: &Arc<(PageId, AtomicU32)>,
         bucket_nums: usize,
     ) -> Self {
-        let buckets_rwlock = 
-            (0..bucket_nums).into_iter()
-                .map(|_x| 
-                    Arc::new(DoubleHashSubTable::new_with_bucket_num(c_key, mem_pool.clone(), 1, meta))
-                )
-                .collect()
-        ;
+        let buckets_rwlock = (0..bucket_nums)
+            .into_iter()
+            .map(|_x| {
+                Arc::new(DoubleHashSubTable::new_with_bucket_num(
+                    c_key,
+                    mem_pool.clone(),
+                    1,
+                    meta,
+                ))
+            })
+            .collect();
         Self {
             c_key,
             mem_pool,
@@ -304,21 +338,16 @@ impl<T: MemPool> DoubleHashTable<T> {
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError> {
         let mut res = vec![];
         for bucket_idx in 0..self.buckets_rwlock.len() {
-            let get_all_res = self.buckets_rwlock[bucket_idx].get_all(
-                key,
-                ts,
-            ).unwrap();
+            let get_all_res = self.buckets_rwlock[bucket_idx].get_all(key, ts).unwrap();
             res.extend(get_all_res);
         }
         Ok(res)
     }
 
-    pub fn dump_all_entry(
-        &self
-    ) {
+    pub fn dump_all_entry(&self) {
         let mut num = 0;
         for idx in 0..self.buckets_rwlock.len() {
             num += self.buckets_rwlock[idx].dump_all_entry();
@@ -327,17 +356,17 @@ impl<T: MemPool> DoubleHashTable<T> {
     }
 }
 
-impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
+impl<T: MemPool> RecentHashTable<T> for DoubleHashTable<T> {
     fn insert(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<Option<Timestamp>, CuckooAccessMethodError> {
+    ) -> Result<Option<Timestamp>, HashTableAccessMethodError> {
         let bucket_idx = {
             let bucket_num = self.buckets_rwlock.len() as u32;
-            get_first_hash_idx(key, bucket_num)        
+            get_first_hash_idx(key, bucket_num)
         };
         let subtable_insert_result = <DoubleHashSubTable<T> as RecentSubHashTable<T>>::insert(
             &self.buckets_rwlock[bucket_idx],
@@ -347,22 +376,22 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
             val,
         );
         match subtable_insert_result {
-            Ok(res) => {Ok(res)},
+            Ok(res) => Ok(res),
             Err(_) => {
                 panic!("should not happen!");
             }
         }
     }
-    
+
     fn get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let bucket_idx = {
             let bucket_num = self.buckets_rwlock.len() as u32;
-            get_first_hash_idx(key, bucket_num)        
+            get_first_hash_idx(key, bucket_num)
         };
         let subtable_get_result = <DoubleHashSubTable<T> as RecentSubHashTable<T>>::get(
             &self.buckets_rwlock[bucket_idx],
@@ -371,10 +400,8 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
             ts,
         );
         match subtable_get_result {
-            Ok(res) => {Ok(res)},
-            Err(e) => {
-                return Err(e)
-            }
+            Ok(res) => Ok(res),
+            Err(e) => return Err(e),
         }
     }
 
@@ -384,10 +411,10 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         let bucket_idx = {
             let bucket_num = self.buckets_rwlock.len() as u32;
-            get_first_hash_idx(key, bucket_num)        
+            get_first_hash_idx(key, bucket_num)
         };
         let subtable_update_result = <DoubleHashSubTable<T> as RecentSubHashTable<T>>::update(
             &self.buckets_rwlock[bucket_idx],
@@ -397,10 +424,8 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
             val,
         );
         match subtable_update_result {
-            Ok(res) => {Ok(res)},
-            Err(e) => {
-                return Err(e)
-            }
+            Ok(res) => Ok(res),
+            Err(e) => return Err(e),
         }
     }
 
@@ -409,10 +434,10 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         let bucket_idx = {
             let bucket_num = self.buckets_rwlock.len() as u32;
-            get_first_hash_idx(key, bucket_num)        
+            get_first_hash_idx(key, bucket_num)
         };
         let subtable_update_result = <DoubleHashSubTable<T> as RecentSubHashTable<T>>::delete(
             &self.buckets_rwlock[bucket_idx],
@@ -421,10 +446,8 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
             ts,
         );
         match subtable_update_result {
-            Ok(res) => {Ok(res)},
-            Err(e) => {
-                return Err(e)
-            }
+            Ok(res) => Ok(res),
+            Err(e) => return Err(e),
         }
     }
 
@@ -432,18 +455,16 @@ impl<T: MemPool> CuckooRecentHashTable<T> for DoubleHashTable<T> {
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError> {
         self.get_all_inner(key, ts)
     }
 
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
         vec![]
     }
-
- 
 }
 
-impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
+impl<T: MemPool> HistoryHashTable<T> for DoubleHashTable<T> {
     fn insert(
         &self,
         key: &[u8],
@@ -451,10 +472,10 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let bucket_idx = {
             let bucket_num = self.buckets_rwlock.len() as u32;
-            get_first_hash_idx(key, bucket_num)        
+            get_first_hash_idx(key, bucket_num)
         };
         let subtable_insert_result = <DoubleHashSubTable<T> as HistorySubHashTable<T>>::insert(
             &self.buckets_rwlock[bucket_idx],
@@ -465,22 +486,22 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
             val,
         );
         match subtable_insert_result {
-            Ok(_) => {Ok(())},
+            Ok(_) => Ok(()),
             Err(_) => {
                 panic!("should not happen!");
             }
         }
     }
-    
+
     fn get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let bucket_idx = {
             let bucket_num = self.buckets_rwlock.len() as u32;
-            get_first_hash_idx(key, bucket_num)        
+            get_first_hash_idx(key, bucket_num)
         };
         let subtable_get_result = <DoubleHashSubTable<T> as HistorySubHashTable<T>>::get(
             &self.buckets_rwlock[bucket_idx],
@@ -489,10 +510,8 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
             ts,
         );
         match subtable_get_result {
-            Ok(res) => {Ok(res)},
-            Err(e) => {
-                return Err(e)
-            }
+            Ok(res) => Ok(res),
+            Err(e) => return Err(e),
         }
     }
 
@@ -500,11 +519,9 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError> {
         self.get_all_inner(key, ts)
     }
-
-
 
     fn insert_deleted(
         &self,
@@ -512,33 +529,34 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for DoubleHashTable<T> {
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let bucket_idx = {
             let bucket_num = self.buckets_rwlock.len() as u32;
-            get_first_hash_idx(key, bucket_num)        
+            get_first_hash_idx(key, bucket_num)
         };
-        let subtable_insert_deleted_result = <DoubleHashSubTable<T> as HistorySubHashTable<T>>::insert_deleted(
-            &self.buckets_rwlock[bucket_idx],
-            key,
-            pkey,
-            start_ts,
-            end_ts,
-        );
+        let subtable_insert_deleted_result =
+            <DoubleHashSubTable<T> as HistorySubHashTable<T>>::insert_deleted(
+                &self.buckets_rwlock[bucket_idx],
+                key,
+                pkey,
+                start_ts,
+                end_ts,
+            );
         match subtable_insert_deleted_result {
-            Ok(res) => {Ok(res)},
-            Err(e) => {
-                return Err(e)
-            }
+            Ok(res) => Ok(res),
+            Err(e) => return Err(e),
         }
     }
 
-    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError> {
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), HashTableAccessMethodError> {
         for bucket_idx in 0..self.buckets_rwlock.len() {
-            <DoubleHashSubTable<T> as HistorySubHashTable<T>>::garbage_collect(&self.buckets_rwlock[bucket_idx], safe_ts)?;
+            <DoubleHashSubTable<T> as HistorySubHashTable<T>>::garbage_collect(
+                &self.buckets_rwlock[bucket_idx],
+                safe_ts,
+            )?;
         }
         Ok(())
     }
-
 
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
         vec![]

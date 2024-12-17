@@ -1,5 +1,4 @@
 /// a read committed txn handle
-
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -295,8 +294,10 @@ mod mvcctxn {
 
             let has_overlap = {
                 let committed_txns_lock = self.txn_hash_table.mvcc.committed_txns.lock().unwrap();
-                let committed_txns = committed_txns_lock
-                    .range((Bound::Excluded(self.begin_ts), Bound::Excluded(committed_ts)));
+                let committed_txns = committed_txns_lock.range((
+                    Bound::Excluded(self.begin_ts),
+                    Bound::Excluded(committed_ts),
+                ));
                 committed_txns
                     .into_iter()
                     .map(|(_, committed_txn_data)| {
@@ -413,7 +414,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        bp::{get_in_mem_pool, ContainerKey, InMemPool}, log_warn, mvcc_index::MvccIndex
+        bp::{get_in_mem_pool, ContainerKey, InMemPool},
+        log_warn,
+        mvcc_index::MvccIndex,
     };
     use anyhow::Result;
 
@@ -821,8 +824,6 @@ mod tests {
             conflict_value2.clone(),
         )
         .unwrap();
-
-
 
         // txn2 can be committed
         let txn2_commit_result = txn2.commit();

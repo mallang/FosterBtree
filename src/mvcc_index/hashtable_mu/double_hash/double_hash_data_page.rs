@@ -461,7 +461,7 @@ use record::*;
 
 use crate::{
     log_debug, log_warn,
-    mvcc_index::{hashtable_mu::hash_join_table_common::CuckooAccessMethodError, Timestamp},
+    mvcc_index::{hashtable_mu::hash_join_table_common::HashTableAccessMethodError, Timestamp},
     page::{Page, AVAILABLE_PAGE_SIZE},
 };
 
@@ -478,7 +478,7 @@ pub trait DoubleHashPage {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), CuckooAccessMethodError>;
+    ) -> Result<(), HashTableAccessMethodError>;
 
     /// used both in recent and history \
     /// if recent => find one matched(key, pkey) and either return OK or return Err(Ts) \
@@ -489,27 +489,27 @@ pub trait DoubleHashPage {
         pkey: &[u8],
         ts: Timestamp,
         is_recent_get: bool,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError>;
+    ) -> Result<Vec<u8>, HashTableAccessMethodError>;
 
     fn recent_get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError>;
+    ) -> Result<Vec<u8>, HashTableAccessMethodError>;
     /// return the free space after compaction.
     fn compact(&mut self) -> u32;
 
     fn delete_slot_at_id(
         &mut self,
         slot_id: u32,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
 
     fn get_all(
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError>;
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError>;
 
     /* -----------------only recent------------------- */
     /// calculate to find whether the record size is okay or not \
@@ -522,7 +522,7 @@ pub trait DoubleHashPage {
         pkey: &[u8],
         val: &[u8],
         ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
 
     /// return slot_id if find \
     /// Err(notfound) \
@@ -533,14 +533,14 @@ pub trait DoubleHashPage {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<u32, CuckooAccessMethodError>;
+    ) -> Result<u32, HashTableAccessMethodError>;
 
     /// ONLY RECENT
     fn mark_delete_slot_at_id(
         &mut self,
         slot_id: u32,
         end_ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
 
     // ONLY RECENT
     fn get_delete_mark_slot_id(
@@ -548,7 +548,7 @@ pub trait DoubleHashPage {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<u32, CuckooAccessMethodError>;
+    ) -> Result<u32, HashTableAccessMethodError>;
     /* -----------------only history------------------- */
     /// ONLY HISTORY
     fn garbage_collect(&mut self, safe_ts: Timestamp);
@@ -559,7 +559,7 @@ pub trait DoubleHashPage {
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<(), CuckooAccessMethodError>;
+    ) -> Result<(), HashTableAccessMethodError>;
 
     /* ------------------helper function------------------------ */
     fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
@@ -873,7 +873,7 @@ pub trait DoubleHashPage {
         end_ts: Timestamp,
         val: &[u8],
         slot_id: u32,
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let space_need = <Page as DoubleHashPage>::space_need(key, pkey, val);
         let mut header = self.header();
         let record_size = space_need - SLOT_SIZE as u32;
@@ -918,12 +918,12 @@ impl DoubleHashPage for Page {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let space_need = <Page as DoubleHashPage>::space_need(key, pkey, val);
 
         if space_need > self.free_space_with_compaction() {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
-            return Err(CuckooAccessMethodError::OutOfSpace);
+            return Err(HashTableAccessMethodError::OutOfSpace);
         }
         if space_need > self.free_space_without_compaction() {
             // DO COMPACT
@@ -943,7 +943,7 @@ impl DoubleHashPage for Page {
         let slot_offset = self.slot_offset(self.slot_count());
         if rec_offset < slot_offset + SLOT_SIZE as u32 {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
-            return Err(CuckooAccessMethodError::OutOfSpace);
+            return Err(HashTableAccessMethodError::OutOfSpace);
         }
 
         let slot_count = self.slot_count();
@@ -985,7 +985,7 @@ impl DoubleHashPage for Page {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let slot_idx = self.find_slot_idx(key, pkey, ts);
         if let Some(slot_idx) = slot_idx {
             let slot_idx = slot_idx as u32;
@@ -1024,18 +1024,18 @@ impl DoubleHashPage for Page {
                             return Ok(record.val().to_vec());
                         } else {
                             // slot deleted
-                            return Err(CuckooAccessMethodError::KeyNotFound);
+                            return Err(HashTableAccessMethodError::KeyNotFound);
                         }
                     } else {
                         // find but mismatch ts
-                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                        return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                     }
                 }
             }
         } else {
             // not found
         }
-        return Err(CuckooAccessMethodError::KeyNotFound);
+        return Err(HashTableAccessMethodError::KeyNotFound);
     }
 
     fn get(
@@ -1044,7 +1044,7 @@ impl DoubleHashPage for Page {
         pkey: &[u8],
         ts: Timestamp,
         is_recent_get: bool,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
 
@@ -1085,11 +1085,11 @@ impl DoubleHashPage for Page {
                                 return Ok(record.val().to_vec());
                             } else {
                                 // slot deleted
-                                return Err(CuckooAccessMethodError::KeyNotFound);
+                                return Err(HashTableAccessMethodError::KeyNotFound);
                             }
                         } else {
                             // find but mismatch ts
-                            return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                            return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                         }
                     } else
                     /* history get */
@@ -1100,7 +1100,7 @@ impl DoubleHashPage for Page {
                                 return Ok(record.val().to_vec());
                             } else {
                                 // deleted during [start_ts, end_ts)
-                                return Err(CuckooAccessMethodError::KeyNotFound);
+                                return Err(HashTableAccessMethodError::KeyNotFound);
                             }
                         } else {
                             // return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
@@ -1109,7 +1109,7 @@ impl DoubleHashPage for Page {
                 }
             }
         }
-        Err(CuckooAccessMethodError::KeyNotFound)
+        Err(HashTableAccessMethodError::KeyNotFound)
     }
 
     /// get all pair matching `key` and `ts` \
@@ -1120,7 +1120,7 @@ impl DoubleHashPage for Page {
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
 
@@ -1168,7 +1168,7 @@ impl DoubleHashPage for Page {
     fn delete_slot_at_id(
         &mut self,
         slot_id: u32,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         // check if rec_start_offset should change
         let slot = self.get_slot(slot_id).expect("Invalid slot_id");
 
@@ -1223,7 +1223,7 @@ impl DoubleHashPage for Page {
         &mut self,
         slot_id: u32,
         end_ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         // check if rec_start_offset should change
         let mut slot = self.get_slot(slot_id).expect("Invalid slot_id");
 
@@ -1263,7 +1263,7 @@ impl DoubleHashPage for Page {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<u32, CuckooAccessMethodError> {
+    ) -> Result<u32, HashTableAccessMethodError> {
         let slot_idx = self.find_slot_idx(key, pkey, ts);
         if let Some(slot_idx) = slot_idx {
             let slot_idx = slot_idx as u32;
@@ -1298,14 +1298,14 @@ impl DoubleHashPage for Page {
                     if slot.start_ts() <= ts && slot.is_mark_deleted() {
                         return Ok(slot_idx);
                     } else {
-                        return Err(CuckooAccessMethodError::KeyNotFound);
+                        return Err(HashTableAccessMethodError::KeyNotFound);
                     }
                 }
             }
         } else {
             // not found
         }
-        return Err(CuckooAccessMethodError::KeyNotFound);
+        return Err(HashTableAccessMethodError::KeyNotFound);
     }
 
     /// ONLY RECENT
@@ -1315,7 +1315,7 @@ impl DoubleHashPage for Page {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<u32, CuckooAccessMethodError> {
+    ) -> Result<u32, HashTableAccessMethodError> {
         let slot_idx = self.find_slot_idx(key, pkey, ts);
         if let Some(slot_idx) = slot_idx {
             let slot_idx = slot_idx as u32;
@@ -1348,9 +1348,9 @@ impl DoubleHashPage for Page {
 
                 if full_key == key && full_pkey == pkey {
                     if slot.is_mark_deleted() {
-                        return Err(CuckooAccessMethodError::KeyNotFound);
+                        return Err(HashTableAccessMethodError::KeyNotFound);
                     } else if ts < slot.start_ts() {
-                        return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                        return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                     } else {
                         return Ok(slot_idx);
                     }
@@ -1359,7 +1359,7 @@ impl DoubleHashPage for Page {
         } else {
             // not found
         }
-        return Err(CuckooAccessMethodError::KeyNotFound);
+        return Err(HashTableAccessMethodError::KeyNotFound);
     }
 
     // only recent
@@ -1374,7 +1374,7 @@ impl DoubleHashPage for Page {
         pkey: &[u8],
         val: &[u8],
         ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         let new_rec_size = Self::space_need(key, pkey, val) - SLOT_SIZE as u32;
 
         let slot = self.get_slot(slot_id).expect("Invalid slot_id");
@@ -1403,7 +1403,7 @@ impl DoubleHashPage for Page {
             if (self.free_space_with_compaction() as i32)
                 < (new_rec_size as i32) - (old_rec_size as i32)
             {
-                return Err(CuckooAccessMethodError::OutOfSpace);
+                return Err(HashTableAccessMethodError::OutOfSpace);
             }
             if new_rec_size > old_rec_size {
                 // log_warn!("new rec size: {:?}, old: {:?}", new_rec_size, old_rec_size);
@@ -1541,7 +1541,7 @@ impl DoubleHashPage for Page {
         let hashed_page_old_slot_count = self.slot_count();
 
         let mut invalid_idxes = std::collections::HashSet::new();
-        
+
         for slot_idx in (0..hashed_page_old_slot_count).rev() {
             let slot_start_offset_in_page = self.slot_offset(slot_idx) as usize;
             let slot_start_ptr = &self[slot_start_offset_in_page] as *const u8 as *const Slot;
@@ -1552,8 +1552,7 @@ impl DoubleHashPage for Page {
             }
         }
 
-        let hashed_page_new_slot_count =
-            hashed_page_old_slot_count - invalid_idxes.len() as u32;
+        let hashed_page_new_slot_count = hashed_page_old_slot_count - invalid_idxes.len() as u32;
         let mut i: u32 = 0;
         for j in 0..hashed_page_old_slot_count {
             if invalid_idxes.contains(&j) {
@@ -1574,12 +1573,12 @@ impl DoubleHashPage for Page {
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         // log_warn!("insert deleted at id: {}", self.get_id());
         let space_need = <Page as DoubleHashPage>::space_need(key, pkey, &vec![]);
         if space_need > self.free_space_with_compaction() {
             log_debug!("should not happen, detect before calling cuckoopage::insert");
-            return Err(CuckooAccessMethodError::OutOfSpace);
+            return Err(HashTableAccessMethodError::OutOfSpace);
         }
 
         if space_need > self.free_space_without_compaction() {
@@ -1801,7 +1800,7 @@ mod tests {
         let result = page.get(key, pkey, ts_query, true);
         assert!(matches!(
             result,
-            Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+            Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp)
         ));
 
         // Retrieve with correct timestamp
@@ -1861,7 +1860,10 @@ mod tests {
 
         // Attempt to insert one more entry
         let result = page.insert(key, pkey, ts, Timestamp::MAX, val);
-        assert!(matches!(result, Err(CuckooAccessMethodError::OutOfSpace)));
+        assert!(matches!(
+            result,
+            Err(HashTableAccessMethodError::OutOfSpace)
+        ));
     }
     #[test]
     fn test_update_same_size_value() {
@@ -1993,7 +1995,10 @@ mod tests {
         let result = page.check_and_update_at_slot_id(slot_id, key, pkey, &val_update, ts_update);
 
         // let result = page.update(key, pkey, ts_update, &val_update);
-        assert!(matches!(result, Err(CuckooAccessMethodError::OutOfSpace)));
+        assert!(matches!(
+            result,
+            Err(HashTableAccessMethodError::OutOfSpace)
+        ));
     }
 
     #[test]
@@ -2008,7 +2013,7 @@ mod tests {
 
         // Attempt to update a non-existent key
         let slot_id = page.get_slot_id(key, pkey, ts_update);
-        assert_eq!(slot_id.err(), Some(CuckooAccessMethodError::KeyNotFound));
+        assert_eq!(slot_id.err(), Some(HashTableAccessMethodError::KeyNotFound));
         // let result = page.check_and_update_at_slot_id(slot_id, key, pkey, &val_update, ts_update);
 
         // let result = page.update(key, pkey, ts_update, val_update);
@@ -2034,7 +2039,7 @@ mod tests {
         let slot_id = page.get_slot_id(key, pkey, ts_update);
         assert_eq!(
             slot_id.err(),
-            Some(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+            Some(HashTableAccessMethodError::KeyFoundButInvalidTimestamp)
         );
         // let result = page.update(key, pkey, ts_update, val_update);
         // assert!(matches!(
@@ -2072,7 +2077,7 @@ mod tests {
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
-            Some(CuckooAccessMethodError::KeyNotFound)
+            Some(HashTableAccessMethodError::KeyNotFound)
         );
     }
 
@@ -2104,7 +2109,7 @@ mod tests {
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
-            Some(CuckooAccessMethodError::KeyNotFound)
+            Some(HashTableAccessMethodError::KeyNotFound)
         );
     }
 
@@ -2136,7 +2141,7 @@ mod tests {
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
-            Some(CuckooAccessMethodError::KeyNotFound)
+            Some(HashTableAccessMethodError::KeyNotFound)
         );
     }
 
@@ -2168,7 +2173,7 @@ mod tests {
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
-            Some(CuckooAccessMethodError::KeyNotFound)
+            Some(HashTableAccessMethodError::KeyNotFound)
         );
     }
 
@@ -2203,7 +2208,7 @@ mod tests {
             let retrieved_res = page.get(key, pkey, *ts, true);
             assert_eq!(
                 retrieved_res.err(),
-                Some(CuckooAccessMethodError::KeyNotFound)
+                Some(HashTableAccessMethodError::KeyNotFound)
             );
         }
     }
@@ -2229,7 +2234,7 @@ mod tests {
         // let delete_result = page.delete(key, pkey, ts_query);
         assert_eq!(
             slot_id.err(),
-            Some(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
+            Some(HashTableAccessMethodError::KeyFoundButInvalidTimestamp)
         );
     }
 
@@ -2265,14 +2270,14 @@ mod tests {
         let retrieved_res = page.get(key, pkey1, ts1, true);
         assert_eq!(
             retrieved_res.err(),
-            Some(CuckooAccessMethodError::KeyNotFound)
+            Some(HashTableAccessMethodError::KeyNotFound)
         );
 
         // Retrieve with ts2
         let retrieved_res = page.get(key, pkey2, ts2, true);
         assert_eq!(
             retrieved_res.err(),
-            Some(CuckooAccessMethodError::KeyNotFound)
+            Some(HashTableAccessMethodError::KeyNotFound)
         );
     }
 
@@ -2417,7 +2422,7 @@ mod tests {
             page.check_and_update_at_slot_id(slot_id, &key, &pkey, &large_value, ts);
         assert_eq!(
             update_result.err(),
-            Some(CuckooAccessMethodError::OutOfSpace)
+            Some(HashTableAccessMethodError::OutOfSpace)
         )
         // let result = page.update(&key, &pkey, ts, &large_value);
     }
@@ -2717,12 +2722,8 @@ mod tests {
         }
 
         for i in 0..6 {
-            let delete_mark_result = <Page as DoubleHashPage>::get_delete_mark_slot_id(
-                &page,
-                &keys[i],
-                &pkey,
-                ts + 1,
-            );
+            let delete_mark_result =
+                <Page as DoubleHashPage>::get_delete_mark_slot_id(&page, &keys[i], &pkey, ts + 1);
             assert!(delete_mark_result.is_ok());
             assert_eq!(delete_mark_result.unwrap(), i as u32);
         }

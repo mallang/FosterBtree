@@ -4,10 +4,7 @@ use std::{
     sync::{atomic::AtomicU32, Arc, Mutex},
 };
 
-use crate::{
-    bp::MemPoolStatus, log_warn, 
-    page::PageId,
-};
+use crate::{bp::MemPoolStatus, log_warn, page::PageId};
 
 pub(crate) const HASHER_SEED: u32 = 233;
 pub const MAX_CUCKOO_ITERATE_COUNT: usize = 3;
@@ -78,8 +75,9 @@ impl Buckets {
     pub fn get_a_second_bucket_index(&self, key: &[u8], first_idx: usize) -> Option<usize> {
         let num_buckets = self.num_buckets;
 
-        let second_idx = (farmhash::hash32_with_seed(key, HASHER_SEED) % (num_buckets * 2)) as usize;
-        if second_idx != first_idx{
+        let second_idx =
+            (farmhash::hash32_with_seed(key, HASHER_SEED) % (num_buckets * 2)) as usize;
+        if second_idx != first_idx {
             return Some(second_idx);
         }
 
@@ -88,9 +86,8 @@ impl Buckets {
 
     pub fn get_all_bucket_index(&self, key: &[u8]) -> Vec<usize> {
         let num_buckets = self.num_buckets;
-        let mut bucket_idxs = vec![
-            (farmhash::hash32_with_seed(key, HASHER_SEED) % num_buckets) as usize
-        ];
+        let mut bucket_idxs =
+            vec![(farmhash::hash32_with_seed(key, HASHER_SEED) % num_buckets) as usize];
 
         bucket_idxs
     }

@@ -1,18 +1,15 @@
-use std::{fmt::Debug, sync::{atomic::AtomicU32, Arc}};
+use std::sync::Arc;
 
-use crate::{bp::{ContainerKey, MemPool}, mvcc_index::{Delta, MvccEntry, MvccIndex, Timestamp}, page::{Page, PageId, AVAILABLE_PAGE_SIZE}};
-
-use super::cuckoo_optimistic::mvcc_hash_join_cuckoo_table::ScanTsWithBucketsReadGuard;
-
-
-
+use crate::{
+    bp::MemPool,
+    mvcc_index::{MvccEntry, Timestamp},
+    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+};
 
 pub(crate) const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
 pub(crate) const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>();
 pub(crate) const BUCKET_ENTRY_SIZE: usize = PAGE_ID_SIZE;
 pub(crate) const DEFAULT_NUM_BUCKETS: usize = 256;
-
-
 
 mod access_err {
     use core::fmt;
@@ -20,7 +17,7 @@ mod access_err {
     use crate::bp::MemPoolStatus;
 
     #[derive(Debug, PartialEq)]
-    pub enum CuckooAccessMethodError {
+    pub enum HashTableAccessMethodError {
         KeyNotFound,
         KeyFoundButInvalidTimestamp, // For MVCC
         KeyDuplicate,
@@ -33,53 +30,55 @@ mod access_err {
         OutOfSpaceForUpdate(Vec<u8>),
         NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
         InvalidTimestamp,               // For MVCC
-        HashPageOutOfSpace(u32),          // new_hash_size
+        HashPageOutOfSpace(u32),        // new_hash_size
         AcquireLockFailed,              // for multi-page acq
         Other(String),
     }
 
-    impl fmt::Display for CuckooAccessMethodError {
+    impl fmt::Display for HashTableAccessMethodError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
-                CuckooAccessMethodError::KeyNotFound => write!(f, "Key not found"),
-                CuckooAccessMethodError::KeyFoundButInvalidTimestamp => {
+                HashTableAccessMethodError::KeyNotFound => write!(f, "Key not found"),
+                HashTableAccessMethodError::KeyFoundButInvalidTimestamp => {
                     write!(f, "Key found but invalid timestamp")
                 }
-                CuckooAccessMethodError::KeyDuplicate => write!(f, "Key duplicate"),
-                CuckooAccessMethodError::KeyNotInPageRange => write!(f, "Key not in page range"),
-                CuckooAccessMethodError::PageReadLatchFailed => write!(f, "Page read latch failed"),
-                CuckooAccessMethodError::PageWriteLatchFailed => write!(f, "Page write latch failed"),
-                CuckooAccessMethodError::RecordTooLarge => write!(f, "Record too large"),
-                CuckooAccessMethodError::MemPoolStatus(status) => {
+                HashTableAccessMethodError::KeyDuplicate => write!(f, "Key duplicate"),
+                HashTableAccessMethodError::KeyNotInPageRange => write!(f, "Key not in page range"),
+                HashTableAccessMethodError::PageReadLatchFailed => {
+                    write!(f, "Page read latch failed")
+                }
+                HashTableAccessMethodError::PageWriteLatchFailed => {
+                    write!(f, "Page write latch failed")
+                }
+                HashTableAccessMethodError::RecordTooLarge => write!(f, "Record too large"),
+                HashTableAccessMethodError::MemPoolStatus(status) => {
                     write!(f, "MemPool status: {:?}", status)
                 }
-                CuckooAccessMethodError::OutOfSpace => write!(f, "Out of space"),
-                CuckooAccessMethodError::OutOfSpaceForUpdate(key) => {
+                HashTableAccessMethodError::OutOfSpace => write!(f, "Out of space"),
+                HashTableAccessMethodError::OutOfSpaceForUpdate(key) => {
                     write!(f, "Out of space for update: {:?}", key)
                 }
-                CuckooAccessMethodError::NeedToUpdateMVCC(ts, val) => {
+                HashTableAccessMethodError::NeedToUpdateMVCC(ts, val) => {
                     write!(f, "Need to update MVCC: ts: {}, val: {:?}", ts, val)
                 }
-                CuckooAccessMethodError::InvalidTimestamp => write!(f, "Invalid timestamp"),
-                CuckooAccessMethodError::Other(msg) => write!(f, "{}", msg),
-                CuckooAccessMethodError::HashPageOutOfSpace(u32) => {
-                    write!(f, "cuckoo iterate failed!")
+                HashTableAccessMethodError::InvalidTimestamp => write!(f, "Invalid timestamp"),
+                HashTableAccessMethodError::Other(msg) => write!(f, "{}", msg),
+                HashTableAccessMethodError::HashPageOutOfSpace(u32) => {
+                    write!(f, "iterate failed!")
                 }
-                CuckooAccessMethodError::AcquireLockFailed => {
-                    write!(f, "cuckoo acquire page lock failed")
+                HashTableAccessMethodError::AcquireLockFailed => {
+                    write!(f, "acquire page lock failed")
                 }
             }
         }
     }
 
-    impl std::error::Error for CuckooAccessMethodError {}
-
+    impl std::error::Error for HashTableAccessMethodError {}
 }
 
-pub use access_err::CuckooAccessMethodError;
+pub use access_err::HashTableAccessMethodError;
 
-
-pub trait CuckooRecentHashTable<T: MemPool> : Sync + Send {
+pub trait RecentHashTable<T: MemPool>: Sync + Send {
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
     fn insert(
         &self,
@@ -87,34 +86,34 @@ pub trait CuckooRecentHashTable<T: MemPool> : Sync + Send {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<Option<Timestamp>, CuckooAccessMethodError>;
+    ) -> Result<Option<Timestamp>, HashTableAccessMethodError>;
     fn get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError>;
+    ) -> Result<Vec<u8>, HashTableAccessMethodError>;
     fn get_all(
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError>;
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError>;
     fn update(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
     fn delete(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
 }
 
-pub trait CuckooHistoryHashTable<T: MemPool> {
+pub trait HistoryHashTable<T: MemPool> {
     fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
     fn insert(
         &self,
@@ -123,26 +122,26 @@ pub trait CuckooHistoryHashTable<T: MemPool> {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), CuckooAccessMethodError>;
+    ) -> Result<(), HashTableAccessMethodError>;
     fn get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError>;
+    ) -> Result<Vec<u8>, HashTableAccessMethodError>;
     fn get_all(
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError>;
-    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError>;
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError>;
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), HashTableAccessMethodError>;
     fn insert_deleted(
         &self,
         key: &[u8],
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<(), CuckooAccessMethodError>;
+    ) -> Result<(), HashTableAccessMethodError>;
 }
 
 pub trait RecentHistoryTable<T: MemPool> {
@@ -161,7 +160,7 @@ pub trait RecentHistoryTable<T: MemPool> {
     <Recent Bucket Num> <History Bucket Num> [Recent Page Id ...] [History Page Id...]
 
 */
-pub(crate) trait MvccHashJoinCuckooMetaPage {
+pub(crate) trait MvccHashJoinMetaPage {
     /// Initializes the meta page with the specified number of buckets.
     fn init(&mut self, num_buckets: usize);
     fn set_history_bucket_num(&mut self, num_buckets: usize);
@@ -184,7 +183,7 @@ pub(crate) trait MvccHashJoinCuckooMetaPage {
     fn rehash_update_history(&mut self, entries: &[PageId]);
 }
 
-impl MvccHashJoinCuckooMetaPage for Page {
+impl MvccHashJoinMetaPage for Page {
     fn init(&mut self, num_buckets: usize) {
         let required_size = BUCKET_NUM_SIZE * 2 + (num_buckets * BUCKET_ENTRY_SIZE) * 2;
         assert!(

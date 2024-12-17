@@ -15,7 +15,10 @@ use crate::{
     log_debug,
     log_warn,
     mvcc_index::{
-        hashtable_mu::hash_join_table_common::{CuckooAccessMethodError, CuckooHistoryHashTable, CuckooRecentHashTable, MvccHashJoinCuckooMetaPage, RecentHistoryTable},
+        hashtable_mu::hash_join_table_common::{
+            HashTableAccessMethodError, HistoryHashTable, MvccHashJoinMetaPage, RecentHashTable,
+            RecentHistoryTable,
+        },
         MvccEntry, Timestamp,
     },
     page::{Page, PageId},
@@ -24,8 +27,8 @@ use crate::{
 /* --------------------------- Scanner START ---------------------------------- */
 
 use super::{
-    mvcc_hash_join_cuckoo_common::{arcrwlock::*, BucketEntry, Buckets},
-    mvcc_hash_join_page::MvccHashJoinCuckooPage,
+    two_hasher_common::{arcrwlock::*, BucketEntry, Buckets},
+    two_hasher_page::MvccHashJoinCuckooPage,
 };
 
 pub struct CuckooHashJoinTableScanner<T: MemPool> {
@@ -330,18 +333,23 @@ pub struct CuckooHashTable<T: MemPool> {
     rehash_mutex: Mutex<()>, // re-hash only once
 }
 
-
 /// Recent & History basic functions
 impl<T: MemPool> CuckooHashTable<T> {
-
-    pub fn scan(self: &Arc<Self>, ts: Timestamp) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> {
+    pub fn scan(
+        self: &Arc<Self>,
+        ts: Timestamp,
+    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> {
         let buckets = self.rwlock.read_arc();
         let ts = if ts != Timestamp::MAX { Some(ts) } else { None };
         // self.gen_scan_iterator(TransactionId::new(), ts, buckets)
         self.gen_scan_iterator(ts, buckets)
     }
 
-    pub fn scan_key(self: &Arc<Self>, ts: Timestamp, key: &[u8]) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> {
+    pub fn scan_key(
+        self: &Arc<Self>,
+        ts: Timestamp,
+        key: &[u8],
+    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> {
         let buckets = self.rwlock.read_arc();
         // self.gen_scan_key_iterator(TransactionId::new(), ts, buckets, Some(key.to_vec()))
         self.gen_scan_key_iterator(ts, buckets, Some(key.to_vec()))
@@ -519,7 +527,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<Option<Timestamp>, CuckooAccessMethodError> {
+    ) -> Result<Option<Timestamp>, HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
         let bucket_num = buckets.get_bucket_num();
 
@@ -531,7 +539,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         let acq_result = self.try_acq_write_page(page_f_key);
         let mut inserted_page = match acq_result {
             None => {
-                return Err(CuckooAccessMethodError::AcquireLockFailed);
+                return Err(HashTableAccessMethodError::AcquireLockFailed);
             }
             Some(p) => {
                 // lock_manager_guards.push(guard);
@@ -590,7 +598,9 @@ impl<T: MemPool> CuckooHashTable<T> {
                 }
             }
         } else {
-            return Err(CuckooAccessMethodError::HashPageOutOfSpace(bucket_num * 2));
+            return Err(HashTableAccessMethodError::HashPageOutOfSpace(
+                bucket_num * 2,
+            ));
             // rehash
         }
     }
@@ -617,7 +627,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
         let bucket_num = buckets.get_bucket_num();
         // log_warn!("[history::insert_inner] insert key: {:?}", key);
@@ -629,7 +639,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         // try to acquire lock
         let mut inserted_page = match self.try_acq_write_page(page_f_key) {
             None => {
-                return Err(CuckooAccessMethodError::AcquireLockFailed); // REDO
+                return Err(HashTableAccessMethodError::AcquireLockFailed); // REDO
             }
             Some(x) => x,
         };
@@ -668,7 +678,9 @@ impl<T: MemPool> CuckooHashTable<T> {
                 }
             }
         } else {
-            return Err(CuckooAccessMethodError::HashPageOutOfSpace(bucket_num * 2));
+            return Err(HashTableAccessMethodError::HashPageOutOfSpace(
+                bucket_num * 2,
+            ));
             // rehash
         }
     }
@@ -679,7 +691,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
         let bucket_num = buckets.get_bucket_num();
         // log_warn!("[history::insert_inner] insert key: {:?}", key);
@@ -691,7 +703,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         // try to acquire lock
         let mut inserted_page = match self.try_acq_write_page(page_f_key) {
             None => {
-                return Err(CuckooAccessMethodError::AcquireLockFailed); // REDO
+                return Err(HashTableAccessMethodError::AcquireLockFailed); // REDO
             }
             Some(x) => x,
         };
@@ -730,7 +742,9 @@ impl<T: MemPool> CuckooHashTable<T> {
                 }
             }
         } else {
-            return Err(CuckooAccessMethodError::HashPageOutOfSpace(bucket_num * 2));
+            return Err(HashTableAccessMethodError::HashPageOutOfSpace(
+                bucket_num * 2,
+            ));
             // rehash
         }
     }
@@ -862,7 +876,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             .iter()
             .map(|x| x.page_id())
             .collect::<Vec<_>>();
-        <Page as MvccHashJoinCuckooMetaPage>::rehash_update_recent(&mut *meta_page, &new_page_ids);
+        <Page as MvccHashJoinMetaPage>::rehash_update_recent(&mut *meta_page, &new_page_ids);
         return true;
     }
 
@@ -990,7 +1004,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             .iter()
             .map(|x| x.page_id())
             .collect::<Vec<_>>();
-        <Page as MvccHashJoinCuckooMetaPage>::rehash_update_history(&mut *meta_page, &new_page_ids);
+        <Page as MvccHashJoinMetaPage>::rehash_update_history(&mut *meta_page, &new_page_ids);
         return true;
     }
 
@@ -1006,7 +1020,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
 
         let indexes = buckets.get_all_bucket_index(key);
@@ -1019,7 +1033,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let acq_result = self.try_acq_read_page(page_f_key);
             match acq_result {
                 None => {
-                    return Err(CuckooAccessMethodError::AcquireLockFailed);
+                    return Err(HashTableAccessMethodError::AcquireLockFailed);
                 }
                 Some(page) => {
                     pages.push(page);
@@ -1034,18 +1048,18 @@ impl<T: MemPool> CuckooHashTable<T> {
                 Ok(val) => {
                     return Ok(val);
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
+                Err(HashTableAccessMethodError::KeyNotFound) => {
                     continue;
                 }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
                 Err(e) => {
                     panic!("Should not happen! error: {:?}", e);
                 }
             }
         }
-        Err(CuckooAccessMethodError::KeyNotFound)
+        Err(HashTableAccessMethodError::KeyNotFound)
     }
 
     /*
@@ -1059,7 +1073,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
 
         let indexes = buckets.get_all_bucket_index(key);
@@ -1072,7 +1086,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let acq_result = self.try_acq_read_page(page_f_key);
             match acq_result {
                 None => {
-                    return Err(CuckooAccessMethodError::AcquireLockFailed);
+                    return Err(HashTableAccessMethodError::AcquireLockFailed);
                 }
                 Some(page) => {
                     pages.push(page);
@@ -1087,7 +1101,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 Ok(val) => {
                     return Ok(val);
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
+                Err(HashTableAccessMethodError::KeyNotFound) => {
                     continue;
                 }
                 Err(e) => {
@@ -1095,7 +1109,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                 }
             }
         }
-        Err(CuckooAccessMethodError::KeyNotFound)
+        Err(HashTableAccessMethodError::KeyNotFound)
     }
 
     /*
@@ -1108,7 +1122,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
 
         let indexes = buckets.get_all_bucket_index(key);
@@ -1121,7 +1135,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let acq_result = self.try_acq_read_page(page_f_key);
             match acq_result {
                 None => {
-                    return Err(CuckooAccessMethodError::AcquireLockFailed);
+                    return Err(HashTableAccessMethodError::AcquireLockFailed);
                 }
                 Some(page) => {
                     pages.push(page);
@@ -1160,7 +1174,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
         let bucket_num = buckets.get_bucket_num();
 
@@ -1174,7 +1188,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let acq_result = self.try_acq_write_page(page_f_key);
             match acq_result {
                 None => {
-                    return Err(CuckooAccessMethodError::AcquireLockFailed);
+                    return Err(HashTableAccessMethodError::AcquireLockFailed);
                 }
                 Some(page) => {
                     pages.push(page);
@@ -1198,19 +1212,21 @@ impl<T: MemPool> CuckooHashTable<T> {
                         Ok(old_res) => {
                             return Ok(old_res);
                         }
-                        Err(CuckooAccessMethodError::OutOfSpace) => {
-                            return Err(CuckooAccessMethodError::HashPageOutOfSpace(bucket_num * 2));
+                        Err(HashTableAccessMethodError::OutOfSpace) => {
+                            return Err(HashTableAccessMethodError::HashPageOutOfSpace(
+                                bucket_num * 2,
+                            ));
                         }
                         Err(x) => {
                             panic!("should not happen for that error! {:?}", x);
                         }
                     }
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
+                Err(HashTableAccessMethodError::KeyNotFound) => {
                     continue;
                 }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
                 Err(_) => {
                     panic!("should not happen!");
@@ -1218,7 +1234,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             };
         }
 
-        return Err(CuckooAccessMethodError::KeyNotFound);
+        return Err(HashTableAccessMethodError::KeyNotFound);
     }
 
     /*
@@ -1234,7 +1250,7 @@ impl<T: MemPool> CuckooHashTable<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         let buckets = self.rwlock.read();
 
         let indexes: Vec<usize> = buckets.get_all_bucket_index(key);
@@ -1247,7 +1263,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             let acq_result = self.try_acq_write_page(page_f_key);
             match acq_result {
                 None => {
-                    return Err(CuckooAccessMethodError::AcquireLockFailed);
+                    return Err(HashTableAccessMethodError::AcquireLockFailed);
                 }
                 Some(p) => {
                     page_vec.push(p);
@@ -1265,7 +1281,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                     // log_warn!("idx: {:?}, found!!!", idx);
                     continue;
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
+                Err(HashTableAccessMethodError::KeyNotFound) => {
                     let delete_marker_space_need =
                         <Page as MvccHashJoinCuckooPage>::space_need(key, pkey, &vec![]);
                     let free_without_compaction =
@@ -1276,7 +1292,7 @@ impl<T: MemPool> CuckooHashTable<T> {
                         <Page as MvccHashJoinCuckooPage>::free_space_with_compaction(&**write_page);
                     if free_without_compaction < delete_marker_space_need {
                         if free_with_compaction < delete_marker_space_need {
-                            return Err(CuckooAccessMethodError::HashPageOutOfSpace(
+                            return Err(HashTableAccessMethodError::HashPageOutOfSpace(
                                 buckets.num_buckets * 2,
                             ));
                         }
@@ -1284,8 +1300,8 @@ impl<T: MemPool> CuckooHashTable<T> {
                     // log_warn!("idx: {:?}, NOT found!!!", idx);
                     continue;
                 }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
                 Err(_) => {
                     panic!("should not happen!");
@@ -1329,7 +1345,7 @@ impl<T: MemPool> CuckooHashTable<T> {
             }
             return Ok(get_old_res);
         } else {
-            return Err(CuckooAccessMethodError::KeyNotFound);
+            return Err(HashTableAccessMethodError::KeyNotFound);
         }
     }
 
@@ -1391,7 +1407,7 @@ impl<T: MemPool> CuckooHashTable<T> {
     }
 }
 
-impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
+impl<T: MemPool> RecentHashTable<T> for CuckooHashTable<T> {
     fn get_all_bucket_page_ids(&self) -> Vec<PageId> {
         let buckets = self.rwlock.read();
         let ret = buckets
@@ -1407,7 +1423,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<Option<Timestamp>, CuckooAccessMethodError> {
+    ) -> Result<Option<Timestamp>, HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1415,7 +1431,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                 Ok(delete_marker) => {
                     return Ok(delete_marker);
                 }
-                Err(CuckooAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
+                Err(HashTableAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
                     // rehash
 
                     // log_warn!("BEFORE REHASH");
@@ -1428,7 +1444,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
 
                     continue;
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_debug!("acquire write lock of page failed, re-do");
                     attempts += 1;
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1445,7 +1461,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1453,13 +1469,13 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                 Ok(val) => {
                     return Ok(val);
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    return Err(CuckooAccessMethodError::KeyNotFound);
+                Err(HashTableAccessMethodError::KeyNotFound) => {
+                    return Err(HashTableAccessMethodError::KeyNotFound);
                 }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_debug!("acquire read lock of pages failed, re-do");
                     attempts += 1;
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1476,7 +1492,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1484,7 +1500,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                 Ok(val) => {
                     return Ok(val);
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_debug!("acquire read lock of pages failed, re-do");
                     attempts += 1;
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1511,7 +1527,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1519,7 +1535,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                 Ok((old_ts, old_val)) => {
                     return Ok((old_ts, old_val));
                 }
-                Err(CuckooAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
+                Err(HashTableAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
                     // rehash
                     self.rehash_recent(new_hash_size);
                     log_warn!("Page insert out of space, re-hash");
@@ -1527,13 +1543,13 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                     // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
                     continue;
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    return Err(CuckooAccessMethodError::KeyNotFound);
+                Err(HashTableAccessMethodError::KeyNotFound) => {
+                    return Err(HashTableAccessMethodError::KeyNotFound);
                 }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_debug!("acquire write lock of page failed, re-do");
                     attempts += 1;
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1551,7 +1567,7 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), CuckooAccessMethodError> {
+    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1559,19 +1575,19 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
                 Ok(old_res) => {
                     return Ok(old_res);
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    return Err(CuckooAccessMethodError::KeyNotFound);
+                Err(HashTableAccessMethodError::KeyNotFound) => {
+                    return Err(HashTableAccessMethodError::KeyNotFound);
                 }
-                Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp) => {
-                    return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
+                Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp) => {
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_debug!("acquire write lock of page failed, re-do");
                     attempts += 1;
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
                     continue;
                 }
-                Err(CuckooAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
+                Err(HashTableAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
                     self.rehash_recent(new_hash_size);
                     // log_warn!("Page insert out of space, re-hash");
                     log_debug!("Page delete out of space, re-hash");
@@ -1585,11 +1601,9 @@ impl<T: MemPool> CuckooRecentHashTable<T> for CuckooHashTable<T> {
             }
         }
     }
-
-
 }
 
-impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
+impl<T: MemPool> HistoryHashTable<T> for CuckooHashTable<T> {
     fn insert(
         &self,
         key: &[u8],
@@ -1597,7 +1611,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         start_ts: Timestamp,
         end_ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1606,7 +1620,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
                     // log_warn!("history table insert ok!");
                     return Ok(());
                 }
-                Err(CuckooAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
+                Err(HashTableAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
                     // rehash
                     self.rehash_history(new_hash_size);
                     // log_warn!("Page insert out of space, re-hash");
@@ -1615,7 +1629,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
                     // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
                     continue;
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_warn!("acquire write lock of page failed, re-do");
                     log_debug!("acquire write lock of page failed, re-do");
                     attempts += 1;
@@ -1642,7 +1656,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<u8>, CuckooAccessMethodError> {
+    ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1650,10 +1664,10 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
                 Ok(val) => {
                     return Ok(val);
                 }
-                Err(CuckooAccessMethodError::KeyNotFound) => {
-                    return Err(CuckooAccessMethodError::KeyNotFound);
+                Err(HashTableAccessMethodError::KeyNotFound) => {
+                    return Err(HashTableAccessMethodError::KeyNotFound);
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_debug!("acquire read lock of pages failed, re-do");
                     attempts += 1;
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1670,7 +1684,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         &self,
         key: &[u8],
         ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CuckooAccessMethodError> {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1678,7 +1692,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
                 Ok(val) => {
                     return Ok(val);
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_debug!("acquire read lock of pages failed, re-do");
                     attempts += 1;
                     std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
@@ -1701,7 +1715,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         ret
     }
 
-    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), CuckooAccessMethodError> {
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), HashTableAccessMethodError> {
         todo!()
     }
 
@@ -1711,7 +1725,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
         pkey: &[u8],
         start_ts: Timestamp,
         end_ts: Timestamp,
-    ) -> Result<(), CuckooAccessMethodError> {
+    ) -> Result<(), HashTableAccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -1720,7 +1734,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
                     // log_warn!("history table insert ok!");
                     return Ok(());
                 }
-                Err(CuckooAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
+                Err(HashTableAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
                     // rehash
                     self.rehash_recent(new_hash_size);
                     // log_warn!("Page insert out of space, re-hash");
@@ -1729,7 +1743,7 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
                     // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
                     continue;
                 }
-                Err(CuckooAccessMethodError::AcquireLockFailed) => {
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
                     log_warn!("acquire write lock of page failed, re-do");
                     log_debug!("acquire write lock of page failed, re-do");
                     attempts += 1;
@@ -1742,5 +1756,4 @@ impl<T: MemPool> CuckooHistoryHashTable<T> for CuckooHashTable<T> {
             }
         }
     }
-
 }

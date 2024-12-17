@@ -4,10 +4,7 @@ use std::{
     sync::{atomic::AtomicU32, Arc, Mutex},
 };
 
-use crate::{
-    bp::MemPoolStatus,
-    page::PageId,
-};
+use crate::{bp::MemPoolStatus, page::PageId};
 
 pub(crate) const HASHER_KEYS: [(u64, u64); 2] = [(0, 0), (1, 1)];
 
@@ -128,7 +125,6 @@ impl Buckets {
         bucket_idxs
     }
 }
-
 
 pub mod arcrwlock {
     use lock_api::GuardSend;
