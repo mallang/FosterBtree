@@ -328,8 +328,8 @@ fn check_consistency_hash_join_table(
     let mut hjt_entries: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
     let scanner = hash_join_table.scan(u64::MAX)?;
     for entry in scanner {
-        hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
-        // hjt_entries.insert((entry.0, entry.1), entry.2);
+        // hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        hjt_entries.insert((entry.0, entry.1), entry.2);
     }
 
     // Compare expected data with HashJoinTable entries
@@ -433,7 +433,8 @@ fn check_consistency_between_hash_join_and_hash_map(
     let mut hjt_entries: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
     let scanner = hash_join_table.scan(u64::MAX)?;
     for entry in scanner {
-        hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        // hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        hjt_entries.insert((entry.0, entry.1), entry.2);
     }
 
     // Compare entries in Rust HashMap with entries in HashJoinTable
@@ -592,7 +593,8 @@ fn perform_scans_and_check(
         let scanner = hash_join_table.scan(effective_ts)?;
         let mut scan_results: HashSet<(Vec<u8>, Vec<u8>, Vec<u8>)> = HashSet::new();
         for entry in scanner {
-            scan_results.insert((entry.key.clone(), entry.pkey.clone(), entry.value.clone()));
+            // scan_results.insert((entry.key.clone(), entry.pkey.clone(), entry.value.clone()));
+            scan_results.insert((entry.0, entry.1, entry.2));
         }
 
         // Convert expected entries to a set
