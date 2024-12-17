@@ -43,6 +43,9 @@ async_write = ["io-uring", "libc"]
 # Async IO with prefetching
 new_async_write = ["io-uring", "libc"]
 
+# entries in page are no-order
+unsorted_page = []
+
 [dependencies]
 tempfile = "3.8"
 rand = "0.8"

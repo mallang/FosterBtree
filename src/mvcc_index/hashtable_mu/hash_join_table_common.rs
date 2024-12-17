@@ -135,6 +135,8 @@ pub trait HistoryHashTable<T: MemPool> {
         ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError>;
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), HashTableAccessMethodError>;
+
+    #[allow(unused)]
     fn insert_deleted(
         &self,
         key: &[u8],

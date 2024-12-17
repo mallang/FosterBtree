@@ -7,7 +7,6 @@ use std::{
 use crate::{bp::MemPoolStatus, log_warn, page::PageId};
 
 pub(crate) const HASHER_SEED: u32 = 233;
-pub const MAX_CUCKOO_ITERATE_COUNT: usize = 3;
 
 pub struct BucketEntry {
     page_id: PageId,

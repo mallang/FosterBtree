@@ -1,19 +1,14 @@
 use std::{
     collections::HashMap,
-    marker::PhantomData,
-    sync::{atomic::AtomicU32, Arc, Mutex, RwLock},
+    sync::{atomic::AtomicU32, Arc},
 };
 
 use crate::{
     bp::{ContainerKey, MemPool},
     log_debug, log_warn,
     mvcc_index::{
-        hashtable_mu::{
-            hash_join_table_common::{
-                HashTableAccessMethodError, HistoryHashTable, RecentHashTable, RecentHistoryTable,
-                DEFAULT_NUM_BUCKETS,
-            },
-            mvcc_hash_join_table::CuckooHashJoinTableMergeScanner,
+        hashtable_mu::hash_join_table_common::{
+            HashTableAccessMethodError, HistoryHashTable, RecentHashTable, RecentHistoryTable,
         },
         Delta, MvccEntry, Timestamp,
     },

@@ -110,19 +110,17 @@ impl<T: MemPool> Iterator for DoubleHashSubTableScanner<T> {
                         bucket_entry.page_id(),
                         bucket_entry.frame_id(),
                     );
-                    let cuckoo_page = self.table.read_page(pfkey);
+                    let page = self.table.read_page(pfkey);
 
-                    let slot_cnt = <Page as DoubleHashPage>::slot_count(&*cuckoo_page);
+                    let slot_cnt = <Page as DoubleHashPage>::slot_count(&*page);
                     for slot_id in 0..slot_cnt {
-                        let slot =
-                            <Page as DoubleHashPage>::get_slot(&*cuckoo_page, slot_id).unwrap();
+                        let slot = <Page as DoubleHashPage>::get_slot(&*page, slot_id).unwrap();
                         if slot.is_mark_deleted() {
                             continue;
                         }
                         let (k, pk, v, sts, ets) =
                             <Page as DoubleHashPage>::get_key_pkey_val_ts_with_slot_id(
-                                &*cuckoo_page,
-                                slot_id,
+                                &*page, slot_id,
                             );
                         if self.scan_all_flag
                             || sts <= self.ts
@@ -905,7 +903,7 @@ impl<T: MemPool> DoubleHashSubTable<T> {
             }
         };
 
-        let get_result = <Page as DoubleHashPage>::get(&*read_page, key, pkey, ts, false);
+        let get_result = <Page as DoubleHashPage>::history_get(&*read_page, key, pkey, ts);
         match get_result {
             Ok(val) => {
                 return Ok(val);
@@ -987,7 +985,7 @@ impl<T: MemPool> DoubleHashSubTable<T> {
         };
 
         // Attempt to retrieve the value from the current page
-        match DoubleHashPage::get_slot_id(&*write_page, key, pkey, ts) {
+        match <Page as DoubleHashPage>::get_slot_id(&*write_page, key, pkey, ts) {
             Ok(slot_id) => {
                 // Value found
                 match DoubleHashPage::check_and_update_at_slot_id(

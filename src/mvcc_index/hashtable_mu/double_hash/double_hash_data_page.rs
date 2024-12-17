@@ -480,15 +480,11 @@ pub trait DoubleHashPage {
         val: &[u8],
     ) -> Result<(), HashTableAccessMethodError>;
 
-    /// used both in recent and history \
-    /// if recent => find one matched(key, pkey) and either return OK or return Err(Ts) \
-    /// if history => find if ts not match, then continue;
-    fn get(
+    fn history_get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-        is_recent_get: bool,
     ) -> Result<Vec<u8>, HashTableAccessMethodError>;
 
     fn recent_get(
@@ -543,6 +539,7 @@ pub trait DoubleHashPage {
     ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
 
     // ONLY RECENT
+    #[allow(unused)]
     fn get_delete_mark_slot_id(
         &self,
         key: &[u8],
@@ -568,10 +565,132 @@ pub trait DoubleHashPage {
     fn set_slot(&mut self, slot_id: u32, slot: &Slot);
     fn get_slot(&self, slot_id: u32) -> Option<Slot>;
 
+    #[cfg(feature = "unsorted_page")]
+    fn find_k_pk_match_slot_idx_recent_get(&self, key: &[u8], pkey: &[u8]) -> Option<usize> {
+        let slots_slice = self.get_slot_slice(0);
+
+        let key_prefix_len = SLOT_KEY_PREFIX_SIZE.min(key.len());
+        let pkey_prefix_len = SLOT_PKEY_PREFIX_SIZE.min(pkey.len());
+
+        let remain_key = if key.len() > SLOT_KEY_PREFIX_SIZE {
+            &key[SLOT_KEY_PREFIX_SIZE..]
+        } else {
+            &[]
+        };
+
+        let remain_pkey = if pkey.len() > SLOT_PKEY_PREFIX_SIZE {
+            &pkey[SLOT_PKEY_PREFIX_SIZE..]
+        } else {
+            &[]
+        };
+
+        let cmp_seek_key = (
+            &key[..key_prefix_len],
+            remain_key,
+            &pkey[..pkey_prefix_len],
+            remain_pkey,
+        );
+
+        let is_slot_k_pk_match_fn = |seek_key: &(&[u8], &[u8], &[u8], &[u8]),
+                                     slot_key: &(&[u8], &[u8], &[u8], &[u8])|
+         -> bool {
+            return slot_key.0.eq(seek_key.0)
+                && slot_key.1.eq(seek_key.1)
+                && slot_key.2.eq(seek_key.2)
+                && slot_key.3.eq(seek_key.3);
+        };
+
+        let slot_idx = {
+            let mut tmp_idx = None;
+            for (idx, slot) in slots_slice.iter().enumerate() {
+                let (slot_remain_key, slot_remain_pkey) = self.get_ref_key_pkey_with_slot(slot);
+                let slot_key = (
+                    slot.key_prefix(),
+                    slot_remain_key,
+                    slot.pkey_prefix(),
+                    slot_remain_pkey,
+                );
+                if is_slot_k_pk_match_fn(&cmp_seek_key, &slot_key) {
+                    tmp_idx = Some(idx);
+                    break;
+                }
+            }
+            tmp_idx
+        };
+
+        slot_idx
+    }
+
+    #[cfg(feature = "unsorted_page")]
+    fn find_slot_idx(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<usize> {
+        let slots_slice = self.get_slot_slice(0);
+
+        let key_prefix_len = SLOT_KEY_PREFIX_SIZE.min(key.len());
+        let pkey_prefix_len = SLOT_PKEY_PREFIX_SIZE.min(pkey.len());
+
+        let remain_key = if key.len() > SLOT_KEY_PREFIX_SIZE {
+            &key[SLOT_KEY_PREFIX_SIZE..]
+        } else {
+            &[]
+        };
+
+        let remain_pkey = if pkey.len() > SLOT_PKEY_PREFIX_SIZE {
+            &pkey[SLOT_PKEY_PREFIX_SIZE..]
+        } else {
+            &[]
+        };
+
+        let cmp_seek_key = (
+            &key[..key_prefix_len],
+            remain_key,
+            &pkey[..pkey_prefix_len],
+            remain_pkey,
+            ts,
+        );
+
+        let is_slot_key_match_fn =
+            |seek_key: &(&[u8], &[u8], &[u8], &[u8], Timestamp),
+             slot_key: &(&[u8], &[u8], &[u8], &[u8], Timestamp, Timestamp)|
+             -> bool {
+                return slot_key.0.eq(seek_key.0)
+                    && slot_key.1.eq(seek_key.1)
+                    && slot_key.2.eq(seek_key.2)
+                    && slot_key.3.eq(seek_key.3)
+                    && slot_key.4 /* slot start ts */ <= seek_key.4
+                    && slot_key.5 /* slot end ts */ > seek_key.4;
+            };
+
+        let slot_idx = {
+            let mut tmp_idx = None;
+            for (idx, slot) in slots_slice.iter().enumerate() {
+                let (slot_remain_key, slot_remain_pkey) = self.get_ref_key_pkey_with_slot(slot);
+                let slot_key = (
+                    slot.key_prefix(),
+                    slot_remain_key,
+                    slot.pkey_prefix(),
+                    slot_remain_pkey,
+                    slot.start_ts(),
+                    slot.end_ts(),
+                );
+                if is_slot_key_match_fn(&cmp_seek_key, &slot_key) {
+                    tmp_idx = Some(idx);
+                    break;
+                }
+            }
+            tmp_idx
+        };
+
+        slot_idx
+    }
+
     /// find the first slot idx >= given (key, pkey, ts) \
     /// if (key,pkey) of slot is the same, then return the \
     /// first idx whose end_ts is larger than seek_ts \
     /// if no slot >=, THEN return None
+    ///
+    /// USED in insert, get, RECENT update, RECENT delete
+    ///
+    #[cfg(not(feature = "unsorted_page"))]
     fn find_slot_idx(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<usize> {
         let slots_slice = self.get_slot_slice(0);
 
@@ -627,14 +746,13 @@ pub trait DoubleHashPage {
 
         let slot_idx = slots_slice.binary_search_by(|slot| {
             // key > pkey > ts
-            let (slot_remain_key, slot_remain_pkey, slot_end_ts) =
-                self.get_key_pkey_end_ts_with_slot(&slot);
+            let (slot_remain_key, slot_remain_pkey) = self.get_ref_key_pkey_with_slot(&slot);
             let slot_key = (
                 slot.key_prefix(),
                 slot_remain_key,
                 slot.pkey_prefix(),
                 slot_remain_pkey,
-                slot_end_ts,
+                slot.end_ts(),
             );
             cmp_slot_key(&cmp_seek_key, &slot_key)
         });
@@ -645,13 +763,6 @@ pub trait DoubleHashPage {
             return None;
         }
         Some(slot_idx)
-        // let slot = self.slot(slot_idx as u32).unwrap();
-        // let (slot_key, slot_pkey, slot_val,  slot_start_ts, slot_end_ts) = self.get_key_pkey_val_ts_with_slot(&slot);
-        // if slot_key == key && slot_pkey == pkey && ts >= slot_start_ts && ts < slot_end_ts {
-        //     Some(slot_idx)
-        // } else {
-        //     None
-        // }
     }
 
     fn header(&self) -> Header {
@@ -713,7 +824,7 @@ pub trait DoubleHashPage {
 
     /// return: key, pkey, value, start_ts, end_ts \
     /// WARN: pay attention to when slot is mark deleted
-    fn get_key_pkey_end_ts_with_slot<'a>(&'a self, slot: &Slot) -> (&'a [u8], &'a [u8], Timestamp) {
+    fn get_ref_key_pkey_with_slot<'a>(&'a self, slot: &Slot) -> (&'a [u8], &'a [u8]) {
         let ts = slot.end_ts();
 
         let offset = slot.offset() as usize;
@@ -725,7 +836,7 @@ pub trait DoubleHashPage {
         let remain_key_bytes = self.read_bytes(offset, remain_key_size);
         let remain_pkey_bytes = self.read_bytes(offset + remain_key_size, remain_pkey_size);
 
-        (remain_key_bytes, remain_pkey_bytes, ts)
+        (remain_key_bytes, remain_pkey_bytes)
     }
 
     fn get_value_with_slot_id(&self, slot_id: u32) -> Vec<u8> {
@@ -865,6 +976,7 @@ pub trait DoubleHashPage {
         // );
     }
 
+    /// used in rehash
     fn insert_at_slot_id(
         &mut self,
         key: &[u8],
@@ -922,7 +1034,7 @@ impl DoubleHashPage for Page {
         let space_need = <Page as DoubleHashPage>::space_need(key, pkey, val);
 
         if space_need > self.free_space_with_compaction() {
-            log_debug!("should not happen, detect before calling cuckoopage::insert");
+            log_debug!("should not happen, detect before calling doublehashpage::insert");
             return Err(HashTableAccessMethodError::OutOfSpace);
         }
         if space_need > self.free_space_without_compaction() {
@@ -942,11 +1054,15 @@ impl DoubleHashPage for Page {
 
         let slot_offset = self.slot_offset(self.slot_count());
         if rec_offset < slot_offset + SLOT_SIZE as u32 {
-            log_debug!("should not happen, detect before calling cuckoopage::insert");
+            log_debug!("should not happen, detect before calling doublehashpage::insert");
             return Err(HashTableAccessMethodError::OutOfSpace);
         }
 
         let slot_count = self.slot_count();
+        #[cfg(feature = "unsorted_page")]
+        let slot_id = { slot_count };
+
+        #[cfg(not(feature = "unsorted_page"))]
         let slot_id = {
             if let Some(idx) = self.find_slot_idx(key, pkey, start_ts) {
                 idx as u32
@@ -980,13 +1096,14 @@ impl DoubleHashPage for Page {
         Ok(())
     }
 
-    fn recent_get(
+    fn history_get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<u8>, HashTableAccessMethodError> {
         let slot_idx = self.find_slot_idx(key, pkey, ts);
+        #[cfg(not(feature = "unsorted_page"))]
         if let Some(slot_idx) = slot_idx {
             let slot_idx = slot_idx as u32;
             // log_warn!("get idx: {}\n", slot_idx);
@@ -1028,56 +1145,70 @@ impl DoubleHashPage for Page {
                         }
                     } else {
                         // find but mismatch ts
-                        return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
+                        return Err(HashTableAccessMethodError::KeyNotFound);
                     }
                 }
             }
         } else {
             // not found
         }
+
+        #[cfg(feature = "unsorted_page")]
+        if let Some(slot_idx) = slot_idx {
+            let slot_idx = slot_idx as u32;
+            let slot = self.get_slot(slot_idx).unwrap();
+            let val = self.get_value_with_slot(&slot);
+            if !slot.is_mark_deleted() {
+                // find and not deleted
+                return Ok(val);
+            } else {
+                // slot deleted
+                return Err(HashTableAccessMethodError::KeyNotFound);
+            }
+        }
+
         return Err(HashTableAccessMethodError::KeyNotFound);
     }
 
-    fn get(
+    fn recent_get(
         &self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
-        is_recent_get: bool,
     ) -> Result<Vec<u8>, HashTableAccessMethodError> {
-        let header = self.header();
-        let slot_count = header.slot_count();
+        #[cfg(not(feature = "unsorted_page"))]
+        {
+            let slot_idx = self.find_slot_idx(key, pkey, ts);
+            if let Some(slot_idx) = slot_idx {
+                let slot_idx = slot_idx as u32;
+                // log_warn!("get idx: {}\n", slot_idx);
+                let slot = self.get_slot(slot_idx).unwrap();
+                if slot.key_size() == key.len() as u32
+                    && slot.pkey_size() == pkey.len() as u32
+                    && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+                    && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+                {
+                    let rec_offset = slot.offset() as usize;
+                    let rec_size = slot.val_size()
+                        + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                        + slot
+                            .pkey_size()
+                            .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                    let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                    let record = Record::from_bytes(
+                        record_bytes,
+                        slot.key_size(),
+                        slot.pkey_size(),
+                        slot.val_size(),
+                    );
 
-        for slot_id in 0..slot_count {
-            let slot = self.get_slot(slot_id).unwrap();
-            if slot.key_size() == key.len() as u32
-                && slot.pkey_size() == pkey.len() as u32
-                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
-            {
-                let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
-                let record = Record::from_bytes(
-                    record_bytes,
-                    slot.key_size(),
-                    slot.pkey_size(),
-                    slot.val_size(),
-                );
+                    let mut full_key = slot.key_prefix().to_vec();
+                    full_key.extend_from_slice(record.remain_key());
 
-                let mut full_key = slot.key_prefix().to_vec();
-                full_key.extend_from_slice(record.remain_key());
+                    let mut full_pkey = slot.pkey_prefix().to_vec();
+                    full_pkey.extend_from_slice(record.remain_pkey());
 
-                let mut full_pkey = slot.pkey_prefix().to_vec();
-                full_pkey.extend_from_slice(record.remain_pkey());
-
-                if full_key == key && full_pkey == pkey {
-                    // check recent or history get
-                    if is_recent_get {
+                    if full_key == key && full_pkey == pkey {
                         // only find once
                         if ts < slot.end_ts() && ts >= slot.start_ts() {
                             if !slot.is_mark_deleted() {
@@ -1091,25 +1222,37 @@ impl DoubleHashPage for Page {
                             // find but mismatch ts
                             return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                         }
-                    } else
-                    /* history get */
-                    {
-                        // history get
-                        if slot.start_ts() <= ts && ts < slot.end_ts() {
-                            if !slot.is_mark_deleted() {
-                                return Ok(record.val().to_vec());
-                            } else {
-                                // deleted during [start_ts, end_ts)
-                                return Err(HashTableAccessMethodError::KeyNotFound);
-                            }
-                        } else {
-                            // return Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp);
-                        }
                     }
+                }
+            } else {
+                // not found
+            }
+        }
+
+        #[cfg(feature = "unsorted_page")]
+        {
+            let slot_idx = self.find_k_pk_match_slot_idx_recent_get(key, pkey);
+            if let Some(slot_idx) = slot_idx {
+                let slot_idx = slot_idx as u32;
+                // log_warn!("get idx: {}\n", slot_idx);
+                let slot = self.get_slot(slot_idx).unwrap();
+                if ts < slot.end_ts() && ts >= slot.start_ts() {
+                    if !slot.is_mark_deleted() {
+                        let val = self.get_value_with_slot(&slot);
+                        // find and not deleted
+                        return Ok(val);
+                    } else {
+                        // slot deleted
+                        return Err(HashTableAccessMethodError::KeyNotFound);
+                    }
+                } else {
+                    // find but mismatch ts
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
                 }
             }
         }
-        Err(HashTableAccessMethodError::KeyNotFound)
+
+        return Err(HashTableAccessMethodError::KeyNotFound);
     }
 
     /// get all pair matching `key` and `ts` \
@@ -1257,7 +1400,8 @@ impl DoubleHashPage for Page {
         Ok((old_ts, old_val))
     }
 
-    /// ONLY RECENT
+    /// ONLY RECENT, used in inserting after deletion (now unused)
+    #[allow(unused)]
     fn get_delete_mark_slot_id(
         &self,
         key: &[u8],
@@ -1316,49 +1460,69 @@ impl DoubleHashPage for Page {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<u32, HashTableAccessMethodError> {
-        let slot_idx = self.find_slot_idx(key, pkey, ts);
-        if let Some(slot_idx) = slot_idx {
-            let slot_idx = slot_idx as u32;
-            // log_warn!("get idx: {}\n", slot_idx);
-            let slot = self.get_slot(slot_idx).unwrap();
-            if slot.key_size() == key.len() as u32
-                && slot.pkey_size() == pkey.len() as u32
-                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
-                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
-            {
-                let rec_offset = slot.offset() as usize;
-                let rec_size = slot.val_size()
-                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
-                    + slot
-                        .pkey_size()
-                        .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
-                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
-                let record = Record::from_bytes(
-                    record_bytes,
-                    slot.key_size(),
-                    slot.pkey_size(),
-                    slot.val_size(),
-                );
+        #[cfg(not(feature = "unsorted_page"))]
+        {
+            let slot_idx = self.find_slot_idx(key, pkey, ts);
+            if let Some(slot_idx) = slot_idx {
+                let slot_idx = slot_idx as u32;
+                // log_warn!("get idx: {}\n", slot_idx);
+                let slot = self.get_slot(slot_idx).unwrap();
+                if slot.key_size() == key.len() as u32
+                    && slot.pkey_size() == pkey.len() as u32
+                    && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+                    && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+                {
+                    let rec_offset = slot.offset() as usize;
+                    let rec_size = slot.val_size()
+                        + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                        + slot
+                            .pkey_size()
+                            .saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                    let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                    let record = Record::from_bytes(
+                        record_bytes,
+                        slot.key_size(),
+                        slot.pkey_size(),
+                        slot.val_size(),
+                    );
 
-                let mut full_key = slot.key_prefix().to_vec();
-                full_key.extend_from_slice(record.remain_key());
+                    let mut full_key = slot.key_prefix().to_vec();
+                    full_key.extend_from_slice(record.remain_key());
 
-                let mut full_pkey = slot.pkey_prefix().to_vec();
-                full_pkey.extend_from_slice(record.remain_pkey());
+                    let mut full_pkey = slot.pkey_prefix().to_vec();
+                    full_pkey.extend_from_slice(record.remain_pkey());
 
-                if full_key == key && full_pkey == pkey {
-                    if slot.is_mark_deleted() {
-                        return Err(HashTableAccessMethodError::KeyNotFound);
-                    } else if ts < slot.start_ts() {
-                        return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
-                    } else {
-                        return Ok(slot_idx);
+                    if full_key == key && full_pkey == pkey {
+                        if slot.is_mark_deleted() {
+                            return Err(HashTableAccessMethodError::KeyNotFound);
+                        } else if ts < slot.start_ts() {
+                            return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
+                        } else {
+                            return Ok(slot_idx);
+                        }
                     }
                 }
+            } else {
+                // not found
             }
-        } else {
-            // not found
         }
+
+        #[cfg(feature = "unsorted_page")]
+        {
+            let slot_idx = self.find_k_pk_match_slot_idx_recent_get(key, pkey);
+            if let Some(slot_idx) = slot_idx {
+                let slot_idx = slot_idx as u32;
+                let slot = self.get_slot(slot_idx).unwrap();
+                if slot.is_mark_deleted() {
+                    return Err(HashTableAccessMethodError::KeyNotFound);
+                } else if ts < slot.start_ts() {
+                    return Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp);
+                } else {
+                    return Ok(slot_idx);
+                }
+            }
+        }
+
         return Err(HashTableAccessMethodError::KeyNotFound);
     }
 
@@ -1567,6 +1731,7 @@ impl DoubleHashPage for Page {
     /// only history and recent::delete \
     /// when deleted is inserted again in recent table \
     /// insert deleted pair in history table
+    #[allow(unused)]
     fn insert_deleted(
         &mut self,
         key: &[u8],
@@ -1577,7 +1742,7 @@ impl DoubleHashPage for Page {
         // log_warn!("insert deleted at id: {}", self.get_id());
         let space_need = <Page as DoubleHashPage>::space_need(key, pkey, &vec![]);
         if space_need > self.free_space_with_compaction() {
-            log_debug!("should not happen, detect before calling cuckoopage::insert");
+            log_debug!("should not happen, detect before calling doublehashpage::insert");
             return Err(HashTableAccessMethodError::OutOfSpace);
         }
 
@@ -1597,8 +1762,7 @@ impl DoubleHashPage for Page {
         let slot_offset = self.slot_offset(self.slot_count());
 
         if rec_offset < slot_offset + SLOT_SIZE as u32 {
-            panic!("should not happen, detect before calling cuckoopage::insert");
-            // return Err(CuckooAccessMethodError::OutOfSpace);
+            panic!("should not happen, detect before calling doublehashpage::insert");
         }
 
         let slot_count = self.slot_count();
@@ -1695,7 +1859,7 @@ mod tests {
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1714,7 +1878,7 @@ mod tests {
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1733,7 +1897,7 @@ mod tests {
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1752,7 +1916,7 @@ mod tests {
         page.insert(key, pkey, ts, Timestamp::MAX, val).unwrap();
 
         // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1775,7 +1939,7 @@ mod tests {
 
         // Retrieve and verify entries
         for (key, pkey, ts, val) in &entries {
-            let retrieved_val = page.get(key, pkey, *ts, true).unwrap();
+            let retrieved_val = page.recent_get(key, pkey, *ts).unwrap();
             assert_eq!(retrieved_val, *val);
         }
     }
@@ -1797,14 +1961,14 @@ mod tests {
             .unwrap();
 
         // Attempt to retrieve with earlier timestamp
-        let result = page.get(key, pkey, ts_query, true);
+        let result = page.recent_get(key, pkey, ts_query);
         assert!(matches!(
             result,
             Err(HashTableAccessMethodError::KeyFoundButInvalidTimestamp)
         ));
 
         // Retrieve with correct timestamp
-        let retrieved_val = page.get(key, pkey, ts_insert, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts_insert).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -1829,11 +1993,11 @@ mod tests {
         page.insert(key, pkey2, ts2, Timestamp::MAX, val2).unwrap();
 
         // Retrieve with ts1
-        let retrieved_val = page.get(key, pkey1, ts1, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey1, ts1).unwrap();
         assert_eq!(retrieved_val, val1);
 
         // Retrieve with ts2
-        let retrieved_val = page.get(key, pkey2, ts2, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey2, ts2).unwrap();
         assert_eq!(retrieved_val, val2);
     }
 
@@ -1893,7 +2057,7 @@ mod tests {
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts_update).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -1925,7 +2089,7 @@ mod tests {
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts_update).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -1959,7 +2123,7 @@ mod tests {
         assert_eq!(old_val, val_insert);
 
         // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update, true).unwrap();
+        let retrieved_val = page.recent_get(key, pkey, ts_update).unwrap();
         assert_eq!(retrieved_val, val_update);
     }
 
@@ -2041,11 +2205,6 @@ mod tests {
             slot_id.err(),
             Some(HashTableAccessMethodError::KeyFoundButInvalidTimestamp)
         );
-        // let result = page.update(key, pkey, ts_update, val_update);
-        // assert!(matches!(
-        //     result,
-        //     Err(CuckooAccessMethodError::KeyFoundButInvalidTimestamp)
-        // ));
     }
 
     #[test]
@@ -2073,7 +2232,7 @@ mod tests {
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts, true);
+        let retrieved_res = page.recent_get(key, pkey, ts);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -2105,7 +2264,7 @@ mod tests {
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts, true);
+        let retrieved_res = page.recent_get(key, pkey, ts);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -2137,7 +2296,7 @@ mod tests {
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts, true);
+        let retrieved_res = page.recent_get(key, pkey, ts);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -2169,7 +2328,7 @@ mod tests {
         assert_eq!(page.header().slot_count(), 0);
 
         // Retrieve the key after del
-        let retrieved_res = page.get(key, pkey, ts, true);
+        let retrieved_res = page.recent_get(key, pkey, ts);
         assert!(retrieved_res.is_err());
         assert_eq!(
             retrieved_res.err(),
@@ -2205,7 +2364,7 @@ mod tests {
 
         // Retrieve and verify entries
         for (key, pkey, ts, _val) in &entries {
-            let retrieved_res = page.get(key, pkey, *ts, true);
+            let retrieved_res = page.recent_get(key, pkey, *ts);
             assert_eq!(
                 retrieved_res.err(),
                 Some(HashTableAccessMethodError::KeyNotFound)
@@ -2260,21 +2419,21 @@ mod tests {
 
         // Delete the 2
         let slot_id = page.get_slot_id(key, pkey1, ts1).unwrap();
-        let del_result = page.delete_slot_at_id(slot_id);
+        let _del_result = page.delete_slot_at_id(slot_id);
         // page.delete(key, pkey1, ts1).unwrap();
         let slot_id = page.get_slot_id(key, pkey2, ts2).unwrap();
-        let del_result = page.delete_slot_at_id(slot_id);
+        let _del_result = page.delete_slot_at_id(slot_id);
         // page.delete(key, pkey2, ts2).unwrap();
 
         // Retrieve with ts1
-        let retrieved_res = page.get(key, pkey1, ts1, true);
+        let retrieved_res = page.recent_get(key, pkey1, ts1);
         assert_eq!(
             retrieved_res.err(),
             Some(HashTableAccessMethodError::KeyNotFound)
         );
 
         // Retrieve with ts2
-        let retrieved_res = page.get(key, pkey2, ts2, true);
+        let retrieved_res = page.recent_get(key, pkey2, ts2);
         assert_eq!(
             retrieved_res.err(),
             Some(HashTableAccessMethodError::KeyNotFound)
@@ -2338,7 +2497,7 @@ mod tests {
 
         // Retrieve the updated value
         let updated_value = page
-            .get(&key, &pkey, ts, true)
+            .recent_get(&key, &pkey, ts)
             .expect("Failed to get updated value");
 
         assert_eq!(updated_value, &[50, 60]);
@@ -2366,7 +2525,7 @@ mod tests {
 
         // Retrieve the updated value
         let updated_value = page
-            .get(&key, &pkey, ts, true)
+            .recent_get(&key, &pkey, ts)
             .expect("Failed to get updated value");
 
         // Assert that the value has been updated correctly
@@ -2389,13 +2548,13 @@ mod tests {
         // Update the value with a value of equal size
         let new_value = vec![40, 50, 60];
         let slot_id = page.get_slot_id(&key, &pkey, ts).unwrap();
-        let update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts);
+        let _update_result = page.check_and_update_at_slot_id(slot_id, &key, &pkey, &new_value, ts);
         // page.update(&key, &pkey, ts, &new_value)
         //     .expect("Failed to update value");
 
         // Retrieve the updated value
         let updated_value = page
-            .get(&key, &pkey, ts, true)
+            .recent_get(&key, &pkey, ts)
             .expect("Failed to get updated value");
 
         // Assert that the value has been updated correctly
@@ -2474,7 +2633,7 @@ mod tests {
         // Retrieve the updated values and verify correctness
         for (key, expected_value) in keys.iter().zip(new_values.iter()) {
             let retrieved_value = page
-                .get(key, &pkey, ts + 1, true)
+                .recent_get(key, &pkey, ts + 1)
                 .expect("Failed to get updated value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
@@ -2521,7 +2680,7 @@ mod tests {
 
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {
             let retrieved_value = page
-                .get(key, &pkey, ts, true)
+                .recent_get(key, &pkey, ts)
                 .expect("Failed to get updated value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
@@ -2575,7 +2734,9 @@ mod tests {
         let all_keys = vec![vec![1, 1, 1], vec![2, 2, 2], vec![3, 3, 3]];
 
         for (key, expected_value) in all_keys.iter().zip(retrieved_values.iter()) {
-            let retrieved_value = page.get(key, &pkey, ts, true).expect("Failed to get value");
+            let retrieved_value = page
+                .recent_get(key, &pkey, ts)
+                .expect("Failed to get value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
     }
@@ -2606,7 +2767,7 @@ mod tests {
 
         // Retrieve the updated value and verify correctness
         let retrieved_value = page
-            .get(&key, &pkey, ts, true)
+            .recent_get(&key, &pkey, ts)
             .expect("Failed to get updated value");
         assert_eq!(retrieved_value, new_value.as_slice());
 
@@ -2621,7 +2782,7 @@ mod tests {
 
         // Retrieve the updated value
         let retrieved_value = page
-            .get(&key, &pkey, ts, true)
+            .recent_get(&key, &pkey, ts)
             .expect("Failed to get updated value");
         assert_eq!(retrieved_value, smaller_value.as_slice());
     }
@@ -2674,7 +2835,9 @@ mod tests {
         ];
 
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {
-            let retrieved_value = page.get(key, &pkey, ts, true).expect("Failed to get value");
+            let retrieved_value = page
+                .recent_get(key, &pkey, ts)
+                .expect("Failed to get value");
             assert_eq!(retrieved_value, expected_value.as_slice());
         }
     }
