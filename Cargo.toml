@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["256k_page", "log_warn"]
+default = ["256k_page"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -42,6 +42,9 @@ old_iter = []
 async_write = ["io-uring", "libc"]
 # Async IO with prefetching
 new_async_write = ["io-uring", "libc"]
+
+# entries in page are no-order
+unsorted_page = []
 
 [dependencies]
 tempfile = "3.8"
@@ -92,7 +95,3 @@ harness = false
 [[bin]]
 name = "hash_join_bench"
 path = "benches/hash_join/hash_join_bench.rs"
-
-[[bin]]
-name = "perf_bench"
-path = "benches/hash_join/hash_join_mu/hash_perf_bench.rs"

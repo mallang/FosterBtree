@@ -1,6 +1,6 @@
 pub mod hash_join;
 pub mod hashtable_mu;
-pub mod txn_mu;
+pub mod txn_handle;
 pub type Timestamp = u64;
 pub type TxId = u64; // Transaction ID
 
@@ -59,7 +59,7 @@ impl Hash for MvccEntry {
     }
 }
 
-pub trait MvccIndex<T: MemPool> {
+pub trait MvccIndex<T: MemPool>: Send + Sync {
     type Key: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync;
     type PKey: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
     type Value: Clone + Debug + Send + Sync;

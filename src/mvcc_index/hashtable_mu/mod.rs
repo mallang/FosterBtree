@@ -1,4 +1,5 @@
-pub mod mvcc_hash_join_cuckoo;
+pub mod mvcc_hash_join_table;
 
-mod cuckoo_optimistic;
-use super::{Timestamp, TxId};
+mod double_hash;
+mod hash_join_table_common;
+mod two_hashers;

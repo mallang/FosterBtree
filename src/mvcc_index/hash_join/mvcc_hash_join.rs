@@ -31,7 +31,7 @@ pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
 pub const BUCKET_ENTRY_SIZE: usize = std::mem::size_of::<BucketEntry>();
 pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
 
-pub const DEAFAULT_NUM_BUCKETS: usize = 1024;
+pub const DEAFAULT_NUM_BUCKETS: usize = 256;
 
 pub struct MvccHashJoinTable<T: MemPool> {
     // txid: u64,
@@ -973,111 +973,6 @@ mod tests {
             assert!(*count > 0);
         }
     }
-
-    // #[test]
-    // fn test_hash_join_table_concurrent_operations() {
-    //     use std::thread;
-
-    //     let mem_pool = get_in_mem_pool();
-    //     let c_key = ContainerKey::new(7, 7);
-    //     let num_buckets = 16;
-    //     let hash_table = Arc::new(HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets));
-
-    //     let num_threads = 4;
-    //     let num_operations = 1000;
-
-    //     let mut handles = Vec::new();
-
-    //     for thread_id in 0..num_threads {
-    //         let hash_table_clone = hash_table.clone();
-    //         let handle = thread::spawn(move || {
-    //             for i in 0..num_operations {
-    //                 let key = format!("key{}_{}", thread_id, i).into_bytes();
-    //                 let pkey = format!("pkey{}_{}", thread_id, i).into_bytes();
-    //                 let val = format!("value{}_{}", thread_id, i).into_bytes();
-    //                 let ts = 100 + i as u64;
-
-    //                 // Randomly choose an operation
-    //                 let op = i % 4;
-    //                 match op {
-    //                     0 => {
-    //                         // Insert
-    //                         let _ = hash_table_clone
-    //                             .insert(key.clone(), pkey.clone(), ts, 0, val.clone());
-    //                     }
-    //                     1 => {
-    //                         // Get
-    //                         let _ = hash_table_clone.get(&key, &pkey, ts);
-    //                     }
-    //                     2 => {
-    //                         // Update
-    //                         let new_val = format!("new_value{}_{}", thread_id, i).into_bytes();
-    //                         let _ = hash_table_clone.update(
-    //                             key.clone(),
-    //                             pkey.clone(),
-    //                             ts + 50,
-    //                             0,
-    //                             new_val,
-    //                         );
-    //                     }
-    //                     3 => {
-    //                         // Delete
-    //                         let _ = hash_table_clone.delete(&key, &pkey, ts + 100, 0);
-    //                     }
-    //                     _ => {}
-    //                 }
-    //             }
-    //         });
-    //         handles.push(handle);
-    //     }
-
-    //     for handle in handles {
-    //         handle.join().unwrap();
-    //     }
-
-    //     // Optionally, verify some entries
-    //     for thread_id in 0..num_threads {
-    //         for i in 0..num_operations {
-    //             let key = format!("key{}_{}", thread_id, i).into_bytes();
-    //             let pkey = format!("pkey{}_{}", thread_id, i).into_bytes();
-    //             let ts = 100 + i as u64;
-
-    //             // Attempt to get the record
-    //             let _ = hash_table.get(&key, &pkey, ts);
-    //         }
-    //     }
-    // }
-
-    // we assume theres no duplicate pkey
-    // #[test]
-    // fn test_hash_join_table_insert_duplicate_pkey() {
-    //     let mem_pool = get_in_mem_pool();
-    //     let c_key = ContainerKey::new(8, 8);
-    //     let num_buckets = 16;
-    //     let hash_table = HashJoinTable::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets);
-
-    //     let key1 = b"key_duplicate".to_vec();
-    //     let pkey = b"pkey_duplicate".to_vec();
-    //     let val1 = b"value1".to_vec();
-    //     let val2 = b"value2".to_vec();
-    //     let ts1 = 100;
-    //     let ts2 = 200;
-
-    //     // Insert the first record
-    //     hash_table
-    //         .insert(key1.clone(), pkey.clone(), ts1, 0, val1.clone())
-    //         .unwrap();
-
-    //     // Attempt to insert another record with the same pkey
-    //     let result = hash_table.insert(key1.clone(), pkey.clone(), ts2, 0, val2.clone());
-
-    //     // Since duplicate pkeys are not allowed, this should return an error
-    //     assert!(matches!(result, Err(AccessMethodError::KeyDuplicate)));
-
-    //     // Verify that the original record is still retrievable
-    //     let retrieved_val = hash_table.get(&key1, &pkey, ts1).unwrap();
-    //     assert_eq!(retrieved_val, val1);
-    // }
 
     #[test]
     fn test_hash_join_table_delete_non_existent_after_deletion() {

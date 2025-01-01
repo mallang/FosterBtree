@@ -1,6 +1,6 @@
 use fbtree::mvcc_index::{MvccEntry, MvccIndex, Timestamp};
-use fbtree::{mvcc_index::hash_join::mvcc_hash_join::MvccHashJoinTable, prelude::*};
-// use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_cuckoo::HashJoinTable, prelude::*};
+// use fbtree::{mvcc_index::hash_join::mvcc_hash_join::MvccHashJoinTable, prelude::*};
+use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_table::MvccHashJoinTable, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
@@ -475,8 +475,8 @@ fn check_consistency_hash_join_table(
     let mut hjt_entries: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
     let scanner = hash_join_table.scan(u64::MAX)?;
     for entry in scanner {
-        hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
-        // hjt_entries.insert((entry.0, entry.1), entry.2);
+        // hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        hjt_entries.insert((entry.0, entry.1), entry.2);
     }
 
     // Compare expected data with HashJoinTable entries
@@ -531,7 +531,8 @@ fn check_consistency_between_hash_join_and_hash_map(
     let mut hjt_entries: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
     let scanner = hash_join_table.scan(u64::MAX)?;
     for entry in scanner {
-        hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        // hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        hjt_entries.insert((entry.0, entry.1), entry.2);
     }
 
     // Collect current entries from rust_hash_map
@@ -676,63 +677,64 @@ fn read_scan_ops_file(
     Ok(scan_operations)
 }
 
-fn perform_scans_and_check(
-    hash_join_table: &MvccHashJoinTable<impl MemPool>,
-    rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>,
-    scan_operations: &[(u64, Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>)],
-) -> Result<bool, Box<dyn Error>> {
-    let mut is_consistent = true;
+// fn perform_scans_and_check(
+//     hash_join_table: &MvccHashJoinTable<impl MemPool>,
+//     rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>,
+//     scan_operations: &[(u64, Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>)],
+// ) -> Result<bool, Box<dyn Error>> {
+//     let mut is_consistent = true;
 
-    for (ts, expected_entries) in scan_operations {
-        let effective_ts = if *ts == u64::MAX || *ts == -1_i64 as u64 {
-            u64::MAX
-        } else {
-            *ts
-        };
+//     for (ts, expected_entries) in scan_operations {
+//         let effective_ts = if *ts == u64::MAX || *ts == -1_i64 as u64 {
+//             u64::MAX
+//         } else {
+//             *ts
+//         };
 
-        // Perform the scan on HashJoinTable
-        let hjt_results: HashSet<(Vec<u8>, Vec<u8>, Vec<u8>)> = hash_join_table
-            .scan(effective_ts)?
-            .map(|entry| (entry.key, entry.pkey, entry.value))
-            .collect();
+//         // Perform the scan at the specified timestamp
+//         let scanner = hash_join_table.scan(effective_ts)?;
+//         let mut scan_results: HashSet<(Vec<u8>, Vec<u8>, Vec<u8>)> = HashSet::new();
+//         for entry in scanner {
+//             scan_results.insert((entry.key.clone(), entry.pkey.clone(), entry.value.clone()));
+//         }
 
-        // Perform the scan on rust_hash_map
-        let rust_results: HashSet<(Vec<u8>, Vec<u8>, Vec<u8>)> = scan_rust_hash_map(rust_hash_map, effective_ts)
-            .into_iter()
-            .map(|entry| (entry.key, entry.pkey, entry.value))
-            .collect();
+//         // Perform the scan on rust_hash_map
+//         let rust_results: HashSet<(Vec<u8>, Vec<u8>, Vec<u8>)> = scan_rust_hash_map(rust_hash_map, effective_ts)
+//             .into_iter()
+//             .map(|entry| (entry.key, entry.pkey, entry.value))
+//             .collect();
 
-        // Compare results
-        if hjt_results != rust_results {
-            is_consistent = false;
+//         // Compare results
+//         if hjt_results != rust_results {
+//             is_consistent = false;
 
-            let missing_in_hjt = rust_results.difference(&hjt_results);
-            let extra_in_hjt = hjt_results.difference(&rust_results);
+//             let missing_in_hjt = rust_results.difference(&hjt_results);
+//             let extra_in_hjt = hjt_results.difference(&rust_results);
 
-            println!("Discrepancies found in scan at timestamp {}:", ts);
+//             println!("Discrepancies found in scan at timestamp {}:", ts);
 
-            for (key, pkey, value) in missing_in_hjt {
-                println!(
-                    "Missing in HashJoinTable: key '{}', pkey '{}', value '{}'",
-                    bytes_to_string(key),
-                    bytes_to_string(pkey),
-                    bytes_to_string(value)
-                );
-            }
+//             for (key, pkey, value) in missing_in_hjt {
+//                 println!(
+//                     "Missing in HashJoinTable: key '{}', pkey '{}', value '{}'",
+//                     bytes_to_string(key),
+//                     bytes_to_string(pkey),
+//                     bytes_to_string(value)
+//                 );
+//             }
 
-            for (key, pkey, value) in extra_in_hjt {
-                println!(
-                    "Extra in HashJoinTable: key '{}', pkey '{}', value '{}'",
-                    bytes_to_string(key),
-                    bytes_to_string(pkey),
-                    bytes_to_string(value)
-                );
-            }
-        }
-    }
+//             for (key, pkey, value) in extra_in_hjt {
+//                 println!(
+//                     "Extra in HashJoinTable: key '{}', pkey '{}', value '{}'",
+//                     bytes_to_string(key),
+//                     bytes_to_string(pkey),
+//                     bytes_to_string(value)
+//                 );
+//             }
+//         }
+//     }
 
-    Ok(is_consistent)
-}
+//     Ok(is_consistent)
+// }
 
 // Function to convert byte arrays to strings safely
 fn bytes_to_string(bytes: &[u8]) -> String {
