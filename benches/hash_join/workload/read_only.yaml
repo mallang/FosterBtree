@@ -1,0 +1,12 @@
+num_transactions: 1000
+
+min_cmds_per_tx: 8
+max_cmds_per_tx: 12
+
+read_only_ratio: 1.0
+
+insert_ratio: 0.3
+update_ratio: 0.4
+delete_ratio: 0.1
+get_ratio: 0.1
+scan_ratio: 0.1

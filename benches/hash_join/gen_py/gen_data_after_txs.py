@@ -71,7 +71,7 @@ def generate_recent_and_history_data(
                         del recent_data_dict[pkey]
                     else:
                         print(f"Warning: Delete operation on non-existent pkey {pkey}. Ignoring.")
-                elif op_type == 'get' or op_type == 'commit':
+                elif op_type == 'get' or op_type == 'commit' or op_type == 'scan':
                     # No changes to data
                     continue
                 else:
@@ -141,37 +141,37 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '-df', '--data_file',
-        default='data.csv',
+        default='../csv/data.csv',
         help='Input data file containing initial keys, pkeys, and values. (default: data.csv)'
     )
     parser.add_argument(
         '-tf', '--txs_file',
-        default='txs.csv',
+        default='../csv/txs.csv',
         help='Input transactions file (txs.csv). (default: txs.csv)'
     )
     parser.add_argument(
         '-of', '--ops_file',
-        default='ops.csv',
+        default='../csv/ops.csv',
         help='Input operations file (ops.csv). (default: ops.csv)'
     )
     parser.add_argument(
         '-rdatf', '--recent_data_after_txs_file',
-        default='recent_data_after_txs.csv',
+        default='../csv/recent_data_after_txs.csv',
         help='Output file to write the recent data after applying transactions. (default: recent_data_after_txs.csv)'
     )
     parser.add_argument(
         '-hdatf', '--history_data_after_txs_file',
-        default='history_data_after_txs.csv',
+        default='../csv/history_data_after_txs.csv',
         help='Output file to write the history data after applying transactions. (default: history_data_after_txs.csv)'
     )
     parser.add_argument(
         '-rdaof', '--recent_data_after_ops_file',
-        default='recent_data_after_ops.csv',
+        default='../csv/recent_data_after_ops.csv',
         help='Output file to write the recent data after applying operations. (default: recent_data_after_ops.csv)'
     )
     parser.add_argument(
         '-hdaof', '--history_data_after_ops_file',
-        default='history_data_after_ops.csv',
+        default='../csv/history_data_after_ops.csv',
         help='Output file to write the history data after applying operations. (default: history_data_after_ops.csv)'
     )
     args = parser.parse_args()

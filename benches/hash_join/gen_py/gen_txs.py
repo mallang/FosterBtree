@@ -15,7 +15,8 @@ def generate_transactions_and_operations(
     insert_ratio,
     update_ratio,
     delete_ratio,
-    get_ratio  # New parameter
+    get_ratio,
+    scan_ratio
 ):
     # Load data and determine pkey length
     data = []
@@ -60,7 +61,7 @@ def generate_transactions_and_operations(
         pkey_info[pkey] = (key, pkey, value)
 
     # Validate ratios
-    total_ratio = insert_ratio + update_ratio + delete_ratio + get_ratio
+    total_ratio = insert_ratio + update_ratio + delete_ratio + get_ratio + scan_ratio
     if abs(total_ratio - 1.0) > 0.001:
         raise ValueError("Insert, update, delete, and get ratios must sum to 1.0")
     if not 0 <= read_only_ratio <= 1:
@@ -98,8 +99,8 @@ def generate_transactions_and_operations(
             else:
                 # Read-write transaction
                 op_type = random.choices(
-                    ['insert', 'update', 'delete', 'get'],
-                    weights=[insert_ratio, update_ratio, delete_ratio, get_ratio],
+                    ['insert', 'update', 'delete', 'get', 'scan'],
+                    weights=[args.insert_ratio, args.update_ratio, args.delete_ratio, args.get_ratio, args.scan_ratio],
                     k=1
                 )[0]
                 if op_type == 'insert':
@@ -167,6 +168,15 @@ def generate_transactions_and_operations(
                             'op_type': 'get',
                             'key': key,
                             'pkey': pkey_str,
+                            'value': ''
+                        })
+                    elif op_type == 'scan':
+                        commands.append({
+                            'tx_id': tx_id,
+                            'ts': ts,
+                            'op_type': 'scan',
+                            'key': '',
+                            'pkey': '',
                             'value': ''
                         })
         if commands:
@@ -321,17 +331,17 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '-df', '--data_file',
-        default='data.csv',
+        default='./csv/data.csv',
         help='Input data file containing keys, pkeys, and values. (default: data.csv)'
     )
     parser.add_argument(
         '-tf', '--txs_file',
-        default='txs.csv',
+        default='./csv/txs.csv',
         help='Output transactions file to write generated transactions. (default: txs.csv)'
     )
     parser.add_argument(
         '-of', '--ops_file',
-        default='ops.csv',
+        default='./csv/ops.csv',
         help='Output operations file with mixed order. (default: ops.csv)'
     )
     parser.add_argument(
@@ -371,8 +381,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '-u', '--update_ratio',
         type=float,
-        default=0.4,
-        help='Ratio of update operations in read-write transactions. (default: 0.4)'
+        default=0.3,
+        help='Ratio of update operations in read-write transactions. (default: 0.3)'
     )
     parser.add_argument(
         '-d', '--delete_ratio',
@@ -386,12 +396,18 @@ if __name__ == "__main__":
         default=0.1,
         help='Ratio of get operations in read-write transactions. (default: 0.1)'
     )
+    parser.add_argument(
+        '-s', '--scan_ratio',
+        type=float,
+        default=0.1,
+        help='Ratio of scan operations in read-write transactions. (default: 0.1)'
+    )
     args = parser.parse_args()
-
+    
     # Validate ratios
-    total_ratio = args.insert_ratio + args.update_ratio + args.delete_ratio + args.get_ratio
+    total_ratio = args.insert_ratio + args.update_ratio + args.delete_ratio + args.get_ratio + args.scan_ratio
     if abs(total_ratio - 1.0) > 0.001:
-        print("Error: Insert, update, delete, and get ratios must sum to 1.0")
+        print("Error: Insert, update, delete, get, and scan ratios must sum to 1.0")
         exit(1)
 
     generate_transactions_and_operations(
@@ -405,5 +421,6 @@ if __name__ == "__main__":
         insert_ratio=args.insert_ratio,
         update_ratio=args.update_ratio,
         delete_ratio=args.delete_ratio,
-        get_ratio=args.get_ratio  # Pass the new parameter
+        get_ratio=args.get_ratio,
+        scan_ratio=args.scan_ratio
     )

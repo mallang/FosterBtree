@@ -60,14 +60,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '-o', '--output',
-        default='data.csv',
+        default='./csv/data.csv',
         help='Output data file. (default: data.csv)'
     )
     parser.add_argument(
         '-n', '--num_records',
         type=int,
-        default=1000,
-        help='Number of records to generate. (default: 1000)'
+        default=100,
+        help='Number of records to generate. (default: 100)'
     )
     parser.add_argument(
         '-k', '--key_length',

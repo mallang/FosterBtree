@@ -9,17 +9,17 @@ def parse_arguments():
     )
     parser.add_argument(
         '--recent_data_file',
-        default='recent_data_after_txs.csv',
+        default='../csv/recent_data_after_txs.csv',
         help='Input recent data file. (default: recent_data_after_txs.csv)'
     )
     parser.add_argument(
         '--history_data_file',
-        default='history_data_after_txs.csv',
+        default='../csv/history_data_after_txs.csv',
         help='Input history data file. (default: history_data_after_txs.csv)'
     )
     parser.add_argument(
         '--scan_ops_file',
-        default='scan_ops.csv',
+        default='../csv/scan_ops.csv',
         help='Output scan operations file. (default: scan_ops.csv)'
     )
     parser.add_argument(

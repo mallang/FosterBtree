@@ -8,17 +8,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")"; pwd)"
 echo "Script directory: $SCRIPT_DIR"
 
 # Build absolute paths to data.csv, ops.csv, recent_data_after_ops.csv, and history_data_after_ops.csv
-DATA_CSV="$SCRIPT_DIR/data.csv"
-OPS_CSV="$SCRIPT_DIR/ops.csv"
-RECENT_DATA_CSV="$SCRIPT_DIR/recent_data_after_ops.csv"
-HISTORY_DATA_CSV="$SCRIPT_DIR/history_data_after_ops.csv"
+DATA_CSV="$SCRIPT_DIR/csv/data.csv"
+OPS_CSV="$SCRIPT_DIR/csv/ops.csv"
+RECENT_DATA_CSV="$SCRIPT_DIR/csv/recent_data_after_ops.csv"
+HISTORY_DATA_CSV="$SCRIPT_DIR/csv/history_data_after_ops.csv"
 
 # Assuming the Rust project root is two directories up from the script directory
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../"; pwd)"
 echo "Project root directory: $PROJECT_ROOT"
 
 # Change to the project root directory
-cd "$PROJECT_ROOT"
+# cd "$PROJECT_ROOT"
 
 # Build the Rust project
 # echo "Building the Rust project..."
@@ -27,6 +27,7 @@ cd "$PROJECT_ROOT"
 # Run the benchmark
 echo "Running the Rust benchmark..."
 # env RUSTFLAGS="-Aunused-variables -Aunreachable-code -Aunused-assignments -Aunconditional-recursion -Adead-code -Aunused-fields -Aunused-variables -Aunused-imports -Aunused-must-use -Adeprecated" cargo run --release --bin hash_join_bench -- "$DATA_CSV" "$OPS_CSV" "$RECENT_DATA_CSV" "$HISTORY_DATA_CSV"
-cargo run --release --bin hash_join_bench -- "$DATA_CSV" "$OPS_CSV" "$RECENT_DATA_CSV" "$HISTORY_DATA_CSV"
+# ./target/release/hash_join_bench -- "$DATA_CSV" "$OPS_CSV" "$RECENT_DATA_CSV" "$HISTORY_DATA_CSV"
+../../target/release/hash_join_bench -df csv/data.csv -of csv/ops.csv -rdf csv/recent_data_after_ops.csv -hdf csv/history_data_after_ops.csv -sof csv/scan_ops.csv
 
 echo "Benchmark completed."

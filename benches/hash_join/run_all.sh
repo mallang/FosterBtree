@@ -11,6 +11,9 @@ echo "Script directory: $SCRIPT_DIR"
 echo "Running data generation script..."
 bash "$SCRIPT_DIR/run_gen.sh"
 
+# Cargo build
+# cargo build --release
+
 # Run the benchmark script
 echo "Running benchmark script..."
 bash "$SCRIPT_DIR/run_bench.sh"
