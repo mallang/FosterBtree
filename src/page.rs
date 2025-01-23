@@ -2,6 +2,9 @@ use std::ops::{Deref, DerefMut};
 
 use crate::write_ahead_log::prelude::{Lsn, LSN_SIZE};
 
+#[cfg(feature = "test_page")]
+pub const PAGE_SIZE: usize = 256;
+
 // A slot offset is u32, so the maximum page size is 2^32 bytes
 #[cfg(feature = "4k_page")]
 pub const PAGE_SIZE: usize = 4096;
@@ -23,6 +26,7 @@ pub const PAGE_SIZE: usize = 524288;
 pub const PAGE_SIZE: usize = 1048576;
 // If nothing is specified, use 16K page
 #[cfg(not(any(
+    feature = "test_page",
     feature = "4k_page",
     feature = "8k_page",
     feature = "16k_page",

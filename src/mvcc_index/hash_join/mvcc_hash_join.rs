@@ -81,11 +81,11 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
 
     fn get(
         &self,
-        key: &Self::Key,
-        pkey: &Self::PKey,
+        key: impl AsRef<[u8]>,
+        pkey: impl AsRef<[u8]>,
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
-        match MvccHashJoinTable::get(self, key, pkey, ts) {
+        match MvccHashJoinTable::get(self, key.as_ref(), pkey.as_ref(), ts) {
             Ok(val) => Ok(Some(val)),
             Err(AccessMethodError::KeyNotFound) => Ok(None),
             Err(e) => Err(e),
@@ -113,12 +113,12 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
 
     fn delete(
         &self,
-        key: &Self::Key,
-        pkey: &Self::PKey,
+        key: impl AsRef<[u8]>,
+        pkey: impl AsRef<[u8]>,
         ts: Timestamp,
         tx_id: TxId,
     ) -> Result<(), Self::Error> {
-        self.delete(key, pkey, ts, tx_id)
+        self.delete(key.as_ref(), pkey.as_ref(), ts, tx_id)
     }
 
     fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error> {

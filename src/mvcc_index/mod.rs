@@ -60,7 +60,7 @@ impl Hash for MvccEntry {
 }
 
 pub trait MvccIndex<T: MemPool>: Send + Sync {
-    type Key: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync;
+    type Key: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
     type PKey: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
     type Value: Clone + Debug + Send + Sync;
     type Error: Error + Debug + Send + Sync + 'static;
@@ -88,8 +88,8 @@ pub trait MvccIndex<T: MemPool>: Send + Sync {
     /// Returns `None` if no matching record is found at that timestamp.
     fn get(
         &self,
-        key: &Self::Key,
-        pkey: &Self::PKey,
+        key: impl AsRef<[u8]>,
+        pkey: impl AsRef<[u8]>,
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error>;
 
@@ -115,8 +115,8 @@ pub trait MvccIndex<T: MemPool>: Send + Sync {
     /// Deletes the key-primary key tuple at the given timestamp.
     fn delete(
         &self,
-        key: &Self::Key,
-        pkey: &Self::PKey,
+        key: impl AsRef<[u8]>,
+        pkey: impl AsRef<[u8]>,
         ts: Timestamp,
         tx_id: TxId,
     ) -> Result<(), Self::Error>;
@@ -148,3 +148,12 @@ pub enum Delta<V> {
     Updated(V),
     Deleted,
 }
+
+/// Represents a change (delta) in the value of a key-primary key tuple.
+#[derive(Clone, Debug)]
+pub struct DeltaEntry<V> {
+    pub value_delta: Delta<V>,
+    pub key: Vec<u8>,
+    pub pkey: Vec<u8>,
+}
+

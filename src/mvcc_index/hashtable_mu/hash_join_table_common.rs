@@ -20,16 +20,11 @@ mod access_err {
     pub enum HashTableAccessMethodError {
         KeyNotFound,
         KeyFoundButInvalidTimestamp, // For MVCC
-        KeyDuplicate,
-        KeyNotInPageRange, // For Btree
         PageReadLatchFailed,
         PageWriteLatchFailed,
         RecordTooLarge,
         MemPoolStatus(MemPoolStatus),
         OutOfSpace, // For ReadOptimizedPage
-        OutOfSpaceForUpdate(Vec<u8>),
-        NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
-        InvalidTimestamp,               // For MVCC
         HashPageOutOfSpace(u32),        // new_hash_size
         AcquireLockFailed,              // for multi-page acq
         Other(String),
@@ -42,8 +37,6 @@ mod access_err {
                 HashTableAccessMethodError::KeyFoundButInvalidTimestamp => {
                     write!(f, "Key found but invalid timestamp")
                 }
-                HashTableAccessMethodError::KeyDuplicate => write!(f, "Key duplicate"),
-                HashTableAccessMethodError::KeyNotInPageRange => write!(f, "Key not in page range"),
                 HashTableAccessMethodError::PageReadLatchFailed => {
                     write!(f, "Page read latch failed")
                 }
@@ -55,13 +48,6 @@ mod access_err {
                     write!(f, "MemPool status: {:?}", status)
                 }
                 HashTableAccessMethodError::OutOfSpace => write!(f, "Out of space"),
-                HashTableAccessMethodError::OutOfSpaceForUpdate(key) => {
-                    write!(f, "Out of space for update: {:?}", key)
-                }
-                HashTableAccessMethodError::NeedToUpdateMVCC(ts, val) => {
-                    write!(f, "Need to update MVCC: ts: {}, val: {:?}", ts, val)
-                }
-                HashTableAccessMethodError::InvalidTimestamp => write!(f, "Invalid timestamp"),
                 HashTableAccessMethodError::Other(msg) => write!(f, "{}", msg),
                 HashTableAccessMethodError::HashPageOutOfSpace(u32) => {
                     write!(f, "iterate failed!")
