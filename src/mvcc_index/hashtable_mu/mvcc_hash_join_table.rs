@@ -1,52 +1,56 @@
 use std::{
-    marker::PhantomData, sync::{atomic::AtomicU32, Arc}, time::Duration
+    marker::PhantomData,
+    sync::{atomic::AtomicU32, Arc},
+    time::Duration,
 };
 
 use crate::{
     bp::{ContainerKey, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hashtable_mu::hash_join_table_common::{HashTableAccessMethodError, DEFAULT_NUM_BUCKETS}, Delta, DeltaEntry, MvccIndex, Timestamp, TxId
+        hashtable_mu::hash_join_table_common::{HashTableAccessMethodError, DEFAULT_NUM_BUCKETS},
+        MvccIndex, Timestamp, TxId,
     },
     page::PageId,
 };
 
 use super::{
-    double_hash::double_hash_sub_table::{DHashSubTable, SubTableScanner, SubTableDeltaScanner, SubTableScannerOption, SubTableDeltaScannerOption},
-    hash_join_table_common::{
-        HistoryHashTable, MvccHashJoinMetaPage, RecentHashTable, RecentHistoryTable,
+    double_hash::double_hash_sub_table::{
+        DHashSubTable, SubTableDeltaScannerOption, SubTableScanner, SubTableScannerOption,
     },
+    hash_join_table_common::MvccHashJoinMetaPage,
 };
-
-
-
 
 mod iterator {
     use std::{marker::PhantomData, sync::Arc};
-    
+
     use crate::{
         bp::MemPool,
         mvcc_index::{
-            hashtable_mu::double_hash::double_hash_sub_table::{SubTableDeltaScanner, SubTableDeltaScannerOption, SubTableScanner, SubTableScannerOption}, Delta, DeltaEntry, MvccEntry, MvccIndex
+            hashtable_mu::double_hash::double_hash_sub_table::{
+                SubTableDeltaScanner, SubTableDeltaScannerOption, SubTableScanner,
+                SubTableScannerOption,
+            },
+            Delta, DeltaEntry, MvccEntry, MvccIndex,
         },
     };
 
     use super::TableStruct;
-    
+
     pub struct MvccDeltaScanner<T, MvccIdx>
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         ite: SubTableDeltaScanner<T>,
         is_end: bool,
         _data: PhantomData<MvccIdx>,
         _data2: PhantomData<T>,
     }
-    impl<T, MvccIdx> Iterator for MvccDeltaScanner<T, MvccIdx> 
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    impl<T, MvccIdx> Iterator for MvccDeltaScanner<T, MvccIdx>
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         type Item = (MvccIdx::Key, MvccIdx::PKey, Delta<MvccIdx::Value>);
         fn next(&mut self) -> Option<Self::Item> {
@@ -63,31 +67,36 @@ mod iterator {
         }
     }
 
-    impl<T, MvccIdx> MvccDeltaScanner<T, MvccIdx> 
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    impl<T, MvccIdx> MvccDeltaScanner<T, MvccIdx>
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         pub fn new(table: &Arc<TableStruct<T>>, option: SubTableDeltaScannerOption) -> Self {
             let ite = table.scan_delta(option).into_iter();
-            Self { ite, is_end: false, _data: Default::default(), _data2: Default::default() }
+            Self {
+                ite,
+                is_end: false,
+                _data: Default::default(),
+                _data2: Default::default(),
+            }
         }
     }
 
     pub struct MvccSimpleScanner<T, MvccIdx>
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         ite: SubTableScanner<T>,
         is_end: bool,
         _data: PhantomData<MvccIdx>,
         _data2: PhantomData<T>,
     }
-    impl<T, MvccIdx> Iterator for MvccSimpleScanner<T, MvccIdx> 
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    impl<T, MvccIdx> Iterator for MvccSimpleScanner<T, MvccIdx>
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         type Item = (MvccIdx::Key, MvccIdx::PKey, MvccIdx::Value);
         fn next(&mut self) -> Option<Self::Item> {
@@ -104,31 +113,36 @@ mod iterator {
         }
     }
 
-    impl<T, MvccIdx> MvccSimpleScanner<T, MvccIdx> 
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    impl<T, MvccIdx> MvccSimpleScanner<T, MvccIdx>
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         pub fn new(table: &Arc<TableStruct<T>>, option: SubTableScannerOption) -> Self {
             let ite = table.scan_mvcc_entries(option).into_iter();
-            Self { ite, is_end: false, _data: Default::default(), _data2: Default::default() }
+            Self {
+                ite,
+                is_end: false,
+                _data: Default::default(),
+                _data2: Default::default(),
+            }
         }
     }
 
     pub struct MvccKeyScanner<T, MvccIdx>
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         ite: SubTableScanner<T>,
         is_end: bool,
         _data: PhantomData<MvccIdx>,
         _data2: PhantomData<T>,
     }
-    impl<T, MvccIdx> Iterator for MvccKeyScanner<T, MvccIdx> 
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    impl<T, MvccIdx> Iterator for MvccKeyScanner<T, MvccIdx>
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         type Item = (MvccIdx::PKey, MvccIdx::Value);
         fn next(&mut self) -> Option<Self::Item> {
@@ -145,17 +159,21 @@ mod iterator {
         }
     }
 
-    impl<T, MvccIdx> MvccKeyScanner<T, MvccIdx> 
-    where 
-        T: MemPool, 
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>, 
+    impl<T, MvccIdx> MvccKeyScanner<T, MvccIdx>
+    where
+        T: MemPool,
+        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
         pub fn new(table: &Arc<TableStruct<T>>, option: SubTableScannerOption) -> Self {
             let ite = table.scan_mvcc_entries(option).into_iter();
-            Self { ite, is_end: false, _data: Default::default(), _data2: Default::default() }
+            Self {
+                ite,
+                is_end: false,
+                _data: Default::default(),
+                _data2: Default::default(),
+            }
         }
     }
-
 }
 
 use iterator::*;
@@ -245,7 +263,10 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         from_ts: Timestamp,
         to_ts: Timestamp,
     ) -> Result<Self::DeltaIter, Self::Error> {
-        let option = SubTableDeltaScannerOption {small_ts: from_ts, large_ts: to_ts};
+        let option = SubTableDeltaScannerOption {
+            small_ts: from_ts,
+            large_ts: to_ts,
+        };
         let ret = Self::DeltaIter::new(&self.hash_table, option);
         Ok(ret)
     }
@@ -262,13 +283,7 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
     }
 }
 
-
-
-
-
 impl<T: MemPool> MvccHashJoinTable<T> {
-    
-
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEFAULT_NUM_BUCKETS)
     }
@@ -279,7 +294,11 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         let meta_frame_id = AtomicU32::new(meta_page.frame_id());
         let meta = Arc::new((meta_page_id, meta_frame_id));
 
-        let hash_table = Arc::new(TableStruct::new_with_bucket_num(c_key, mem_pool.clone(), num_buckets));
+        let hash_table = Arc::new(TableStruct::new_with_bucket_num(
+            c_key,
+            mem_pool.clone(),
+            num_buckets,
+        ));
 
         // <Page as MvccHashJoinCuckooMetaPage>::write_all_entries_recent(
         //     &mut *meta_page,
@@ -300,10 +319,7 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         }
     }
 
-   
-    pub fn scan_all(
-        &self,
-    ) -> Result<SubTableScanner<T>, HashTableAccessMethodError> {
+    pub fn scan_all(&self) -> Result<SubTableScanner<T>, HashTableAccessMethodError> {
         let option = SubTableScannerOption::AllVersionsAllKeys;
         let scan_iter = self.hash_table.scan_mvcc_entries(option);
         Ok(scan_iter)
@@ -454,17 +470,17 @@ mod test_meta {
 }
 
 #[cfg(test)]
-mod test_ops{
-    use core::str;
+mod test_ops {
     use super::*;
     use crate::bp::get_in_mem_pool;
     use crate::mvcc_index::hashtable_mu::hash_join_table_common::{
         BUCKET_ENTRY_SIZE, BUCKET_NUM_SIZE,
     };
     use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
+    use core::str;
     const SLOT_KEY_PREFIX_SIZE: usize = 8;
     const SLOT_PKEY_PREFIX_SIZE: usize = 8;
-    
+
     fn space_need(key: &[u8], pkey: &[u8], val: &[u8]) -> u32 {
         (16 + val.len()) as u32
     }
@@ -539,7 +555,6 @@ mod test_ops{
                 .unwrap();
         }
 
-
         // log_warn!("FINISH JOIN!!!!!!!!!!");
 
         // Verify all entries after insertions are complete
@@ -601,9 +616,7 @@ mod test_ops{
                 let key = format!("key__{}", i).into_bytes();
                 let pkey = format!("pkey__{}", i).into_bytes();
                 let expected_value = format!("value__{}", i).into_bytes();
-                let retrieved_val = hash_join_table_clone
-                    .get(&key, &pkey, i as u64)
-                    .unwrap();
+                let retrieved_val = hash_join_table_clone.get(&key, &pkey, i as u64).unwrap();
                 assert_eq!(retrieved_val.unwrap(), expected_value);
             }
         });
@@ -688,9 +701,7 @@ mod test_ops{
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             let value = format!("value{}", i).into_bytes();
-            hash_join_table
-                .insert(key, pkey, 1, 1, value)
-                .unwrap();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
         }
 
         // 1..1000..2 updates
@@ -768,10 +779,7 @@ mod test_ops{
             .unwrap();
 
         let del_result = hash_join_table.delete(&(vec![1])[..], &(vec![1])[..], 0, 1);
-        assert_eq!(
-            del_result.ok(),
-            Some(())
-        );
+        assert_eq!(del_result.ok(), Some(()));
 
         hash_join_table
             .delete(&(vec![1])[..], &(vec![1])[..], 1, 1)
@@ -791,10 +799,7 @@ mod test_ops{
 
         // duplicate delete
         let del_result = hash_join_table.delete(&(vec![1])[..], &(vec![1])[..], 1, 1);
-        assert_eq!(
-            del_result.err(),
-            None
-        );
+        assert_eq!(del_result.err(), None);
     }
 
     #[test]
@@ -838,9 +843,7 @@ mod test_ops{
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             let value = format!("value{}", i).into_bytes();
-            hash_join_table
-                .insert(key, pkey, 1, 1, value)
-                .unwrap();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
         }
 
         // 1..1000..2 deletes
@@ -867,9 +870,7 @@ mod test_ops{
         for i in (0..1000).into_iter().step_by(2) {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
-            hash_join_table
-                .delete(&key, &pkey, 2 as u64, 1)
-                .unwrap();
+            hash_join_table.delete(&key, &pkey, 2 as u64, 1).unwrap();
         }
 
         handle.join().unwrap();
@@ -916,9 +917,7 @@ mod test_ops{
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             let value = format!("value{}", i).into_bytes();
-            hash_join_table
-                .insert(key, pkey, 1, 1, value)
-                .unwrap();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
         }
 
         let scan_iter = hash_join_table.scan_all().unwrap();
@@ -1003,7 +1002,7 @@ mod test_ops{
         }
     }
 
-    #[ignore = "not implemented yes"]
+    // #[ignore = "not implemented yes"]
     #[test]
     fn test_garbage_collect() {
         let mem_pool = get_in_mem_pool();
@@ -1017,9 +1016,7 @@ mod test_ops{
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             let value = format!("value{}", i).into_bytes();
-            hash_join_table
-                .insert(key, pkey, 1, 1, value)
-                .unwrap();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
         }
 
         // 0..1000 deletes at ts 2
@@ -1067,14 +1064,14 @@ mod test_ops{
         let mut item_count = 0;
         while let Some(item) = scan_all_iter.next() {
             item_count += 1;
-            log_warn!(
-                "item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}",
-                str::from_utf8(&item.key),
-                str::from_utf8(&item.pkey),
-                str::from_utf8(&item.value),
-                item.start_ts,
-                item.end_ts
-            );
+            // log_warn!(
+            //     "item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}",
+            //     str::from_utf8(&item.key),
+            //     str::from_utf8(&item.pkey),
+            //     str::from_utf8(&item.value),
+            //     item.start_ts,
+            //     item.end_ts
+            // );
         }
         assert_eq!(item_count, 1000);
 

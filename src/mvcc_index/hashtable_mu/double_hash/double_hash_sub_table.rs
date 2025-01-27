@@ -1,6 +1,10 @@
 use core::str;
 use std::{
-    collections::HashSet, iter::Enumerate, marker::PhantomData, sync::{atomic::AtomicU32, Arc, Mutex, RwLock}, time::Duration
+    collections::HashSet,
+    iter::Enumerate,
+    marker::PhantomData,
+    sync::{atomic::AtomicU32, Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use crate::{
@@ -11,7 +15,8 @@ use crate::{
     // lockmanager::{LockManager, Permissions, TransactionId, ValueId},
     log_warn,
     mvcc_index::{
-        hashtable_mu::hash_join_table_common::HashTableAccessMethodError, DeltaEntry, MvccEntry, MvccIndex, Timestamp
+        hashtable_mu::hash_join_table_common::HashTableAccessMethodError, DeltaEntry, MvccEntry,
+        MvccIndex, Timestamp,
     },
     page::{Page, PageId},
 };
@@ -28,7 +33,6 @@ pub struct DHashSubTable<T: MemPool> {
     mem_pool: Arc<T>,
 
     // meta: Arc<(PageId, AtomicU32)>,
-
     /// shared: read & update & insert & delete & get \
     /// exclusive: rehash \
     /// ensure atomic of (num_buckets, BucketEntry.page_id, BucketEntry.frame_id)
@@ -41,7 +45,16 @@ pub struct DHashSubTable<T: MemPool> {
 mod iterators {
     use std::{marker::PhantomData, sync::Arc};
 
-    use crate::{bp::{MemPool, PageFrameKey}, mvcc_index::{hashtable_mu::double_hash::{double_hash_common::SUBTABLE_HASHER_SEED, double_hash_data_page::TableDataPage}, Delta, DeltaEntry, MvccEntry, MvccIndex, Timestamp}, page::Page};
+    use crate::{
+        bp::{MemPool, PageFrameKey},
+        mvcc_index::{
+            hashtable_mu::double_hash::{
+                double_hash_common::SUBTABLE_HASHER_SEED, double_hash_data_page::TableDataPage,
+            },
+            Delta, DeltaEntry, MvccEntry, MvccIndex, Timestamp,
+        },
+        page::Page,
+    };
 
     use super::DHashSubTable;
 
@@ -55,7 +68,6 @@ mod iterators {
         pub small_ts: Timestamp,
         pub large_ts: Timestamp,
     }
-   
 
     pub struct SubTableScanner<T: MemPool> {
         table: Arc<DHashSubTable<T>>,
@@ -64,12 +76,12 @@ mod iterators {
         next_bucket_index: usize,
         initial_bucket_idxes: Vec<u32>,
         initial_bucket_num: u32,
-    
+
         all_entries: Vec<MvccEntry>,
         current_entry_index: usize,
         is_end: bool,
     }
-    
+
     impl<T: MemPool> SubTableScanner<T> {
         pub fn new(table: &Arc<DHashSubTable<T>>, option: SubTableScannerOption) -> Self {
             let bucket = table.buckets_rwlock.read().unwrap();
@@ -93,15 +105,15 @@ mod iterators {
                 is_end: false,
             }
         }
-    
+
         fn integer_is_a_power_of_2(val: u32) -> bool {
             return (val & (val - 1)) == 0;
         }
     }
-    
+
     impl<T: MemPool> Iterator for SubTableScanner<T> {
         type Item = MvccEntry;
-    
+
         fn next(&mut self) -> Option<Self::Item> {
             if self.is_end {
                 return None;
@@ -115,7 +127,6 @@ mod iterators {
                 } else {
                     self.all_entries.clear();
                     self.current_entry_index = 0;
-
 
                     if self.next_bucket_index >= self.initial_bucket_idxes.len() {
                         self.is_end = true;
@@ -132,10 +143,11 @@ mod iterators {
                     );
 
                     let check_bucket_num = current_bucket_num / self.initial_bucket_num;
-    
+
                     for i in 0..check_bucket_num {
-                        let bucket_entry_idx =
-                            self.initial_bucket_idxes[self.next_bucket_index] as usize + i as usize * self.initial_bucket_num as usize;
+                        let bucket_entry_idx = self.initial_bucket_idxes[self.next_bucket_index]
+                            as usize
+                            + i as usize * self.initial_bucket_num as usize;
                         let bucket_entry = &buckets[bucket_entry_idx];
                         let pfkey = PageFrameKey::new_with_frame_id(
                             self.table.c_key,
@@ -143,7 +155,7 @@ mod iterators {
                             bucket_entry.frame_id(),
                         );
                         let page = self.table.read_page(pfkey);
-    
+
                         let entries = match &self.option {
                             SubTableScannerOption::AllVersionsAllKeys => {
                                 <Page as TableDataPage>::scan_all_versions_all_keys(&page)
@@ -160,13 +172,12 @@ mod iterators {
                         };
                         self.all_entries.extend(entries);
                     }
-    
+
                     self.next_bucket_index += 1;
                 }
             }
         }
     }
-
 
     pub struct SubTableDeltaScanner<T: MemPool> {
         table: Arc<DHashSubTable<T>>,
@@ -175,7 +186,7 @@ mod iterators {
         next_bucket_index: usize,
         initial_bucket_idxes: Vec<u32>,
         initial_bucket_num: u32,
-    
+
         all_entries: Vec<DeltaEntry<Vec<u8>>>,
         current_entry_index: usize,
         is_end: bool,
@@ -199,7 +210,7 @@ mod iterators {
                 is_end: false,
             }
         }
-    
+
         fn integer_is_a_power_of_2(val: u32) -> bool {
             return (val & (val - 1)) == 0;
         }
@@ -207,7 +218,7 @@ mod iterators {
 
     impl<T: MemPool> Iterator for SubTableDeltaScanner<T> {
         type Item = DeltaEntry<Vec<u8>>;
-    
+
         fn next(&mut self) -> Option<Self::Item> {
             if self.is_end {
                 return None;
@@ -221,7 +232,6 @@ mod iterators {
                 } else {
                     self.all_entries.clear();
                     self.current_entry_index = 0;
-
 
                     if self.next_bucket_index >= self.initial_bucket_idxes.len() {
                         self.is_end = true;
@@ -238,10 +248,11 @@ mod iterators {
                     );
 
                     let check_bucket_num = current_bucket_num / self.initial_bucket_num;
-    
+
                     for i in 0..check_bucket_num {
-                        let bucket_entry_idx =
-                            self.initial_bucket_idxes[self.next_bucket_index] as usize + i as usize * self.initial_bucket_num as usize;
+                        let bucket_entry_idx = self.initial_bucket_idxes[self.next_bucket_index]
+                            as usize
+                            + i as usize * self.initial_bucket_num as usize;
                         let bucket_entry = &buckets[bucket_entry_idx];
                         let pfkey = PageFrameKey::new_with_frame_id(
                             self.table.c_key,
@@ -249,25 +260,25 @@ mod iterators {
                             bucket_entry.frame_id(),
                         );
                         let page = self.table.read_page(pfkey);
-    
-                        let entries =  {
+
+                        let entries = {
                             page.scan_delta_of_btw_ts(self.option.small_ts, self.option.large_ts)
                         };
                         self.all_entries.extend(entries);
                     }
-    
+
                     self.next_bucket_index += 1;
                 }
             }
         }
     }
-
 }
 
-pub use iterators::{SubTableDeltaScannerOption, SubTableScannerOption, SubTableDeltaScanner, SubTableScanner};
+pub use iterators::{
+    SubTableDeltaScanner, SubTableDeltaScannerOption, SubTableScanner, SubTableScannerOption,
+};
 
 // ----------------- SCANNER END ------------------------------
-
 
 type Result<T> = core::result::Result<T, HashTableAccessMethodError>;
 impl<T: MemPool> DHashSubTable<T> {
@@ -303,13 +314,7 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn upsert(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-        val: &[u8],
-    ) -> Result<()> {
+    pub fn upsert(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -340,12 +345,7 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn get(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<Option<Vec<u8>>> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -368,12 +368,7 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-
-    pub fn get_keys(
-        &self,
-        key: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub fn get_keys(&self, key: &[u8], ts: Timestamp) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -393,12 +388,7 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn delete(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<()> {
+    pub fn delete(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<()> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -438,14 +428,12 @@ impl<T: MemPool> DHashSubTable<T> {
 
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
             let mut write_page = self.write_page(page_f_key);
-
+            write_page.dbg_print_slots();
             write_page.garbage_collect(safe_ts);
-            todo!()
         }
 
         Ok(())
     }
-
 }
 
 /// Recent & History basic functions
@@ -481,7 +469,9 @@ impl<T: MemPool> DHashSubTable<T> {
             Err(MemPoolStatus::CannotEvictPage) => {
                 log_warn!("All frames are latched and cannot evict page to write the page: {:?}. Will retry", page_key);
                 std::thread::sleep(Duration::from_millis(1));
-                return Err(HashTableAccessMethodError::MemPoolStatus(MemPoolStatus::CannotEvictPage));
+                return Err(HashTableAccessMethodError::MemPoolStatus(
+                    MemPoolStatus::CannotEvictPage,
+                ));
             }
             Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
                 return Err(HashTableAccessMethodError::AcquireLockFailed);
@@ -521,7 +511,9 @@ impl<T: MemPool> DHashSubTable<T> {
             Err(MemPoolStatus::CannotEvictPage) => {
                 log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);
                 std::thread::sleep(Duration::from_millis(1));
-                return Err(HashTableAccessMethodError::MemPoolStatus(MemPoolStatus::CannotEvictPage));
+                return Err(HashTableAccessMethodError::MemPoolStatus(
+                    MemPoolStatus::CannotEvictPage,
+                ));
             }
             Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
                 log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
@@ -533,18 +525,11 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-
     fn hash_to_index(key: &[u8], total_size: u32) -> usize {
         (farmhash::hash32_with_seed(key, SUBTABLE_HASHER_SEED) % total_size) as usize
     }
 
-    fn upsert_inner(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-        val: &[u8],
-    ) -> Result<()> {
+    fn upsert_inner(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
         let buckets = self.buckets_rwlock.read().unwrap();
         let bucket_num = buckets.len() as u32;
 
@@ -560,10 +545,8 @@ impl<T: MemPool> DHashSubTable<T> {
             }
             Some(p) => p,
         };
-        let inserted_result = <Page as TableDataPage>::upsert(
-            &mut inserted_page,
-            key, pkey, val, ts
-        );
+        let inserted_result =
+            <Page as TableDataPage>::upsert(&mut inserted_page, key, pkey, val, ts);
 
         match inserted_result {
             Err(HashTableAccessMethodError::OutOfSpace) => {
@@ -571,24 +554,21 @@ impl<T: MemPool> DHashSubTable<T> {
                 return Err(HashTableAccessMethodError::HashPageOutOfSpace(
                     bucket_num * 2,
                 ));
-            },
+            }
             Err(e) => {
                 panic!(
                     "should not happen! have checked before insert. err: {:?}, insert_key: {:?}",
                     e,
                     str::from_utf8(key),
                 );
-            },
+            }
             Ok(()) => {
                 return Ok(());
             }
         }
     }
 
-    fn rehash(
-        &self,
-        hash_size: u32,
-    ) -> bool {
+    fn rehash(&self, hash_size: u32) -> bool {
         // ensure that re-hash only does once
         let _rehash_guard = self.rehash_mutex.lock().unwrap();
 
@@ -668,11 +648,7 @@ impl<T: MemPool> DHashSubTable<T> {
     }
 
     /// only used when we set key as sub_table hashing argument
-    fn get_keys_inner(
-        &self,
-        key: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    fn get_keys_inner(&self, key: &[u8], ts: Timestamp) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let buckets = self.buckets_rwlock.read().unwrap();
 
         let bucket_idx = Self::hash_to_index(key, buckets.len() as u32);
@@ -694,19 +670,13 @@ impl<T: MemPool> DHashSubTable<T> {
         get_result
     }
 
-
     /*
         acquire 1 page lock
         if acquire lock failed -> Err(AcquireLockFailed): REDO
         if find -> return value
         return Err(keynotfound)
     */
-    fn get_inner(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<u8>> {
+    fn get_inner(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<Vec<u8>> {
         let buckets = self.buckets_rwlock.read().unwrap();
 
         let bucket_idx = Self::hash_to_index(key, buckets.len() as u32);
@@ -738,12 +708,7 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    fn delete_inner(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<()> {
+    fn delete_inner(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<()> {
         let buckets = self.buckets_rwlock.read().unwrap();
 
         let bucket_num = buckets.len() as u32;
@@ -771,7 +736,7 @@ impl<T: MemPool> DHashSubTable<T> {
                 return Err(HashTableAccessMethodError::HashPageOutOfSpace(
                     bucket_num * 2,
                 ));
-            },
+            }
             Err(HashTableAccessMethodError::KeyNotFound) => {
                 return Err(HashTableAccessMethodError::KeyNotFound);
             }
@@ -781,7 +746,7 @@ impl<T: MemPool> DHashSubTable<T> {
                     e,
                     str::from_utf8(key),
                 );
-            },
+            }
             Ok(()) => {
                 return Ok(());
             }
@@ -795,31 +760,46 @@ impl<T: MemPool> DHashSubTable<T> {
         for entry in &*buckets {
             let pfkey = PageFrameKey::new(self.c_key, entry.page_id());
             let page = self.read_page(pfkey);
-            num += <Page as TableDataPage>::dbg_print_slots(& page);
+            num += <Page as TableDataPage>::dbg_print_slots(&page);
         }
         return num;
     }
 
-    pub fn scan_mvcc_entries(self: &Arc<Self>, option: SubTableScannerOption) -> SubTableScanner<T> {
+    pub fn scan_mvcc_entries(
+        self: &Arc<Self>,
+        option: SubTableScannerOption,
+    ) -> SubTableScanner<T> {
         SubTableScanner::new(self, option)
     }
-    pub fn scan_delta(self: &Arc<Self>, option: SubTableDeltaScannerOption) -> SubTableDeltaScanner<T> {
+    pub fn scan_delta(
+        self: &Arc<Self>,
+        option: SubTableDeltaScannerOption,
+    ) -> SubTableDeltaScanner<T> {
         SubTableDeltaScanner::new(self, option)
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{bp::{get_in_mem_pool, ContainerKey}, mvcc_index::{hashtable_mu::{double_hash::double_hash_sub_table::DHashSubTable, hash_join_table_common::DEFAULT_NUM_BUCKETS}, Timestamp}, page::AVAILABLE_PAGE_SIZE};
+    use crate::{
+        bp::{get_in_mem_pool, ContainerKey},
+        mvcc_index::{
+            hashtable_mu::{
+                double_hash::double_hash_sub_table::DHashSubTable,
+                hash_join_table_common::DEFAULT_NUM_BUCKETS,
+            },
+            Timestamp,
+        },
+        page::AVAILABLE_PAGE_SIZE,
+    };
 
     #[test]
     fn simple_insert() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = DHashSubTable::new_with_bucket_num(c_key, mem_pool, DEFAULT_NUM_BUCKETS);
-        hash_join_table
-            .upsert(&[1], &[1], 1, &[1])
-            .unwrap();
+        let hash_join_table =
+            DHashSubTable::new_with_bucket_num(c_key, mem_pool, DEFAULT_NUM_BUCKETS);
+        hash_join_table.upsert(&[1], &[1], 1, &[1]).unwrap();
         let get_result = hash_join_table.get(&[2], &[1], 1);
         assert_eq!(get_result.unwrap(), None);
 
@@ -864,5 +844,4 @@ mod test {
             );
         }
     }
-
 }

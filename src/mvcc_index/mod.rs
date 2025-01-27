@@ -156,4 +156,3 @@ pub struct DeltaEntry<V> {
     pub key: Vec<u8>,
     pub pkey: Vec<u8>,
 }
-

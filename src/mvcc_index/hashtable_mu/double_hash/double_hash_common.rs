@@ -34,5 +34,3 @@ impl BucketEntry {
         self.frame_id.load(std::sync::atomic::Ordering::Acquire)
     }
 }
-
-

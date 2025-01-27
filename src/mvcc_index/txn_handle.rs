@@ -157,8 +157,7 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT insert in a committed txn");
             }
-            self
-                .txn_hash_table
+            self.txn_hash_table
                 .hash_table_inner
                 .insert(key, pkey, self.begin_ts, 0, value)?;
             Ok(())
@@ -178,8 +177,7 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT update in a committed txn");
             }
-            self
-                .txn_hash_table
+            self.txn_hash_table
                 .hash_table_inner
                 .update(key, pkey, self.begin_ts, 0, value)?;
 
@@ -195,8 +193,7 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT update in a committed txn");
             }
-            self
-                .txn_hash_table
+            self.txn_hash_table
                 .hash_table_inner
                 .delete(key, pkey, self.begin_ts, 0)?;
 

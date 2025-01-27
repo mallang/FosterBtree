@@ -24,9 +24,9 @@ mod access_err {
         PageWriteLatchFailed,
         RecordTooLarge,
         MemPoolStatus(MemPoolStatus),
-        OutOfSpace, // For ReadOptimizedPage
-        HashPageOutOfSpace(u32),        // new_hash_size
-        AcquireLockFailed,              // for multi-page acq
+        OutOfSpace,              // For ReadOptimizedPage
+        HashPageOutOfSpace(u32), // new_hash_size
+        AcquireLockFailed,       // for multi-page acq
         Other(String),
     }
 
@@ -63,86 +63,6 @@ mod access_err {
 }
 
 pub use access_err::HashTableAccessMethodError;
-
-pub trait RecentHashTable<T: MemPool>: Sync + Send {
-    fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
-    fn insert(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-        val: &[u8],
-    ) -> Result<Option<Timestamp>, HashTableAccessMethodError>;
-    fn get(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<u8>, HashTableAccessMethodError>;
-    fn get_all(
-        &self,
-        key: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError>;
-    fn update(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-        val: &[u8],
-    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
-    fn delete(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<(Timestamp, Vec<u8>), HashTableAccessMethodError>;
-}
-
-pub trait HistoryHashTable<T: MemPool> {
-    fn get_all_bucket_page_ids(&self) -> Vec<PageId>;
-    fn insert(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        start_ts: Timestamp,
-        end_ts: Timestamp,
-        val: &[u8],
-    ) -> Result<(), HashTableAccessMethodError>;
-    fn get(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<u8>, HashTableAccessMethodError>;
-    fn get_all(
-        &self,
-        key: &[u8],
-        ts: Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HashTableAccessMethodError>;
-    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), HashTableAccessMethodError>;
-
-    #[allow(unused)]
-    fn insert_deleted(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        start_ts: Timestamp,
-        end_ts: Timestamp,
-    ) -> Result<(), HashTableAccessMethodError>;
-}
-
-pub trait RecentHistoryTable<T: MemPool> {
-    type ScanIter: Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)>;
-    type ScanKeyIter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
-    type ScanAllIter: Iterator<Item = MvccEntry>;
-
-    fn scan(self: &Arc<Self>, ts: Timestamp) -> Self::ScanIter;
-
-    fn scan_all(self: &Arc<Self>) -> Self::ScanAllIter;
-
-    fn scan_key(self: &Arc<Self>, ts: Timestamp, key: &[u8]) -> Self::ScanKeyIter;
-}
 
 /*
     <Recent Bucket Num> <History Bucket Num> [Recent Page Id ...] [History Page Id...]
