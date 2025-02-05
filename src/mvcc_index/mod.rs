@@ -32,9 +32,68 @@ pub struct MvccEntry {
     pub pkey: Vec<u8>,
     pub value: Vec<u8>,
 
-    // pub tx_id: TxId,
+    pub tx_id: TxId,
     pub start_ts: Timestamp,
     pub end_ts: Timestamp,
+    // pub page_id: PageId,
+    // pub slot_id: SlotId,
+}
+
+impl MvccEntry {
+    pub fn new(
+        key: Vec<u8>,
+        pkey: Vec<u8>,
+        value: Vec<u8>,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Self {
+        Self {
+            key,
+            pkey,
+            value,
+            tx_id: 0,
+            start_ts,
+            end_ts,
+        }
+    }
+    pub fn new_with_tx_id(
+        key: Vec<u8>,
+        pkey: Vec<u8>,
+        value: Vec<u8>,
+        tx_id: TxId,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Self {
+        Self {
+            key,
+            pkey,
+            value,
+            tx_id,
+            start_ts,
+            end_ts,
+        }
+    }
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+    pub fn pkey(&self) -> &[u8] {
+        &self.pkey
+    }
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+    pub fn start_ts(&self) -> Timestamp {
+        self.start_ts
+    }
+    pub fn end_ts(&self) -> Timestamp {
+        self.end_ts
+    }
+    pub fn tx_id(&self) -> TxId {
+        self.tx_id
+    }
+    pub fn set_tx_id(&mut self, tx_id: TxId) {
+        self.tx_id = tx_id;
+    }
 }
 
 impl PartialEq for MvccEntry {

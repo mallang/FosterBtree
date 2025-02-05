@@ -1,3 +1,4 @@
+use dashmap::mapref::entry;
 use fbtree::mvcc_index::{MvccEntry, MvccIndex, Timestamp};
 // use fbtree::{mvcc_index::hash_join::mvcc_hash_join::MvccHashJoinTable, prelude::*};
 use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_table::MvccHashJoinTable, prelude::*};
@@ -95,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         || ops_file.is_none()
         || recent_data_file.is_none()
         || history_data_file.is_none()
-        // || scan_ops_file.is_none()
+    // || scan_ops_file.is_none()
     {
         eprintln!("Usage:");
         eprintln!("  {} -df <data_file> -of <ops_file> -rdf <recent_data_file> -hdf <history_data_file> -sof <scan_ops_file> [-n <num_ops>]", args[0]);
@@ -143,13 +144,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start_time_hashmap_load = Instant::now();
     // Load data into Rust's HashMap
     for (key, pkey, value) in &data {
-        let entry = MvccEntry {
-            key: key.clone(),
-            pkey: pkey.clone(),
-            value: value.clone(),
-            start_ts: 0,
-            end_ts: u64::MAX,
-        };
+        let entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), 0, u64::MAX);
+        // let entry = MvccEntry {
+        //     key: key.clone(),
+        //     pkey: pkey.clone(),
+        //     value: value.clone(),
+        //     start_ts: 0,
+        //     end_ts: u64::MAX,
+        // };
         rust_hash_map
             .entry(key.clone())
             .or_insert_with(Vec::new)
@@ -204,13 +206,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     last_entry.end_ts = op.ts;
                 }
                 // Add the new version
-                let new_entry = MvccEntry {
-                    key: key.clone(),
-                    pkey: op.pkey.clone(),
-                    value: op.value.clone(),
-                    start_ts: op.ts,
-                    end_ts: u64::MAX,
-                };
+                let new_entry = MvccEntry::new(
+                    key.clone(),
+                    op.pkey.clone(),
+                    op.value.clone(),
+                    op.ts,
+                    u64::MAX,
+                );
+                // let new_entry = MvccEntry {
+                //     key: key.clone(),
+                //     pkey: op.pkey.clone(),
+                //     value: op.value.clone(),
+                //     start_ts: op.ts,
+                //     end_ts: u64::MAX,
+                // };
                 entries.push(new_entry);
             }
             "delete" => {
@@ -613,12 +622,8 @@ fn check_full_consistency_hash_join_table(
     // Create a HashSet of expected entries for comparison
     let expected_entries: HashSet<MvccEntry> = expected_data
         .iter()
-        .map(|(start_ts, end_ts, key, pkey, value)| MvccEntry {
-            start_ts: *start_ts,
-            end_ts: *end_ts,
-            key: key.clone(),
-            pkey: pkey.clone(),
-            value: value.clone(),
+        .map(|(start_ts, end_ts, key, pkey, value)| {
+            MvccEntry::new(key.clone(), pkey.clone(), value.clone(), *start_ts, *end_ts)
         })
         .collect();
 

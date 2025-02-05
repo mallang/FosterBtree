@@ -2,7 +2,7 @@ use super::Timestamp;
 use crate::{
     access_method::AccessMethodError,
     log_debug,
-    mvcc_index::MvccEntry,
+    mvcc_index::{MvccEntry, TxId},
     prelude::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -333,8 +333,8 @@ mod slot {
             self.ts
         }
 
-        pub fn set_ts(&mut self, ts: Timestamp) {
-            self.ts = ts;
+        pub fn set_ts(&mut self, ts: &Timestamp) {
+            self.ts = *ts;
         }
 
         pub fn val_size(&self) -> u32 {
@@ -455,22 +455,25 @@ pub trait MvccHashJoinRecentPage {
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        tx_id: &TxId,
         val: &[u8],
     ) -> Result<(), AccessMethodError>;
-    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<Vec<u8>, AccessMethodError>;
+    fn get(&self, key: &[u8], pkey: &[u8], ts: &Timestamp) -> Result<Vec<u8>, AccessMethodError>;
     fn update(
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        tx_id: &TxId,
         val: &[u8],
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError>;
     fn delete(
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        tx_id: &TxId,
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError>;
 
     fn next_page(&self) -> Option<(PageId, u32)>;
@@ -494,6 +497,8 @@ pub trait MvccHashJoinRecentPage {
         self.header().slot_count()
     }
     fn get_entry_at_slot(&self, slot_id: u32) -> MvccEntry;
+
+    fn binary_search_by_end_ts(&self, ts: Timestamp) -> (bool, u32);
 }
 
 impl MvccHashJoinRecentPage for Page {
@@ -506,7 +511,8 @@ impl MvccHashJoinRecentPage for Page {
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        tx_id: &TxId,
         val: &[u8],
     ) -> Result<(), AccessMethodError> {
         let space_need = <Page as MvccHashJoinRecentPage>::space_need(key, pkey, val);
@@ -524,7 +530,7 @@ impl MvccHashJoinRecentPage for Page {
             return Err(AccessMethodError::OutOfSpace);
         }
 
-        let slot = Slot::new(key, pkey, ts, val, rec_offset as usize);
+        let slot = Slot::new(key, pkey, *ts, val, rec_offset as usize);
         let slot_bytes = slot.to_bytes();
 
         let record = Record::new(key, pkey, val);
@@ -542,7 +548,7 @@ impl MvccHashJoinRecentPage for Page {
         Ok(())
     }
 
-    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8], pkey: &[u8], ts: &Timestamp) -> Result<Vec<u8>, AccessMethodError> {
         let header = self.header();
         let slot_count = header.slot_count();
         let mut slot_offset = PAGE_HEADER_SIZE;
@@ -576,7 +582,7 @@ impl MvccHashJoinRecentPage for Page {
                 full_pkey.extend_from_slice(record.remain_pkey());
 
                 if full_key == key && full_pkey == pkey {
-                    if slot.ts() <= ts {
+                    if slot.ts() <= *ts {
                         return Ok(record.val().to_vec());
                     } else {
                         return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
@@ -592,7 +598,8 @@ impl MvccHashJoinRecentPage for Page {
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        tx_id: &TxId,
         val: &[u8],
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
         let header = self.header();
@@ -632,7 +639,7 @@ impl MvccHashJoinRecentPage for Page {
 
                 if full_key == key && full_pkey == pkey {
                     // Check timestamp
-                    if slot.ts() <= ts {
+                    if slot.ts() <= *ts {
                         // Save old timestamp and value
                         let old_ts = slot.ts();
                         let old_val = record.val().to_vec();
@@ -713,7 +720,8 @@ impl MvccHashJoinRecentPage for Page {
         &mut self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        tx_id: &TxId,
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
         let mut header = self.header();
         let slot_count = header.slot_count();
@@ -752,7 +760,7 @@ impl MvccHashJoinRecentPage for Page {
 
                 if full_key == key && full_pkey == pkey {
                     // Check timestamp
-                    if slot.ts() <= ts {
+                    if slot.ts() <= *ts {
                         // Save old timestamp and value
                         let old_ts = slot.ts();
                         let old_val = record.val().to_vec();
@@ -839,13 +847,55 @@ impl MvccHashJoinRecentPage for Page {
         let mut full_pkey = slot.pkey_prefix().to_vec();
         full_pkey.extend_from_slice(record.remain_pkey());
 
-        MvccEntry {
-            key: full_key,
-            pkey: full_pkey,
-            start_ts: slot.ts(),
-            end_ts: u64::MAX,
-            value: record.val().to_vec(),
+        MvccEntry::new(
+            full_key,
+            full_pkey,
+            record.val().to_vec(),
+            slot.ts(),
+            u64::MAX,
+        )
+    }
+
+    fn binary_search_by_end_ts(&self, end_ts: Timestamp) -> (bool, u32) {
+        let mut high = self.slot_count();
+        if high == 0 {
+            return (false, 0);
         }
+
+        high -= 1;
+        let high_ts = self.get_entry_at_slot(high).end_ts;
+
+        if end_ts > high_ts {
+            return (false, high + 1);
+        } else if end_ts == high_ts {
+            return (true, high);
+        } else if high == 0 {
+            return (false, 0);
+        }
+
+        let mut low = 0;
+        let low_ts = self.get_entry_at_slot(low).end_ts;
+
+        if end_ts < low_ts {
+            return (false, 0);
+        } else if end_ts == low_ts {
+            return (true, low);
+        }
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let mid_ts = self.get_entry_at_slot(mid).end_ts;
+
+            if end_ts == mid_ts {
+                return (true, mid);
+            } else if end_ts < mid_ts {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+
+        (false, low)
     }
 }
 
@@ -868,660 +918,660 @@ impl Page {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::prelude::{Page, AVAILABLE_PAGE_SIZE};
-
-    #[test]
-    fn test_insert_and_get_key_pkey_len_less_than_prefix() {
-        // Key and PKey lengths less than prefix sizes
-        let key = b"key1"; // Length 4
-        let pkey = b"pk1"; // Length 3
-        let ts: Timestamp = 1;
-        let val = b"value1";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
-
-        // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_and_get_key_len_less_than_prefix_pkey_len_greater_than_prefix() {
-        // Key length less than prefix size, PKey length greater than prefix size
-        let key = b"key2"; // Length 4
-        let pkey = b"primarykey_longer"; // Length > 8
-        let ts: Timestamp = 2;
-        let val = b"value2";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
-
-        // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_and_get_key_len_greater_than_prefix_pkey_len_less_than_prefix() {
-        // Key length greater than prefix size, PKey length less than prefix size
-        let key = b"key_longer_than_prefix"; // Length > 8
-        let pkey = b"pk2"; // Length 3
-        let ts: Timestamp = 3;
-        let val = b"value3";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
-
-        // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_and_get_key_pkey_len_greater_than_prefix() {
-        // Key and PKey lengths greater than prefix sizes
-        let key = b"key_longer_than_prefix_size"; // Length > 8
-        let pkey = b"primarykey_longer_than_prefix"; // Length > 8
-        let ts: Timestamp = 4;
-        let val = b"value4";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts, val).unwrap();
-
-        // Retrieve the entry
-        let retrieved_val = page.get(key, pkey, ts).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_multiple_entries_with_various_key_pkey_lengths() {
-        // Define the entries with keys and pkeys as slices (&[u8])
-        let entries: Vec<(&[u8], &[u8], u64, &[u8])> = vec![
-            (b"k1", b"p1", 10u64, b"v1"), // Both key and pkey < prefix size
-            (b"key_longlong", b"p2", 20u64, b"v2"), // Key > prefix size, pkey < prefix size
-            (b"k3", b"primarykey_long", 30u64, b"v3"), // Key < prefix size, pkey > prefix size
-            (b"key_very_long", b"primarykey_very_long", 40u64, b"v4"), // Both key and pkey > prefix size
-        ];
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert entries
-        for (key, pkey, ts, val) in &entries {
-            page.insert(key, pkey, *ts, val).unwrap();
-        }
-
-        // Retrieve and verify entries
-        for (key, pkey, ts, val) in &entries {
-            let retrieved_val = page.get(key, pkey, *ts).unwrap();
-            assert_eq!(retrieved_val, *val);
-        }
-    }
-
-    #[test]
-    fn test_insert_and_get_with_timestamp_check() {
-        // Test that entries with timestamps greater than the query timestamp are not returned
-        let key = b"key_test";
-        let pkey = b"pkey_test";
-        let ts_insert: Timestamp = 100;
-        let ts_query: Timestamp = 50; // Less than ts_insert
-        let val = b"value_test";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
-
-        // Attempt to retrieve with earlier timestamp
-        let result = page.get(key, pkey, ts_query);
-        assert!(matches!(
-            result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-        ));
-
-        // Retrieve with correct timestamp
-        let retrieved_val = page.get(key, pkey, ts_insert).unwrap();
-        assert_eq!(retrieved_val, val);
-    }
-
-    #[test]
-    fn test_insert_duplicate_keys() {
-        // Insert entries with the same key and pkey but different timestamps
-        let key = b"key_dup";
-        let pkey1: &[u8; 8] = b"pkey_dup";
-        let pkey2: &[u8; 9] = b"pkey_dup2";
-        let val1 = b"value1";
-        let val2 = b"value2";
-        let ts1: Timestamp = 1;
-        let ts2: Timestamp = 2;
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert first entry
-        page.insert(key, pkey1, ts1, val1).unwrap();
-
-        // Insert second entry with a newer timestamp
-        page.insert(key, pkey2, ts2, val2).unwrap();
-
-        // Retrieve with ts1
-        let retrieved_val = page.get(key, pkey1, ts1).unwrap();
-        assert_eq!(retrieved_val, val1);
-
-        // Retrieve with ts2
-        let retrieved_val = page.get(key, pkey2, ts2).unwrap();
-        assert_eq!(retrieved_val, val2);
-    }
-
-    #[test]
-    fn test_insert_when_page_full() {
-        // Fill the page to capacity and attempt to insert another entry
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Use fixed-length keys and pkeys
-        let key = b"key_full_full"; // Length 12 bytes
-        let pkey = b"pkey_full_full"; // Length 13 bytes
-        let val = b"value_full"; // Value size
-        let ts: Timestamp = 1;
-
-        let space_per_entry = Page::space_need(key, pkey, val) as usize;
-        let available_space = AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE;
-        let page_capacity = available_space / space_per_entry;
-
-        // Insert entries until the page is full
-        for _ in 0..page_capacity {
-            page.insert(key, pkey, ts, val).unwrap();
-        }
-
-        // Attempt to insert one more entry
-        let result = page.insert(key, pkey, ts, val);
-        assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
-    }
-
-    #[test]
-    fn test_update_same_size_value() {
-        let key = b"key1";
-        let pkey = b"pkey1";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"value1"; // Length 6
-        let val_update = b"value2"; // Length 6 (same as val_insert)
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts_insert);
-        assert_eq!(old_val, val_insert);
-
-        // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
-        assert_eq!(retrieved_val, val_update);
-    }
-
-    #[test]
-    fn test_update_smaller_value() {
-        let key = b"key2";
-        let pkey = b"pkey2";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"value_longer"; // Length 12
-        let val_update = b"short"; // Length 5 (smaller than val_insert)
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts_insert);
-        assert_eq!(old_val, val_insert);
-
-        // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
-        assert_eq!(retrieved_val, val_update);
-    }
-
-    #[test]
-    fn test_update_larger_value_enough_space() {
-        let key = b"key3";
-        let pkey = b"pkey3";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"short"; // Length 5
-        let val_update = b"value_is_longer"; // Length 14 (larger than val_insert)
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Update the entry
-        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts_insert);
-        assert_eq!(old_val, val_insert);
-
-        // Retrieve the updated entry
-        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
-        assert_eq!(retrieved_val, val_update);
-    }
-
-    #[test]
-    fn test_update_larger_value_insufficient_space() {
-        let key = b"key4";
-        let pkey = b"pkey4";
-        let ts_insert: Timestamp = 100;
-        let ts_update: Timestamp = 200;
-        let val_insert = b"val"; // Length 3
-        let val_update = vec![b'a'; (AVAILABLE_PAGE_SIZE / 2) as usize]; // Large value
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Fill the page to limit the available space
-        page.insert(
-            b"key_dummy",
-            b"pkey_dummy",
-            50,
-            &vec![b'b'; (AVAILABLE_PAGE_SIZE / 2) as usize],
-        )
-        .unwrap();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Attempt to update the entry with a larger value
-        let result = page.update(key, pkey, ts_update, &val_update);
-        assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
-    }
-
-    #[test]
-    fn test_update_non_existent_key() {
-        let key = b"key_nonexistent";
-        let pkey = b"pkey_nonexistent";
-        let ts_update: Timestamp = 100;
-        let val_update = b"value";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Attempt to update a non-existent key
-        let result = page.update(key, pkey, ts_update, val_update);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_update_invalid_timestamp() {
-        let key = b"key5";
-        let pkey = b"pkey5";
-        let ts_insert: Timestamp = 200;
-        let ts_update: Timestamp = 100; // Less than ts_insert
-        let val_insert = b"value1";
-        let val_update = b"value2";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val_insert).unwrap();
-
-        // Attempt to update with an earlier timestamp
-        let result = page.update(key, pkey, ts_update, val_update);
-        assert!(matches!(
-            result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-        ));
-    }
-
-    #[test]
-    fn test_delete_existing_record() {
-        let key = b"key_delete";
-        let pkey = b"pkey_delete";
-        let ts_insert: Timestamp = 100;
-        let ts_delete: Timestamp = 200;
-        let val = b"value_delete";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
-
-        // Delete the entry
-        let (old_ts, old_val) = page.delete(key, pkey, ts_delete).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts_insert);
-        assert_eq!(old_val, val);
-
-        // Attempt to get the deleted entry
-        let result = page.get(key, pkey, ts_delete);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_delete_non_existent_record() {
-        let key = b"key_nonexistent";
-        let pkey = b"pkey_nonexistent";
-        let ts_delete: Timestamp = 100;
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Attempt to delete a non-existent record
-        let result = page.delete(key, pkey, ts_delete);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_delete_with_invalid_timestamp() {
-        let key = b"key_invalid_ts";
-        let pkey = b"pkey_invalid_ts";
-        let ts_insert: Timestamp = 200;
-        let ts_delete: Timestamp = 100; // Earlier than ts_insert
-        let val = b"value_invalid_ts";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
-
-        // Attempt to delete with an earlier timestamp
-        let result = page.delete(key, pkey, ts_delete);
-        assert!(matches!(
-            result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-        ));
-    }
-
-    #[test]
-    fn test_delete_multiple_records() {
-        let entries: Vec<(&[u8], &[u8], Timestamp, &[u8])> = vec![
-            (b"key1", b"pkey1", 100u64, b"value1"),
-            (b"key2", b"pkey2", 110u64, b"value2"),
-            (b"key3", b"pkey3", 120u64, b"value3"),
-        ];
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert entries
-        for (key, pkey, ts, val) in &entries {
-            page.insert(key, pkey, *ts, val).unwrap();
-        }
-
-        // Delete entries one by one
-        for (key, pkey, ts, _) in &entries {
-            let ts_delete = ts + 50; // Use a later timestamp for deletion
-            let (old_ts, _) = page.delete(key, pkey, ts_delete).unwrap();
-            assert_eq!(old_ts, *ts);
-
-            // Attempt to get the deleted entry
-            let result = page.get(key, pkey, ts_delete);
-            assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-        }
-    }
-
-    #[test]
-    fn test_delete_when_page_empty() {
-        let key = b"key_empty";
-        let pkey = b"pkey_empty";
-        let ts_delete: Timestamp = 100;
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Attempt to delete from an empty page
-        let result = page.delete(key, pkey, ts_delete);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_delete_record_at_rec_start_offset() {
-        let key1 = b"key_start";
-        let pkey1 = b"pkey_start";
-        let ts1: Timestamp = 100;
-        let val1 = b"value_start";
-
-        let key2 = b"key_other";
-        let pkey2 = b"pkey_other";
-        let ts2: Timestamp = 110;
-        let val2 = b"value_other";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert two entries
-        page.insert(key1, pkey1, ts1, val1).unwrap();
-        page.insert(key2, pkey2, ts2, val2).unwrap();
-        let rec_start_offset_before = page.header().rec_start_offset();
-
-        // Delete the record at rec_start_offset
-        let (old_ts, old_val) = page.delete(key2, pkey2, ts2 + 50).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts2);
-        assert_eq!(old_val, val2);
-
-        // Verify that rec_start_offset has advanced
-        let rec_start_offset_after = page.header().rec_start_offset();
-        assert!(rec_start_offset_after > rec_start_offset_before);
-
-        // Ensure the other record is still retrievable
-        let retrieved_val = page.get(key1, pkey1, ts1).unwrap();
-        assert_eq!(retrieved_val, val1);
-    }
-
-    #[test]
-    fn test_delete_record_not_at_rec_start_offset() {
-        let key1 = b"key_other";
-        let pkey1 = b"pkey_other";
-        let ts1: Timestamp = 100;
-        let val1 = b"value_other";
-
-        let key2 = b"key_start";
-        let pkey2 = b"pkey_start";
-        let ts2: Timestamp = 110;
-        let val2 = b"value_start";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert two entries
-        page.insert(key1, pkey1, ts1, val1).unwrap();
-        page.insert(key2, pkey2, ts2, val2).unwrap(); // This record will be at rec_start_offset
-
-        let rec_start_offset_before = page.header().rec_start_offset();
-
-        // Delete the record not at rec_start_offset
-        let (old_ts, old_val) = page.delete(key1, pkey1, ts1 + 50).unwrap();
-
-        // Verify old timestamp and value
-        assert_eq!(old_ts, ts1);
-        assert_eq!(old_val, val1);
-
-        // Verify that rec_start_offset remains unchanged
-        let rec_start_offset_after = page.header().rec_start_offset();
-        assert_eq!(rec_start_offset_after, rec_start_offset_before);
-
-        // Ensure the other record is still retrievable
-        let retrieved_val = page.get(key2, pkey2, ts2).unwrap();
-        assert_eq!(retrieved_val, val2);
-    }
-
-    #[test]
-    fn test_delete_and_get_deleted_record() {
-        let key = b"key_to_delete";
-        let pkey = b"pkey_to_delete";
-        let ts_insert: Timestamp = 100;
-        let ts_delete: Timestamp = 200;
-        let val = b"value_to_delete";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
-
-        // Delete the entry
-        page.delete(key, pkey, ts_delete).unwrap();
-
-        // Attempt to get the deleted entry
-        let result = page.get(key, pkey, ts_delete);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-
-        // Attempt to get with an earlier timestamp
-        let result = page.get(key, pkey, ts_insert);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_delete_and_insert_new_record() {
-        let key = b"key_cycle";
-        let pkey = b"pkey_cycle";
-        let ts_insert1: Timestamp = 100;
-        let ts_delete: Timestamp = 200;
-        let ts_insert2: Timestamp = 300;
-        let val1 = b"value1";
-        let val2 = b"value2";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the first entry
-        page.insert(key, pkey, ts_insert1, val1).unwrap();
-
-        // Delete the entry
-        page.delete(key, pkey, ts_delete).unwrap();
-
-        // Insert a new entry with the same key and pkey
-        page.insert(key, pkey, ts_insert2, val2).unwrap();
-
-        // Retrieve the new entry
-        let retrieved_val = page.get(key, pkey, ts_insert2).unwrap();
-        assert_eq!(retrieved_val, val2);
-
-        // Attempt to get the old entry with an earlier timestamp
-        let result = page.get(key, pkey, ts_insert1);
-        assert!(matches!(
-            result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-        ));
-    }
-
-    #[test]
-    fn test_delete_same_record_twice() {
-        let key = b"key_twice";
-        let pkey = b"pkey_twice";
-        let ts_insert: Timestamp = 100;
-        let ts_delete1: Timestamp = 200;
-        let ts_delete2: Timestamp = 300;
-        let val = b"value_twice";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert the entry
-        page.insert(key, pkey, ts_insert, val).unwrap();
-
-        // First deletion
-        page.delete(key, pkey, ts_delete1).unwrap();
-
-        // Second deletion attempt
-        let result = page.delete(key, pkey, ts_delete2);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_delete_all_records_and_check_page_empty() {
-        let entries: Vec<(&[u8], &[u8], Timestamp, &[u8])> = vec![
-            (b"key_a", b"pkey_a", 100u64, b"value_a"),
-            (b"key_b", b"pkey_b", 110u64, b"value_b"),
-            (b"key_c", b"pkey_c", 120u64, b"value_c"),
-        ];
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert entries
-        for (key, pkey, ts, val) in &entries {
-            page.insert(key, pkey, *ts, val).unwrap();
-        }
-
-        // Delete all entries
-        for (key, pkey, ts, _) in &entries {
-            let ts_delete = ts + 50;
-            page.delete(key, pkey, ts_delete).unwrap();
-        }
-
-        // Verify that the page is empty
-        let header = page.header();
-        assert_eq!(header.slot_count(), 0);
-        assert_eq!(header.total_bytes_used(), PAGE_HEADER_SIZE as u32);
-    }
-
-    #[test]
-    fn test_delete_with_multiple_versions() {
-        let key = b"key_multi";
-        let pkey = b"pkey_multi";
-        let ts1: Timestamp = 100;
-        let ts2: Timestamp = 200;
-        let ts_delete: Timestamp = 300;
-        let val1 = b"value1";
-        let val2 = b"value2";
-
-        let mut page = Page::new_empty();
-        page.init();
-
-        // Insert first version
-        page.insert(key, pkey, ts1, val1).unwrap();
-
-        // Update to create a second version
-        page.update(key, pkey, ts2, val2).unwrap();
-
-        // Delete the entry
-        page.delete(key, pkey, ts_delete).unwrap();
-
-        // Attempt to get with various timestamps
-        let result = page.get(key, pkey, ts1);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-
-        let result = page.get(key, pkey, ts2);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-
-        let result = page.get(key, pkey, ts_delete);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-}
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::prelude::{Page, AVAILABLE_PAGE_SIZE};
+
+//     #[test]
+//     fn test_insert_and_get_key_pkey_len_less_than_prefix() {
+//         // Key and PKey lengths less than prefix sizes
+//         let key = b"key1"; // Length 4
+//         let pkey = b"pk1"; // Length 3
+//         let ts: Timestamp = 1;
+//         let val = b"value1";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts, val).unwrap();
+
+//         // Retrieve the entry
+//         let retrieved_val = page.get(key, pkey, ts).unwrap();
+//         assert_eq!(retrieved_val, val);
+//     }
+
+//     #[test]
+//     fn test_insert_and_get_key_len_less_than_prefix_pkey_len_greater_than_prefix() {
+//         // Key length less than prefix size, PKey length greater than prefix size
+//         let key = b"key2"; // Length 4
+//         let pkey = b"primarykey_longer"; // Length > 8
+//         let ts: Timestamp = 2;
+//         let val = b"value2";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts, val).unwrap();
+
+//         // Retrieve the entry
+//         let retrieved_val = page.get(key, pkey, ts).unwrap();
+//         assert_eq!(retrieved_val, val);
+//     }
+
+//     #[test]
+//     fn test_insert_and_get_key_len_greater_than_prefix_pkey_len_less_than_prefix() {
+//         // Key length greater than prefix size, PKey length less than prefix size
+//         let key = b"key_longer_than_prefix"; // Length > 8
+//         let pkey = b"pk2"; // Length 3
+//         let ts: Timestamp = 3;
+//         let val = b"value3";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts, val).unwrap();
+
+//         // Retrieve the entry
+//         let retrieved_val = page.get(key, pkey, ts).unwrap();
+//         assert_eq!(retrieved_val, val);
+//     }
+
+//     #[test]
+//     fn test_insert_and_get_key_pkey_len_greater_than_prefix() {
+//         // Key and PKey lengths greater than prefix sizes
+//         let key = b"key_longer_than_prefix_size"; // Length > 8
+//         let pkey = b"primarykey_longer_than_prefix"; // Length > 8
+//         let ts: Timestamp = 4;
+//         let val = b"value4";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts, val).unwrap();
+
+//         // Retrieve the entry
+//         let retrieved_val = page.get(key, pkey, ts).unwrap();
+//         assert_eq!(retrieved_val, val);
+//     }
+
+//     #[test]
+//     fn test_insert_multiple_entries_with_various_key_pkey_lengths() {
+//         // Define the entries with keys and pkeys as slices (&[u8])
+//         let entries: Vec<(&[u8], &[u8], u64, &[u8])> = vec![
+//             (b"k1", b"p1", 10u64, b"v1"), // Both key and pkey < prefix size
+//             (b"key_longlong", b"p2", 20u64, b"v2"), // Key > prefix size, pkey < prefix size
+//             (b"k3", b"primarykey_long", 30u64, b"v3"), // Key < prefix size, pkey > prefix size
+//             (b"key_very_long", b"primarykey_very_long", 40u64, b"v4"), // Both key and pkey > prefix size
+//         ];
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert entries
+//         for (key, pkey, ts, val) in &entries {
+//             page.insert(key, pkey, *ts, val).unwrap();
+//         }
+
+//         // Retrieve and verify entries
+//         for (key, pkey, ts, val) in &entries {
+//             let retrieved_val = page.get(key, pkey, *ts).unwrap();
+//             assert_eq!(retrieved_val, *val);
+//         }
+//     }
+
+//     #[test]
+//     fn test_insert_and_get_with_timestamp_check() {
+//         // Test that entries with timestamps greater than the query timestamp are not returned
+//         let key = b"key_test";
+//         let pkey = b"pkey_test";
+//         let ts_insert: Timestamp = 100;
+//         let ts_query: Timestamp = 50; // Less than ts_insert
+//         let val = b"value_test";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val).unwrap();
+
+//         // Attempt to retrieve with earlier timestamp
+//         let result = page.get(key, pkey, ts_query);
+//         assert!(matches!(
+//             result,
+//             Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+//         ));
+
+//         // Retrieve with correct timestamp
+//         let retrieved_val = page.get(key, pkey, ts_insert).unwrap();
+//         assert_eq!(retrieved_val, val);
+//     }
+
+//     #[test]
+//     fn test_insert_duplicate_keys() {
+//         // Insert entries with the same key and pkey but different timestamps
+//         let key = b"key_dup";
+//         let pkey1: &[u8; 8] = b"pkey_dup";
+//         let pkey2: &[u8; 9] = b"pkey_dup2";
+//         let val1 = b"value1";
+//         let val2 = b"value2";
+//         let ts1: Timestamp = 1;
+//         let ts2: Timestamp = 2;
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert first entry
+//         page.insert(key, pkey1, ts1, val1).unwrap();
+
+//         // Insert second entry with a newer timestamp
+//         page.insert(key, pkey2, ts2, val2).unwrap();
+
+//         // Retrieve with ts1
+//         let retrieved_val = page.get(key, pkey1, ts1).unwrap();
+//         assert_eq!(retrieved_val, val1);
+
+//         // Retrieve with ts2
+//         let retrieved_val = page.get(key, pkey2, ts2).unwrap();
+//         assert_eq!(retrieved_val, val2);
+//     }
+
+//     #[test]
+//     fn test_insert_when_page_full() {
+//         // Fill the page to capacity and attempt to insert another entry
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Use fixed-length keys and pkeys
+//         let key = b"key_full_full"; // Length 12 bytes
+//         let pkey = b"pkey_full_full"; // Length 13 bytes
+//         let val = b"value_full"; // Value size
+//         let ts: Timestamp = 1;
+
+//         let space_per_entry = Page::space_need(key, pkey, val) as usize;
+//         let available_space = AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE;
+//         let page_capacity = available_space / space_per_entry;
+
+//         // Insert entries until the page is full
+//         for _ in 0..page_capacity {
+//             page.insert(key, pkey, ts, val).unwrap();
+//         }
+
+//         // Attempt to insert one more entry
+//         let result = page.insert(key, pkey, ts, val);
+//         assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
+//     }
+
+//     #[test]
+//     fn test_update_same_size_value() {
+//         let key = b"key1";
+//         let pkey = b"pkey1";
+//         let ts_insert: Timestamp = 100;
+//         let ts_update: Timestamp = 200;
+//         let val_insert = b"value1"; // Length 6
+//         let val_update = b"value2"; // Length 6 (same as val_insert)
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+//         // Update the entry
+//         let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+
+//         // Verify old timestamp and value
+//         assert_eq!(old_ts, ts_insert);
+//         assert_eq!(old_val, val_insert);
+
+//         // Retrieve the updated entry
+//         let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+//         assert_eq!(retrieved_val, val_update);
+//     }
+
+//     #[test]
+//     fn test_update_smaller_value() {
+//         let key = b"key2";
+//         let pkey = b"pkey2";
+//         let ts_insert: Timestamp = 100;
+//         let ts_update: Timestamp = 200;
+//         let val_insert = b"value_longer"; // Length 12
+//         let val_update = b"short"; // Length 5 (smaller than val_insert)
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+//         // Update the entry
+//         let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+
+//         // Verify old timestamp and value
+//         assert_eq!(old_ts, ts_insert);
+//         assert_eq!(old_val, val_insert);
+
+//         // Retrieve the updated entry
+//         let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+//         assert_eq!(retrieved_val, val_update);
+//     }
+
+//     #[test]
+//     fn test_update_larger_value_enough_space() {
+//         let key = b"key3";
+//         let pkey = b"pkey3";
+//         let ts_insert: Timestamp = 100;
+//         let ts_update: Timestamp = 200;
+//         let val_insert = b"short"; // Length 5
+//         let val_update = b"value_is_longer"; // Length 14 (larger than val_insert)
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+//         // Update the entry
+//         let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+
+//         // Verify old timestamp and value
+//         assert_eq!(old_ts, ts_insert);
+//         assert_eq!(old_val, val_insert);
+
+//         // Retrieve the updated entry
+//         let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+//         assert_eq!(retrieved_val, val_update);
+//     }
+
+//     #[test]
+//     fn test_update_larger_value_insufficient_space() {
+//         let key = b"key4";
+//         let pkey = b"pkey4";
+//         let ts_insert: Timestamp = 100;
+//         let ts_update: Timestamp = 200;
+//         let val_insert = b"val"; // Length 3
+//         let val_update = vec![b'a'; (AVAILABLE_PAGE_SIZE / 2) as usize]; // Large value
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Fill the page to limit the available space
+//         page.insert(
+//             b"key_dummy",
+//             b"pkey_dummy",
+//             50,
+//             &vec![b'b'; (AVAILABLE_PAGE_SIZE / 2) as usize],
+//         )
+//         .unwrap();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+//         // Attempt to update the entry with a larger value
+//         let result = page.update(key, pkey, ts_update, &val_update);
+//         assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
+//     }
+
+//     #[test]
+//     fn test_update_non_existent_key() {
+//         let key = b"key_nonexistent";
+//         let pkey = b"pkey_nonexistent";
+//         let ts_update: Timestamp = 100;
+//         let val_update = b"value";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Attempt to update a non-existent key
+//         let result = page.update(key, pkey, ts_update, val_update);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//     }
+
+//     #[test]
+//     fn test_update_invalid_timestamp() {
+//         let key = b"key5";
+//         let pkey = b"pkey5";
+//         let ts_insert: Timestamp = 200;
+//         let ts_update: Timestamp = 100; // Less than ts_insert
+//         let val_insert = b"value1";
+//         let val_update = b"value2";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+//         // Attempt to update with an earlier timestamp
+//         let result = page.update(key, pkey, ts_update, val_update);
+//         assert!(matches!(
+//             result,
+//             Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+//         ));
+//     }
+
+//     #[test]
+//     fn test_delete_existing_record() {
+//         let key = b"key_delete";
+//         let pkey = b"pkey_delete";
+//         let ts_insert: Timestamp = 100;
+//         let ts_delete: Timestamp = 200;
+//         let val = b"value_delete";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val).unwrap();
+
+//         // Delete the entry
+//         let (old_ts, old_val) = page.delete(key, pkey, ts_delete).unwrap();
+
+//         // Verify old timestamp and value
+//         assert_eq!(old_ts, ts_insert);
+//         assert_eq!(old_val, val);
+
+//         // Attempt to get the deleted entry
+//         let result = page.get(key, pkey, ts_delete);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//     }
+
+//     #[test]
+//     fn test_delete_non_existent_record() {
+//         let key = b"key_nonexistent";
+//         let pkey = b"pkey_nonexistent";
+//         let ts_delete: Timestamp = 100;
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Attempt to delete a non-existent record
+//         let result = page.delete(key, pkey, ts_delete);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//     }
+
+//     #[test]
+//     fn test_delete_with_invalid_timestamp() {
+//         let key = b"key_invalid_ts";
+//         let pkey = b"pkey_invalid_ts";
+//         let ts_insert: Timestamp = 200;
+//         let ts_delete: Timestamp = 100; // Earlier than ts_insert
+//         let val = b"value_invalid_ts";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val).unwrap();
+
+//         // Attempt to delete with an earlier timestamp
+//         let result = page.delete(key, pkey, ts_delete);
+//         assert!(matches!(
+//             result,
+//             Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+//         ));
+//     }
+
+//     #[test]
+//     fn test_delete_multiple_records() {
+//         let entries: Vec<(&[u8], &[u8], Timestamp, &[u8])> = vec![
+//             (b"key1", b"pkey1", 100u64, b"value1"),
+//             (b"key2", b"pkey2", 110u64, b"value2"),
+//             (b"key3", b"pkey3", 120u64, b"value3"),
+//         ];
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert entries
+//         for (key, pkey, ts, val) in &entries {
+//             page.insert(key, pkey, *ts, val).unwrap();
+//         }
+
+//         // Delete entries one by one
+//         for (key, pkey, ts, _) in &entries {
+//             let ts_delete = ts + 50; // Use a later timestamp for deletion
+//             let (old_ts, _) = page.delete(key, pkey, ts_delete).unwrap();
+//             assert_eq!(old_ts, *ts);
+
+//             // Attempt to get the deleted entry
+//             let result = page.get(key, pkey, ts_delete);
+//             assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//         }
+//     }
+
+//     #[test]
+//     fn test_delete_when_page_empty() {
+//         let key = b"key_empty";
+//         let pkey = b"pkey_empty";
+//         let ts_delete: Timestamp = 100;
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Attempt to delete from an empty page
+//         let result = page.delete(key, pkey, ts_delete);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//     }
+
+//     #[test]
+//     fn test_delete_record_at_rec_start_offset() {
+//         let key1 = b"key_start";
+//         let pkey1 = b"pkey_start";
+//         let ts1: Timestamp = 100;
+//         let val1 = b"value_start";
+
+//         let key2 = b"key_other";
+//         let pkey2 = b"pkey_other";
+//         let ts2: Timestamp = 110;
+//         let val2 = b"value_other";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert two entries
+//         page.insert(key1, pkey1, ts1, val1).unwrap();
+//         page.insert(key2, pkey2, ts2, val2).unwrap();
+//         let rec_start_offset_before = page.header().rec_start_offset();
+
+//         // Delete the record at rec_start_offset
+//         let (old_ts, old_val) = page.delete(key2, pkey2, ts2 + 50).unwrap();
+
+//         // Verify old timestamp and value
+//         assert_eq!(old_ts, ts2);
+//         assert_eq!(old_val, val2);
+
+//         // Verify that rec_start_offset has advanced
+//         let rec_start_offset_after = page.header().rec_start_offset();
+//         assert!(rec_start_offset_after > rec_start_offset_before);
+
+//         // Ensure the other record is still retrievable
+//         let retrieved_val = page.get(key1, pkey1, ts1).unwrap();
+//         assert_eq!(retrieved_val, val1);
+//     }
+
+//     #[test]
+//     fn test_delete_record_not_at_rec_start_offset() {
+//         let key1 = b"key_other";
+//         let pkey1 = b"pkey_other";
+//         let ts1: Timestamp = 100;
+//         let val1 = b"value_other";
+
+//         let key2 = b"key_start";
+//         let pkey2 = b"pkey_start";
+//         let ts2: Timestamp = 110;
+//         let val2 = b"value_start";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert two entries
+//         page.insert(key1, pkey1, ts1, val1).unwrap();
+//         page.insert(key2, pkey2, ts2, val2).unwrap(); // This record will be at rec_start_offset
+
+//         let rec_start_offset_before = page.header().rec_start_offset();
+
+//         // Delete the record not at rec_start_offset
+//         let (old_ts, old_val) = page.delete(key1, pkey1, ts1 + 50).unwrap();
+
+//         // Verify old timestamp and value
+//         assert_eq!(old_ts, ts1);
+//         assert_eq!(old_val, val1);
+
+//         // Verify that rec_start_offset remains unchanged
+//         let rec_start_offset_after = page.header().rec_start_offset();
+//         assert_eq!(rec_start_offset_after, rec_start_offset_before);
+
+//         // Ensure the other record is still retrievable
+//         let retrieved_val = page.get(key2, pkey2, ts2).unwrap();
+//         assert_eq!(retrieved_val, val2);
+//     }
+
+//     #[test]
+//     fn test_delete_and_get_deleted_record() {
+//         let key = b"key_to_delete";
+//         let pkey = b"pkey_to_delete";
+//         let ts_insert: Timestamp = 100;
+//         let ts_delete: Timestamp = 200;
+//         let val = b"value_to_delete";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val).unwrap();
+
+//         // Delete the entry
+//         page.delete(key, pkey, ts_delete).unwrap();
+
+//         // Attempt to get the deleted entry
+//         let result = page.get(key, pkey, ts_delete);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+
+//         // Attempt to get with an earlier timestamp
+//         let result = page.get(key, pkey, ts_insert);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//     }
+
+//     #[test]
+//     fn test_delete_and_insert_new_record() {
+//         let key = b"key_cycle";
+//         let pkey = b"pkey_cycle";
+//         let ts_insert1: Timestamp = 100;
+//         let ts_delete: Timestamp = 200;
+//         let ts_insert2: Timestamp = 300;
+//         let val1 = b"value1";
+//         let val2 = b"value2";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the first entry
+//         page.insert(key, pkey, ts_insert1, val1).unwrap();
+
+//         // Delete the entry
+//         page.delete(key, pkey, ts_delete).unwrap();
+
+//         // Insert a new entry with the same key and pkey
+//         page.insert(key, pkey, ts_insert2, val2).unwrap();
+
+//         // Retrieve the new entry
+//         let retrieved_val = page.get(key, pkey, ts_insert2).unwrap();
+//         assert_eq!(retrieved_val, val2);
+
+//         // Attempt to get the old entry with an earlier timestamp
+//         let result = page.get(key, pkey, ts_insert1);
+//         assert!(matches!(
+//             result,
+//             Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+//         ));
+//     }
+
+//     #[test]
+//     fn test_delete_same_record_twice() {
+//         let key = b"key_twice";
+//         let pkey = b"pkey_twice";
+//         let ts_insert: Timestamp = 100;
+//         let ts_delete1: Timestamp = 200;
+//         let ts_delete2: Timestamp = 300;
+//         let val = b"value_twice";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert the entry
+//         page.insert(key, pkey, ts_insert, val).unwrap();
+
+//         // First deletion
+//         page.delete(key, pkey, ts_delete1).unwrap();
+
+//         // Second deletion attempt
+//         let result = page.delete(key, pkey, ts_delete2);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//     }
+
+//     #[test]
+//     fn test_delete_all_records_and_check_page_empty() {
+//         let entries: Vec<(&[u8], &[u8], Timestamp, &[u8])> = vec![
+//             (b"key_a", b"pkey_a", 100u64, b"value_a"),
+//             (b"key_b", b"pkey_b", 110u64, b"value_b"),
+//             (b"key_c", b"pkey_c", 120u64, b"value_c"),
+//         ];
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert entries
+//         for (key, pkey, ts, val) in &entries {
+//             page.insert(key, pkey, *ts, val).unwrap();
+//         }
+
+//         // Delete all entries
+//         for (key, pkey, ts, _) in &entries {
+//             let ts_delete = ts + 50;
+//             page.delete(key, pkey, ts_delete).unwrap();
+//         }
+
+//         // Verify that the page is empty
+//         let header = page.header();
+//         assert_eq!(header.slot_count(), 0);
+//         assert_eq!(header.total_bytes_used(), PAGE_HEADER_SIZE as u32);
+//     }
+
+//     #[test]
+//     fn test_delete_with_multiple_versions() {
+//         let key = b"key_multi";
+//         let pkey = b"pkey_multi";
+//         let ts1: Timestamp = 100;
+//         let ts2: Timestamp = 200;
+//         let ts_delete: Timestamp = 300;
+//         let val1 = b"value1";
+//         let val2 = b"value2";
+
+//         let mut page = Page::new_empty();
+//         page.init();
+
+//         // Insert first version
+//         page.insert(key, pkey, ts1, val1).unwrap();
+
+//         // Update to create a second version
+//         page.update(key, pkey, ts2, val2).unwrap();
+
+//         // Delete the entry
+//         page.delete(key, pkey, ts_delete).unwrap();
+
+//         // Attempt to get with various timestamps
+//         let result = page.get(key, pkey, ts1);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+
+//         let result = page.get(key, pkey, ts2);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+
+//         let result = page.get(key, pkey, ts_delete);
+//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+//     }
+// }

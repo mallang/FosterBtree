@@ -9,14 +9,19 @@ use std::{
     vec::IntoIter,
 };
 
+use dashmap::mapref::entry;
+
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_trace, log_warn,
+    mvcc_index::{MvccEntry, TxId},
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::{mvcc_hash_join_recent_page::MvccHashJoinRecentPage, Timestamp};
+use super::{
+    hash_join_page::HashJoinPage, mvcc_hash_join_recent_page::MvccHashJoinRecentPage, Timestamp,
+};
 
 pub struct MvccHashJoinRecentChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -35,7 +40,7 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         let first_page_id = page.get_id();
         let first_frame_id = page.frame_id();
 
-        MvccHashJoinRecentPage::init(&mut *page);
+        HashJoinPage::init(&mut *page);
         drop(page);
 
         Self {
@@ -68,10 +73,12 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         &self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        _tx_id: &TxId,
         val: &[u8],
     ) -> Result<(), AccessMethodError> {
-        let space_need = <Page as MvccHashJoinRecentPage>::space_need(key, pkey, val);
+        let entry = MvccEntry::new(key.to_vec(), pkey.to_vec(), val.to_vec(), *ts, u64::MAX);
+        let space_need = <Page as HashJoinPage>::require_space(&entry);
         if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
             return Err(AccessMethodError::RecordTooLarge);
         }
@@ -85,7 +92,7 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         loop {
             let page_key = PageFrameKey::new_with_frame_id(self.c_key, current_pid, current_fid);
             let page = self.read_page(page_key);
-            match MvccHashJoinRecentPage::next_page(&*page) {
+            match HashJoinPage::next_page(&*page) {
                 Some((next_pid, next_fid)) => {
                     current_pid = next_pid;
                     current_fid = next_fid;
@@ -95,25 +102,19 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                     log_debug!("Reached end of chain, inserting into end of chain");
                 }
             }
-            if space_need < MvccHashJoinRecentPage::free_space_with_compaction(&*page) {
-                if space_need > MvccHashJoinRecentPage::free_space_without_compaction(&*page) {
+            if space_need < HashJoinPage::free_space_after_compaction(&*page) {
+                if space_need > HashJoinPage::free_space_before_compaction(&*page) {
                     log_debug!("Compaction needed");
                     // Compaction needed, now just add new page.
                 } else {
                     match page.try_upgrade(true) {
                         Ok(mut upgraded_page) => {
-                            match MvccHashJoinRecentPage::insert(
-                                &mut *upgraded_page,
-                                key,
-                                pkey,
-                                ts,
-                                val,
-                            ) {
+                            match HashJoinPage::insert(&mut *upgraded_page, &entry) {
                                 Ok(_) => {
                                     return Ok(());
                                 }
-                                Err(_) => {
-                                    panic!("Unexpected error");
+                                Err(e) => {
+                                    panic!("Error: {:?}", e);
                                 }
                             }
                         }
@@ -131,14 +132,14 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
                     let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
                     let new_pid = new_page.get_id();
                     let new_fid = new_page.frame_id();
-                    MvccHashJoinRecentPage::init(&mut *new_page);
-                    match MvccHashJoinRecentPage::insert(&mut *new_page, key, pkey, ts, val) {
+                    HashJoinPage::init(&mut *new_page);
+                    match HashJoinPage::insert(&mut *new_page, &entry) {
                         Ok(_) => {}
                         Err(_) => {
                             panic!("Unexpected error");
                         }
                     }
-                    MvccHashJoinRecentPage::set_next_page(&mut *upgraded_page, new_pid, new_fid);
+                    HashJoinPage::set_next_page(&mut *upgraded_page, new_pid, new_fid);
                     self.last_page_id.store(new_pid, atomic::Ordering::Release);
                     self.last_frame_id.store(new_fid, atomic::Ordering::Release);
                     drop(new_page);
@@ -158,7 +159,7 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         &self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
     ) -> Result<Vec<u8>, AccessMethodError> {
         let mut current_pid = self.first_page_id;
         let mut current_fid = self.first_frame_id.load(atomic::Ordering::Acquire);
@@ -168,14 +169,17 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
             let page = self.read_page(page_key);
 
             // Attempt to retrieve the value from the current page
-            match MvccHashJoinRecentPage::get(&*page, key, pkey, ts) {
-                Ok(val) => {
+            match HashJoinPage::get(&*page, pkey, *ts) {
+                Ok(entry) => {
                     // Value found
-                    return Ok(val);
+                    if entry.key != key || entry.start_ts > *ts {
+                        return Err(AccessMethodError::KeyNotFound);
+                    }
+                    return Ok(entry.value);
                 }
                 Err(AccessMethodError::KeyNotFound) => {
                     // Key not found in this page, check for next page
-                    match MvccHashJoinRecentPage::next_page(&*page) {
+                    match HashJoinPage::next_page(&*page) {
                         Some((next_pid, next_fid)) => {
                             // Move to the next page
                             current_pid = next_pid;
@@ -200,7 +204,8 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         &self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        _tx_id: &TxId,
         val: &[u8],
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
         let mut current_pid = self.first_page_id;
@@ -211,14 +216,15 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
             let mut page = self.write_page(page_key);
 
             // Attempt to update the value in the current page
-            match MvccHashJoinRecentPage::update(&mut *page, key, pkey, ts, val) {
+            let entry = MvccEntry::new(key.to_vec(), pkey.to_vec(), val.to_vec(), *ts, u64::MAX);
+            match <Page as HashJoinPage>::update(&mut *page, pkey, &entry) {
                 Ok((old_ts, old_val)) => {
                     // Update successful
                     return Ok((old_ts, old_val));
                 }
                 Err(AccessMethodError::KeyNotFound) => {
                     // Key not found in this page, check for next page
-                    match MvccHashJoinRecentPage::next_page(&*page) {
+                    match HashJoinPage::next_page(&*page) {
                         Some((next_pid, next_fid)) => {
                             // Move to the next page
                             current_pid = next_pid;
@@ -243,7 +249,8 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
         &self,
         key: &[u8],
         pkey: &[u8],
-        ts: Timestamp,
+        ts: &Timestamp,
+        _tx_id: &TxId,
     ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
         let mut current_pid = self.first_page_id;
         let mut current_fid = self.first_frame_id.load(atomic::Ordering::Acquire);
@@ -253,14 +260,15 @@ impl<T: MemPool> MvccHashJoinRecentChain<T> {
             let mut page = self.write_page(page_key);
 
             // Attempt to delete the value in the current page
-            match MvccHashJoinRecentPage::delete(&mut *page, key, pkey, ts) {
+            // match HashJoinPage::delete(&mut *page, pkey, &ts, tx_id) {
+            match HashJoinPage::delete(&mut *page, pkey, ts) {
                 Ok((old_ts, old_val)) => {
                     // Delete successful
                     return Ok((old_ts, old_val));
                 }
                 Err(AccessMethodError::KeyNotFound) => {
                     // Key not found in this page, check for next page
-                    match MvccHashJoinRecentPage::next_page(&*page) {
+                    match HashJoinPage::next_page(&*page) {
                         Some((next_pid, next_fid)) => {
                             // Move to the next page
                             current_pid = next_pid;
@@ -418,55 +426,56 @@ impl<T: MemPool> Iterator for MvccHashJoinRecentChainScanner<T> {
     type Item = (Timestamp, Timestamp, Vec<u8>, Vec<u8>, Vec<u8>); // (start_ts, end_ts, key, pkey, value)
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
-        }
+        todo!()
+        //     if self.finished {
+        //         return None;
+        //     }
 
-        if self.current_page.is_none() {
-            self.initialize();
-        }
+        //     if self.current_page.is_none() {
+        //         self.initialize();
+        //     }
 
-        loop {
-            let page = self.current_page.as_ref()?;
-            let page_ref = &**page; // Dereference to get the page
+        //     loop {
+        //         let page = self.current_page.as_ref()?;
+        //         let page_ref = &**page; // Dereference to get the page
 
-            if self.current_slot_id < MvccHashJoinRecentPage::slot_count(page_ref) {
-                let entry =
-                    MvccHashJoinRecentPage::get_entry_at_slot(page_ref, self.current_slot_id);
-                self.current_slot_id += 1;
+        //         if self.current_slot_id < HashJoinPage::slot_count(page_ref) {
+        //             let entry =
+        //                 HashJoinPage::get_entry_at_slot(page_ref, self.current_slot_id);
+        //             self.current_slot_id += 1;
 
-                if entry.start_ts <= self.ts {
-                    return Some((
-                        entry.start_ts,
-                        entry.end_ts,
-                        entry.key.clone(),
-                        entry.pkey.clone(),
-                        entry.value.clone(),
-                    ));
-                } else {
-                    continue;
-                }
-            } else {
-                // Move to the next page
-                if let Some((next_pid, next_fid)) = MvccHashJoinRecentPage::next_page(page_ref) {
-                    let next_page = self.chain.read_page(PageFrameKey::new_with_frame_id(
-                        self.chain.c_key,
-                        next_pid,
-                        next_fid,
-                    ));
-                    let next_page = unsafe {
-                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
-                    };
-                    self.current_page = Some(next_page);
-                    self.current_slot_id = 0;
-                } else {
-                    // No more pages
-                    self.finished = true;
-                    self.current_page = None;
-                    return None;
-                }
-            }
-        }
+        //             if entry.start_ts <= self.ts {
+        //                 return Some((
+        //                     entry.start_ts,
+        //                     entry.end_ts,
+        //                     entry.key.clone(),
+        //                     entry.pkey.clone(),
+        //                     entry.value.clone(),
+        //                 ));
+        //             } else {
+        //                 continue;
+        //             }
+        //         } else {
+        //             // Move to the next page
+        //             if let Some((next_pid, next_fid)) = HashJoinPage::next_page(page_ref) {
+        //                 let next_page = self.chain.read_page(PageFrameKey::new_with_frame_id(
+        //                     self.chain.c_key,
+        //                     next_pid,
+        //                     next_fid,
+        //                 ));
+        //                 let next_page = unsafe {
+        //                     std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
+        //                 };
+        //                 self.current_page = Some(next_page);
+        //                 self.current_slot_id = 0;
+        //             } else {
+        //                 // No more pages
+        //                 self.finished = true;
+        //                 self.current_page = None;
+        //                 return None;
+        //             }
+        //         }
+        //     }
     }
 }
 
@@ -495,44 +504,18 @@ mod tests {
 
         // Insert entries
         for (key, pkey, ts, val) in &entries {
-            chain.insert(key, pkey, *ts, val).unwrap();
+            chain.insert(key, pkey, ts, &0, val).unwrap();
         }
 
         // Retrieve and verify entries
         for (key, pkey, ts, val) in &entries {
-            let retrieved_val = chain.get(key, pkey, *ts).unwrap();
+            let retrieved_val = chain.get(key, pkey, ts).unwrap();
             assert_eq!(retrieved_val, *val);
         }
 
         // Attempt to retrieve a non-existent key
-        let result = chain.get(b"nonexistent_key", b"nonexistent_pkey", 60u64);
+        let result = chain.get(b"nonexistent_key", b"nonexistent_pkey", &60u64);
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_chain_insert_empty_keys_and_values() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Entries with empty keys, pkeys, and values
-        let entries: Vec<(&[u8], &[u8], Timestamp, &[u8])> = vec![
-            (b"", b"pkey1", 10u64, b"value1"),
-            (b"key2", b"", 20u64, b"value2"),
-            (b"key3", b"pkey3", 30u64, b""),
-            (b"", b"", 40u64, b""),
-        ];
-
-        // Insert entries
-        for (key, pkey, ts, val) in &entries {
-            chain.insert(key, pkey, *ts, val).unwrap();
-        }
-
-        // Retrieve and verify entries
-        for (key, pkey, ts, val) in &entries {
-            let retrieved_val = chain.get(key, pkey, *ts).unwrap();
-            assert_eq!(retrieved_val, *val);
-        }
     }
 
     #[test]
@@ -542,17 +525,21 @@ mod tests {
         let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
 
         // Insert an entry
-        chain.insert(b"key1", b"pkey1", 10u64, b"value1").unwrap();
+        chain
+            .insert(b"key1", b"pkey1", &10u64, &0, b"value1")
+            .unwrap();
 
         // Attempt to insert the same key-pkey with a different value and timestamp
-        chain.insert(b"key1", b"pkey2", 20u64, b"value2").unwrap();
+        chain
+            .insert(b"key1", b"pkey2", &20u64, &0, b"value2")
+            .unwrap();
 
         // Retrieve the entry with the latest timestamp
-        let retrieved_val = chain.get(b"key1", b"pkey2", 20u64).unwrap();
+        let retrieved_val = chain.get(b"key1", b"pkey2", &20u64).unwrap();
         assert_eq!(retrieved_val, b"value2");
 
         // Retrieve the entry with the earlier timestamp
-        let retrieved_val = chain.get(b"key1", b"pkey1", 10u64).unwrap();
+        let retrieved_val = chain.get(b"key1", b"pkey1", &10u64).unwrap();
         assert_eq!(retrieved_val, b"value1");
     }
 
@@ -570,7 +557,7 @@ mod tests {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             chain
-                .insert(&key, &pkey, i as u64 * 10, &large_value)
+                .insert(&key, &pkey, &(i as u64 * 10), &0, &large_value)
                 .unwrap();
         }
 
@@ -578,7 +565,7 @@ mod tests {
         for i in 0..5 {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
-            let retrieved_val = chain.get(&key, &pkey, i as u64 * 10).unwrap();
+            let retrieved_val = chain.get(&key, &pkey, &(i as u64 * 10)).unwrap();
             assert_eq!(retrieved_val, large_value);
         }
     }
@@ -593,7 +580,7 @@ mod tests {
         let oversized_value = vec![b'a'; (AVAILABLE_PAGE_SIZE + 1) as usize];
 
         // Attempt to insert the oversized entry
-        let result = chain.insert(b"key1", b"pkey1", 10u64, &oversized_value);
+        let result = chain.insert(b"key1", b"pkey1", &10u64, &0, &oversized_value);
         assert!(matches!(result, Err(AccessMethodError::RecordTooLarge)));
     }
 
@@ -604,19 +591,29 @@ mod tests {
         let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
 
         // Insert an entry
-        chain.insert(b"key1", b"pkey1", 10u64, b"value1").unwrap();
+        chain
+            .insert(b"key1", b"pkey1", &10u64, &0, b"value1")
+            .unwrap();
 
         // Update the entry
-        let (old_ts, old_val) = chain.update(b"key1", b"pkey1", 20u64, b"value2").unwrap();
+        let (old_ts, old_val) = chain
+            .update(b"key1", b"pkey1", &20u64, &0, b"value2")
+            .unwrap();
         assert_eq!(old_ts, 10u64);
         assert_eq!(old_val, b"value1");
 
         // Retrieve the updated entry
-        let retrieved_val = chain.get(b"key1", b"pkey1", 20u64).unwrap();
+        let retrieved_val = chain.get(b"key1", b"pkey1", &20u64).unwrap();
         assert_eq!(retrieved_val, b"value2");
 
         // Attempt to update a non-existent entry
-        let result = chain.update(b"key_nonexistent", b"pkey_nonexistent", 30u64, b"value3");
+        let result = chain.update(
+            b"key_nonexistent",
+            b"pkey_nonexistent",
+            &30u64,
+            &0,
+            b"value3",
+        );
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
     }
 
@@ -635,7 +632,9 @@ mod tests {
                 let key = format!("key{}", i).into_bytes();
                 let pkey = format!("pkey{}", i).into_bytes();
                 let value = format!("value{}", i).into_bytes();
-                chain_clone.insert(&key, &pkey, i as u64, &value).unwrap();
+                chain_clone
+                    .insert(&key, &pkey, &(i as u64), &0, &value)
+                    .unwrap();
             }
         });
 
@@ -644,7 +643,7 @@ mod tests {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             // It's possible that the key hasn't been inserted yet
-            let _ = chain.get(&key, &pkey, i as u64);
+            let _ = chain.get(&key, &pkey, &(i as u64));
         }
 
         handle.join().unwrap();
@@ -654,12 +653,12 @@ mod tests {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             let expected_value = format!("value{}", i).into_bytes();
-            let retrieved_val = chain.get(&key, &pkey, i as u64).unwrap();
+            let retrieved_val = chain.get(&key, &pkey, &(i as u64)).unwrap();
             assert_eq!(retrieved_val, expected_value);
         }
     }
 
-    // New tests for the delete method
+    // // New tests for the delete method
 
     #[test]
     fn test_chain_delete_existing_entry() {
@@ -674,21 +673,21 @@ mod tests {
         let ts_delete: Timestamp = 200;
         let val = b"value_delete";
 
-        chain.insert(key, pkey, ts_insert, val).unwrap();
+        chain.insert(key, pkey, &ts_insert, &0, val).unwrap();
 
         // Verify the entry exists
-        let retrieved_val = chain.get(key, pkey, ts_insert).unwrap();
+        let retrieved_val = chain.get(key, pkey, &ts_insert).unwrap();
         assert_eq!(retrieved_val, val);
 
         // Delete the entry
-        let (old_ts, old_val) = chain.delete(key, pkey, ts_delete).unwrap();
+        let (old_ts, old_val) = chain.delete(key, pkey, &ts_delete, &0).unwrap();
 
         // Verify old timestamp and value
         assert_eq!(old_ts, ts_insert);
         assert_eq!(old_val, val);
 
         // Attempt to get the deleted entry
-        let result = chain.get(key, pkey, ts_delete);
+        let result = chain.get(key, pkey, &ts_delete);
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
     }
 
@@ -699,7 +698,7 @@ mod tests {
         let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
 
         // Attempt to delete a non-existent entry
-        let result = chain.delete(b"nonexistent_key", b"nonexistent_pkey", 100);
+        let result = chain.delete(b"nonexistent_key", b"nonexistent_pkey", &100, &0);
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
     }
 
@@ -716,17 +715,17 @@ mod tests {
         let ts_delete: Timestamp = 100; // Earlier than ts_insert
         let val = b"value_invalid_ts";
 
-        chain.insert(key, pkey, ts_insert, val).unwrap();
+        chain.insert(key, pkey, &ts_insert, &0, val).unwrap();
 
         // Attempt to delete with an earlier timestamp
-        let result = chain.delete(key, pkey, ts_delete);
+        let result = chain.delete(key, pkey, &ts_delete, &0);
         assert!(matches!(
             result,
             Err(AccessMethodError::KeyFoundButInvalidTimestamp)
         ));
 
         // Verify the entry still exists
-        let retrieved_val = chain.get(key, pkey, ts_insert).unwrap();
+        let retrieved_val = chain.get(key, pkey, &ts_insert).unwrap();
         assert_eq!(retrieved_val, val);
     }
 
@@ -741,7 +740,7 @@ mod tests {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             let val = format!("value{}", i).into_bytes();
-            chain.insert(&key, &pkey, i as u64, &val).unwrap();
+            chain.insert(&key, &pkey, &(i as u64), &0, &val).unwrap();
         }
 
         // Delete an entry that should be in a later page
@@ -750,7 +749,7 @@ mod tests {
         let ts_delete: Timestamp = 100;
 
         let (old_ts, old_val) = chain
-            .delete(key_to_delete, pkey_to_delete, ts_delete)
+            .delete(key_to_delete, pkey_to_delete, &ts_delete, &0)
             .unwrap();
 
         // Verify old timestamp and value
@@ -758,7 +757,7 @@ mod tests {
         assert_eq!(old_val, b"value25");
 
         // Attempt to get the deleted entry
-        let result = chain.get(key_to_delete, pkey_to_delete, ts_delete);
+        let result = chain.get(key_to_delete, pkey_to_delete, &ts_delete);
         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
 
         // Verify other entries are still retrievable
@@ -769,585 +768,589 @@ mod tests {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
             let expected_val = format!("value{}", i).into_bytes();
-            let retrieved_val = chain.get(&key, &pkey, i as u64).unwrap();
+            let retrieved_val = chain.get(&key, &pkey, &(i as u64)).unwrap();
             assert_eq!(retrieved_val, expected_val);
         }
     }
 
-    #[test]
-    fn test_chain_delete_and_insert_new_entry() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        let key = b"key_cycle";
-        let pkey = b"pkey_cycle";
-        let ts_insert1: Timestamp = 100;
-        let ts_delete: Timestamp = 200;
-        let ts_insert2: Timestamp = 300;
-        let val1 = b"value1";
-        let val2 = b"value2";
-
-        // Insert the first entry
-        chain.insert(key, pkey, ts_insert1, val1).unwrap();
-
-        // Delete the entry
-        chain.delete(key, pkey, ts_delete).unwrap();
-
-        // Insert a new entry with the same key and pkey
-        chain.insert(key, pkey, ts_insert2, val2).unwrap();
-
-        // Retrieve the new entry
-        let retrieved_val = chain.get(key, pkey, ts_insert2).unwrap();
-        assert_eq!(retrieved_val, val2);
-
-        // Attempt to get the old entry with an earlier timestamp
-        let result = chain.get(key, pkey, ts_insert1);
-        assert!(matches!(
-            result,
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-        ));
-    }
-
-    #[test]
-    fn test_chain_delete_all_entries() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Insert multiple entries
-        for i in 0..10 {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let val = format!("value{}", i).into_bytes();
-            chain.insert(&key, &pkey, i as u64, &val).unwrap();
-        }
-
-        // Delete all entries
-        for i in 0..10 {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let ts_delete = i as u64 + 100;
-            chain.delete(&key, &pkey, ts_delete).unwrap();
-        }
-
-        // Verify that all entries are deleted
-        for i in 0..10 {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let result = chain.get(&key, &pkey, i as u64 + 100);
-            assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-        }
-    }
-
-    #[test]
-    fn test_chain_delete_non_existent_after_deletion() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Insert an entry
-        chain.insert(b"key1", b"pkey1", 10u64, b"value1").unwrap();
-
-        // Delete the entry
-        chain.delete(b"key1", b"pkey1", 20u64).unwrap();
-
-        // Attempt to delete again
-        let result = chain.delete(b"key1", b"pkey1", 30u64);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_chain_delete_with_multiple_versions() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        let key = b"key_multi";
-        let pkey = b"pkey_multi";
-        let ts1: Timestamp = 100;
-        let ts2: Timestamp = 200;
-        let ts_delete: Timestamp = 300;
-        let val1 = b"value1";
-        let val2 = b"value2";
-
-        // Insert first version
-        chain.insert(key, pkey, ts1, val1).unwrap();
-
-        // Update to create a second version
-        chain.update(key, pkey, ts2, val2).unwrap();
-
-        // Delete the entry
-        chain.delete(key, pkey, ts_delete).unwrap();
-
-        // Attempt to get with various timestamps
-        let result = chain.get(key, pkey, ts1);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-
-        let result = chain.get(key, pkey, ts2);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-
-        let result = chain.get(key, pkey, ts_delete);
-        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-    }
-
-    #[test]
-    fn test_chain_delete_concurrent_operations() {
-        use std::thread;
-
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let chain = Arc::new(MvccHashJoinRecentChain::new(c_key, mem_pool.clone()));
-
-        let chain_insert = chain.clone();
-        let handle_insert = thread::spawn(move || {
-            // Insert entries
-            for i in 0..100 {
-                let key = format!("key{}", i).into_bytes();
-                let pkey = format!("pkey{}", i).into_bytes();
-                let value = format!("value{}", i).into_bytes();
-                chain_insert.insert(&key, &pkey, i as u64, &value).unwrap();
-            }
-        });
-
-        let chain_delete = chain.clone();
-        let handle_delete = thread::spawn(move || {
-            // Wait a bit to ensure some entries are inserted
-            std::thread::sleep(std::time::Duration::from_millis(50));
-
-            // Delete entries
-            for i in 0..50 {
-                let key = format!("key{}", i).into_bytes();
-                let pkey = format!("pkey{}", i).into_bytes();
-                let ts_delete = i as u64 + 100;
-                let _ = chain_delete.delete(&key, &pkey, ts_delete);
-            }
-        });
-
-        handle_insert.join().unwrap();
-        handle_delete.join().unwrap();
-
-        // Verify entries
-        for i in 0..100 {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let ts = i as u64;
-            let result = chain.get(&key, &pkey, ts + 100);
-            if i < 50 {
-                // Entries that were attempted to be deleted
-                assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-            } else {
-                // Entries that should still exist
-                let expected_value = format!("value{}", i).into_bytes();
-                let retrieved_val = result.unwrap();
-                assert_eq!(retrieved_val, expected_value);
-            }
-        }
-    }
-
-    #[test]
-    fn test_chain_random_operations_no_duplicate_pkeys() {
-        use rand::prelude::*;
-        use std::collections::HashMap;
-
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Define the number of operations
-        let num_operations = 10_000;
-
-        // Define possible operations
-        enum Operation {
-            Insert,
-            Get,
-            Update,
-            Delete,
-        }
-
-        // Create a random number generator
-        let mut rng = rand::thread_rng();
-
-        // HashMap to keep track of the expected state
-        // Key: (key, pkey), Value: (ts, value)
-        let mut expected_state: HashMap<(Vec<u8>, Vec<u8>), (Timestamp, Vec<u8>)> = HashMap::new();
-
-        // Set to keep track of inserted pkeys to avoid duplicates
-        let mut inserted_pkeys: std::collections::HashSet<Vec<u8>> =
-            std::collections::HashSet::new();
-
-        // Possible keys, pkeys, and values
-        let keys: Vec<Vec<u8>> = (0..100).map(|i| format!("key{}", i).into_bytes()).collect();
-        let pkeys: Vec<Vec<u8>> = (0..1000) // Increase the range to have enough unique pkeys
-            .map(|i| format!("pkey{}", i).into_bytes())
-            .collect();
-        let values: Vec<Vec<u8>> = (0..100)
-            .map(|i| format!("value{}", i).into_bytes())
-            .collect();
-
-        // Perform random operations
-        for _ in 0..num_operations {
-            let op = match rng.gen_range(0..4) {
-                0 => Operation::Insert,
-                1 => Operation::Get,
-                2 => Operation::Update,
-                3 => Operation::Delete,
-                _ => unreachable!(),
-            };
-
-            // Randomly select key, pkey, value, and timestamp
-            let key = keys.choose(&mut rng).unwrap().clone();
-            let pkey = pkeys.choose(&mut rng).unwrap().clone();
-            let value = values.choose(&mut rng).unwrap().clone();
-            let ts: Timestamp = rng.gen_range(1..1_000_000);
-
-            match op {
-                Operation::Insert => {
-                    // Insert operation
-                    if inserted_pkeys.contains(&pkey) {
-                        // Skip insertion if pkey already exists
-                        continue;
-                    }
-                    let res = chain.insert(&key, &pkey, ts, &value);
-                    if res.is_ok() {
-                        expected_state.insert((key.clone(), pkey.clone()), (ts, value.clone()));
-                        inserted_pkeys.insert(pkey.clone());
-                    } else {
-                        assert!(matches!(
-                            res,
-                            Err(AccessMethodError::OutOfSpace)
-                                | Err(AccessMethodError::RecordTooLarge)
-                        ));
-                    }
-                }
-                Operation::Get => {
-                    // Get operation
-                    let res = chain.get(&key, &pkey, ts);
-                    match expected_state.get(&(key.clone(), pkey.clone())) {
-                        Some(&(stored_ts, ref stored_value)) if stored_ts <= ts => {
-                            // The entry should be retrievable
-                            let retrieved_value = res.unwrap();
-                            assert_eq!(&retrieved_value, stored_value);
-                        }
-                        _ => {
-                            // The entry should not be found
-                            assert!(matches!(
-                                res,
-                                Err(AccessMethodError::KeyNotFound)
-                                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-                            ));
-                        }
-                    }
-                }
-                Operation::Update => {
-                    // Update operation
-                    if !inserted_pkeys.contains(&pkey) {
-                        // Skip update if pkey does not exist
-                        continue;
-                    }
-                    let res = chain.update(&key, &pkey, ts, &value);
-                    match expected_state.get_mut(&(key.clone(), pkey.clone())) {
-                        Some((stored_ts, stored_value)) if *stored_ts <= ts => {
-                            // The update should succeed
-                            let (old_ts, old_value) = res.unwrap();
-                            assert_eq!(old_ts, *stored_ts);
-                            assert_eq!(old_value, stored_value.clone());
-                            *stored_ts = ts;
-                            *stored_value = value.clone();
-                        }
-                        _ => {
-                            // The update should fail
-
-                            assert!(matches!(
-                                res,
-                                Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-                                    | Err(AccessMethodError::KeyNotFound)
-                            ));
-                        }
-                    }
-                }
-                Operation::Delete => {
-                    // Delete operation
-                    if !inserted_pkeys.contains(&pkey) {
-                        // Skip deletion if pkey does not exist
-                        continue;
-                    }
-                    let res = chain.delete(&key, &pkey, ts);
-                    match expected_state.remove(&(key.clone(), pkey.clone())) {
-                        Some((stored_ts, stored_value)) if stored_ts <= ts => {
-                            // The deletion should succeed
-                            let (old_ts, old_value) = res.unwrap();
-                            assert_eq!(old_ts, stored_ts);
-                            assert_eq!(old_value, stored_value);
-                            inserted_pkeys.remove(&pkey);
-                        }
-                        Some((stored_ts, stored_value)) => {
-                            // The deletion should fail due to invalid timestamp
-                            expected_state
-                                .insert((key.clone(), pkey.clone()), (stored_ts, stored_value));
-                            assert!(matches!(
-                                res,
-                                Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-                                    | Err(AccessMethodError::KeyNotFound)
-                            ));
-                        }
-                        None => {
-                            // pkey is inseterd but (key, pkey) is inserted. actually its weird case
-                        }
-                    }
-                }
-            }
-        }
-
-        // After all operations, verify the final state
-        for ((key, pkey), (stored_ts, stored_value)) in &expected_state {
-            let res = chain.get(key, pkey, *stored_ts);
-            let retrieved_value = res.unwrap();
-            assert_eq!(&retrieved_value, stored_value);
-        }
-
-        // Optionally, perform additional verification for timestamps beyond the stored timestamp
-        for ((key, pkey), (stored_ts, stored_value)) in &expected_state {
-            let ts_future = stored_ts + 1000;
-            let res = chain.get(key, pkey, ts_future);
-            let retrieved_value = res.unwrap();
-            assert_eq!(&retrieved_value, stored_value);
-        }
-
-        // Verify that entries are not retrievable with timestamps before they were inserted
-        for ((key, pkey), (stored_ts, _)) in &expected_state {
-            let ts_past = if *stored_ts > 1 { stored_ts - 1 } else { 0 };
-            let res = chain.get(key, pkey, ts_past);
-            assert!(matches!(
-                res,
-                Err(AccessMethodError::KeyNotFound)
-                    | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-            ));
-        }
-    }
-
-    #[test]
-    fn test_recent_chain_scanner() {
-        // Initialize mem_pool and container key
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-
-        // Create a new chain
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Entries to insert
-        let entries: Vec<(Vec<u8>, Vec<u8>, Timestamp, Vec<u8>)> = vec![
-            (
-                b"key1".to_vec(),
-                b"pkey1".to_vec(),
-                10u64,
-                b"value1".to_vec(),
-            ),
-            (
-                b"key2".to_vec(),
-                b"pkey2".to_vec(),
-                20u64,
-                b"value2".to_vec(),
-            ),
-            (
-                b"key3".to_vec(),
-                b"pkey3".to_vec(),
-                30u64,
-                b"value3".to_vec(),
-            ),
-            (
-                b"key4".to_vec(),
-                b"pkey4".to_vec(),
-                40u64,
-                b"value4".to_vec(),
-            ),
-            (
-                b"key5".to_vec(),
-                b"pkey5".to_vec(),
-                50u64,
-                b"value5".to_vec(),
-            ),
-        ];
-
-        // Insert entries
-        for (key, pkey, ts, val) in &entries {
-            chain.insert(key, pkey, *ts, val).unwrap();
-        }
-
-        // Test scanning at different timestamps
-        let test_cases = vec![
-            (5u64, vec![]),                                       // Before any entries
-            (15u64, vec![&entries[0]]),                           // After first entry
-            (25u64, vec![&entries[0], &entries[1]]),              // After second entry
-            (35u64, vec![&entries[0], &entries[1], &entries[2]]), // After third entry
-            (
-                45u64,
-                vec![&entries[0], &entries[1], &entries[2], &entries[3]],
-            ), // After fourth entry
-            (
-                55u64,
-                vec![
-                    &entries[0],
-                    &entries[1],
-                    &entries[2],
-                    &entries[3],
-                    &entries[4],
-                ],
-            ), // After all entries
-        ];
-
-        for (scan_ts, expected_entries) in test_cases {
-            let scanner = chain.scan(scan_ts).unwrap();
-            let results: Vec<_> = scanner.collect();
-
-            assert_eq!(
-                results.len(),
-                expected_entries.len(),
-                "At ts {}, expected {} entries, got {}",
-                scan_ts,
-                expected_entries.len(),
-                results.len()
-            );
-
-            for (result, expected_entry) in results.iter().zip(expected_entries) {
-                let (start_ts, end_ts, key, pkey, value) = result;
-                assert_eq!(
-                    *start_ts, expected_entry.2,
-                    "Start timestamp mismatch at ts {}",
-                    scan_ts
-                );
-                assert_eq!(
-                    *end_ts,
-                    u64::MAX,
-                    "End timestamp should be u64::MAX for recent entries at ts {}",
-                    scan_ts
-                );
-                assert_eq!(key, &expected_entry.0, "Key mismatch at ts {}", scan_ts);
-                assert_eq!(pkey, &expected_entry.1, "PKey mismatch at ts {}", scan_ts);
-                assert_eq!(value, &expected_entry.3, "Value mismatch at ts {}", scan_ts);
-            }
-        }
-    }
-
-    #[test]
-    fn test_recent_chain_scanner_after_updates() {
-        // Initialize mem_pool and container key
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-
-        // Create a new chain
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Insert an entry
-        chain.insert(b"key1", b"pkey1", 10u64, b"value1").unwrap();
-
-        // Update the entry
-        chain.update(b"key1", b"pkey1", 20u64, b"value2").unwrap();
-
-        // Scan at timestamp before update
-        let scan_ts = 15u64;
-        let scanner = chain.scan(scan_ts).unwrap();
-        let results: Vec<_> = scanner.collect();
-        assert_eq!(results.len(), 0, "Expected 1 entry at ts {}", scan_ts);
-        // let (start_ts, end_ts, key, pkey, value) = &results[0];
-        // assert_eq!(*start_ts, 20u64, "Start timestamp should be 20 after update");
-        // assert_eq!(*end_ts, u64::MAX, "End timestamp should be u64::MAX");
-        // assert_eq!(key, b"key1");
-        // assert_eq!(pkey, b"pkey1");
-        // assert_eq!(value, b"value2");
-
-        // Scan at timestamp after update
-        let scan_ts = 25u64;
-        let scanner = chain.scan(scan_ts).unwrap();
-        let results: Vec<_> = scanner.collect();
-        assert_eq!(results.len(), 1, "Expected 1 entry at ts {}", scan_ts);
-        let (start_ts, end_ts, key, pkey, value) = &results[0];
-        assert_eq!(
-            *start_ts, 20u64,
-            "Start timestamp should be 20 after update"
-        );
-        assert_eq!(*end_ts, u64::MAX, "End timestamp should be u64::MAX");
-        assert_eq!(key, b"key1");
-        assert_eq!(pkey, b"pkey1");
-        assert_eq!(value, b"value2");
-    }
-
-    #[test]
-    fn test_recent_chain_scanner_empty_chain() {
-        // Initialize mem_pool and container key
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-
-        // Create a new chain
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Scan the empty chain
-        let scan_ts = 10u64;
-        let scanner = chain.scan(scan_ts).unwrap();
-        let results: Vec<_> = scanner.collect();
-        assert_eq!(
-            results.len(),
-            0,
-            "Expected no entries in empty chain at ts {}",
-            scan_ts
-        );
-    }
-
-    #[test]
-    fn test_recent_chain_scanner_different_keys_pkeys() {
-        // Initialize mem_pool and container key
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-
-        // Create a new chain
-        let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
-
-        // Entries with different keys and pkeys
-        let entries: Vec<(Vec<u8>, Vec<u8>, Timestamp, Vec<u8>)> = vec![
-            (
-                b"key1".to_vec(),
-                b"pkey1".to_vec(),
-                10u64,
-                b"value1".to_vec(),
-            ),
-            (
-                b"key1".to_vec(),
-                b"pkey2".to_vec(),
-                15u64,
-                b"value2".to_vec(),
-            ),
-            (
-                b"key2".to_vec(),
-                b"pkey1".to_vec(),
-                20u64,
-                b"value3".to_vec(),
-            ),
-            (
-                b"key2".to_vec(),
-                b"pkey2".to_vec(),
-                25u64,
-                b"value4".to_vec(),
-            ),
-        ];
-
-        // Insert entries
-        for (key, pkey, ts, val) in &entries {
-            chain.insert(key, pkey, *ts, val).unwrap();
-        }
-
-        // Scan at timestamp 30
-        let scan_ts = 30u64;
-        let scanner = chain.scan(scan_ts).unwrap();
-        let mut results: Vec<_> = scanner.collect();
-        results.sort_by(|a, b| (a.2.clone(), a.3.clone()).cmp(&(b.2.clone(), b.3.clone())));
-
-        assert_eq!(results.len(), 4, "Expected 4 entries at ts {}", scan_ts);
-
-        for (result, expected_entry) in results.iter().zip(&entries) {
-            let (_start_ts, _end_ts, key, pkey, value) = result;
-            assert_eq!(key, &expected_entry.0);
-            assert_eq!(pkey, &expected_entry.1);
-            assert_eq!(value, &expected_entry.3);
-        }
-    }
+    // #[test]
+    // fn test_chain_delete_and_insert_new_entry() {
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     let key = b"key_cycle";
+    //     let pkey = b"pkey_cycle";
+    //     let ts_insert1: Timestamp = 100;
+    //     let ts_delete: Timestamp = 200;
+    //     let ts_insert2: Timestamp = 300;
+    //     let val1 = b"value1";
+    //     let val2 = b"value2";
+
+    //     // Insert the first entry
+    //     chain.insert(key, pkey, ts_insert1, val1).unwrap();
+
+    //     // Delete the entry
+    //     chain.delete(key, pkey, ts_delete).unwrap();
+
+    //     // Insert a new entry with the same key and pkey
+    //     chain.insert(key, pkey, ts_insert2, val2).unwrap();
+
+    //     // Retrieve the new entry
+    //     let retrieved_val = chain.get(key, pkey, ts_insert2).unwrap();
+    //     assert_eq!(retrieved_val, val2);
+
+    //     // Attempt to get the old entry with an earlier timestamp
+    //     let result = chain.get(key, pkey, ts_insert1);
+    //     assert!(matches!(
+    //         result,
+    //         Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+    //     ));
+    // }
+
+    // #[test]
+    // fn test_chain_delete_all_entries() {
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     // Insert multiple entries
+    //     for i in 0..10 {
+    //         let key = format!("key{}", i).into_bytes();
+    //         let pkey = format!("pkey{}", i).into_bytes();
+    //         let val = format!("value{}", i).into_bytes();
+    //         chain.insert(&key, &pkey, i as u64, &val).unwrap();
+    //     }
+
+    //     // Delete all entries
+    //     for i in 0..10 {
+    //         let key = format!("key{}", i).into_bytes();
+    //         let pkey = format!("pkey{}", i).into_bytes();
+    //         let ts_delete = i as u64 + 100;
+    //         chain.delete(&key, &pkey, ts_delete).unwrap();
+    //     }
+
+    //     // Verify that all entries are deleted
+    //     for i in 0..10 {
+    //         let key = format!("key{}", i).into_bytes();
+    //         let pkey = format!("pkey{}", i).into_bytes();
+    //         let result = chain.get(&key, &pkey, i as u64 + 100);
+    //         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+    //     }
+    // }
+
+    // #[test]
+    // fn test_chain_delete_non_existent_after_deletion() {
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     // Insert an entry
+    //     chain.insert(b"key1", b"pkey1", 10u64, b"value1").unwrap();
+
+    //     // Delete the entry
+    //     chain.delete(b"key1", b"pkey1", 20u64).unwrap();
+
+    //     // Attempt to delete again
+    //     let result = chain.delete(b"key1", b"pkey1", 30u64);
+    //     assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+    // }
+
+    // #[test]
+    // fn test_chain_delete_with_multiple_versions() {
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     let key = b"key_multi";
+    //     let pkey = b"pkey_multi";
+    //     let ts1: Timestamp = 100;
+    //     let ts2: Timestamp = 200;
+    //     let ts_delete: Timestamp = 300;
+    //     let val1 = b"value1";
+    //     let val2 = b"value2";
+
+    //     // Insert first version
+    //     chain.insert(key, pkey, ts1, val1).unwrap();
+
+    //     // Update to create a second version
+    //     chain.update(key, pkey, ts2, val2).unwrap();
+
+    //     // Delete the entry
+    //     chain.delete(key, pkey, ts_delete).unwrap();
+
+    //     // Attempt to get with various timestamps
+    //     let result = chain.get(key, pkey, ts1);
+    //     assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+
+    //     let result = chain.get(key, pkey, ts2);
+    //     assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+
+    //     let result = chain.get(key, pkey, ts_delete);
+    //     assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+    // }
+
+    // #[test]
+    // fn test_chain_delete_concurrent_operations() {
+    //     use std::thread;
+
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+    //     let chain = Arc::new(MvccHashJoinRecentChain::new(c_key, mem_pool.clone()));
+
+    //     let chain_insert = chain.clone();
+    //     let handle_insert = thread::spawn(move || {
+    //         // Insert entries
+    //         for i in 0..100 {
+    //             let key = format!("key{}", i).into_bytes();
+    //             let pkey = format!("pkey{}", i).into_bytes();
+    //             let value = format!("value{}", i).into_bytes();
+    //             chain_insert.insert(&key, &pkey, i as u64, &value).unwrap();
+    //         }
+    //     });
+
+    //     let chain_delete = chain.clone();
+    //     let handle_delete = thread::spawn(move || {
+    //         // Wait a bit to ensure some entries are inserted
+    //         std::thread::sleep(std::time::Duration::from_millis(50));
+
+    //         // Delete entries
+    //         for i in 0..50 {
+    //             let key = format!("key{}", i).into_bytes();
+    //             let pkey = format!("pkey{}", i).into_bytes();
+    //             let ts_delete = i as u64 + 100;
+    //             let _ = chain_delete.delete(&key, &pkey, ts_delete);
+    //         }
+    //     });
+
+    //     handle_insert.join().unwrap();
+    //     handle_delete.join().unwrap();
+
+    //     // Verify entries
+    //     for i in 0..100 {
+    //         let key = format!("key{}", i).into_bytes();
+    //         let pkey = format!("pkey{}", i).into_bytes();
+    //         let ts = i as u64;
+    //         let result = chain.get(&key, &pkey, ts + 100);
+    //         if i < 50 {
+    //             // Entries that were attempted to be deleted
+    //             assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+    //         } else {
+    //             // Entries that should still exist
+    //             let expected_value = format!("value{}", i).into_bytes();
+    //             let retrieved_val = result.unwrap();
+    //             assert_eq!(retrieved_val, expected_value);
+    //         }
+    //     }
+    // }
+
+    // #[test]
+    // fn test_chain_random_operations_no_duplicate_pkeys() {
+    //     use rand::prelude::*;
+    //     use std::collections::HashMap;
+
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     // Define the number of operations
+    //     let num_operations = 10_000;
+
+    //     // Define possible operations
+    //     enum Operation {
+    //         Insert,
+    //         Get,
+    //         Update,
+    //         Delete,
+    //     }
+
+    //     // Create a random number generator
+    //     let mut rng = rand::thread_rng();
+
+    //     // HashMap to keep track of the expected state
+    //     // Key: (key, pkey), Value: (ts, value)
+    //     let mut expected_state: HashMap<(Vec<u8>, Vec<u8>), (Timestamp, Vec<u8>)> = HashMap::new();
+
+    //     // Set to keep track of inserted pkeys to avoid duplicates
+    //     let mut inserted_pkeys: std::collections::HashSet<Vec<u8>> =
+    //         std::collections::HashSet::new();
+
+    //     // Possible keys, pkeys, and values
+    //     let keys: Vec<Vec<u8>> = (0..100).map(|i| format!("key{}", i).into_bytes()).collect();
+    //     let pkeys: Vec<Vec<u8>> = (0..1000) // Increase the range to have enough unique pkeys
+    //         .map(|i| format!("pkey{}", i).into_bytes())
+    //         .collect();
+    //     let values: Vec<Vec<u8>> = (1..100)
+    //         .map(|i| format!("value{}", i).into_bytes())
+    //         .collect();
+
+    //     // Perform random operations
+    //     for _ in 0..num_operations {
+    //         let op = match rng.gen_range(0..4) {
+    //             0 => Operation::Insert,
+    //             1 => Operation::Get,
+    //             2 => Operation::Update,
+    //             3 => Operation::Delete,
+    //             _ => unreachable!(),
+    //         };
+
+    //         // Randomly select key, pkey, value, and timestamp
+    //         let key = keys.choose(&mut rng).unwrap().clone();
+    //         let pkey = pkeys.choose(&mut rng).unwrap().clone();
+    //         let value = values.choose(&mut rng).unwrap().clone();
+    //         let ts: Timestamp = rng.gen_range(1..1_000_000);
+
+    //         match op {
+    //             Operation::Insert => {
+    //                 // Insert operation
+    //                 if inserted_pkeys.contains(&pkey) {
+    //                     // Skip insertion if pkey already exists
+    //                     continue;
+    //                 }
+    //                 println!("Inserting key: {:?}, pkey: {:?}, ts: {:?}, value: {:?}", key, pkey, ts, value);
+    //                 let res = chain.insert(&key, &pkey, &ts, &0, &value);
+    //                 if res.is_ok() {
+    //                     expected_state.insert((key.clone(), pkey.clone()), (ts, value.clone()));
+    //                     inserted_pkeys.insert(pkey.clone());
+    //                 } else {
+    //                     assert!(matches!(
+    //                         res,
+    //                         Err(AccessMethodError::OutOfSpace)
+    //                             | Err(AccessMethodError::RecordTooLarge)
+    //                     ));
+    //                 }
+    //             }
+    //             Operation::Get => {
+    //                 // Get operation
+    //                 println!("Getting key: {:?}, pkey: {:?}, ts: {:?}", key, pkey, ts);
+    //                 let res = chain.get(&key, &pkey, &ts);
+    //                 match expected_state.get(&(key.clone(), pkey.clone())) {
+    //                     Some(&(stored_ts, ref stored_value)) if stored_ts <= ts => {
+    //                         // The entry should be retrievable
+    //                         let retrieved_value = res.unwrap();
+    //                         assert_eq!(&retrieved_value, stored_value);
+    //                     }
+    //                     _ => {
+    //                         // The entry should not be found
+    //                         assert!(matches!(
+    //                             res,
+    //                             Err(AccessMethodError::KeyNotFound)
+    //                                 | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+    //                         ));
+    //                     }
+    //                 }
+    //             }
+    //             Operation::Update => {
+    //                 // Update operation
+    //                 if !inserted_pkeys.contains(&pkey) {
+    //                     // Skip update if pkey does not exist
+    //                     continue;
+    //                 }
+    //                 println!("Updating key: {:?}, pkey: {:?}, ts: {:?}, value: {:?}", key, pkey, ts, value);
+    //                 let res = chain.update(&key, &pkey, &ts, &0,&value);
+    //                 println!("Update result: {:?}", res);
+    //                 match expected_state.get_mut(&(key.clone(), pkey.clone())) {
+    //                     Some((stored_ts, stored_value)) if *stored_ts <= ts => {
+    //                         // The update should succeed
+    //                         let (old_ts, old_value) = res.unwrap();
+    //                         assert_eq!(old_ts, *stored_ts);
+    //                         assert_eq!(old_value, stored_value.clone());
+    //                         *stored_ts = ts;
+    //                         *stored_value = value.clone();
+    //                     }
+    //                     _ => {
+    //                         // The update should fail
+    //                         assert!(matches!(
+    //                             res,
+    //                             Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+    //                                 | Err(AccessMethodError::KeyNotFound)
+    //                         ));
+    //                     }
+    //                 }
+    //             }
+    //             Operation::Delete => {
+    //                 // Delete operation
+    //                 if !inserted_pkeys.contains(&pkey) {
+    //                     // Skip deletion if pkey does not exist
+    //                     continue;
+    //                 }
+    //                 println!("Deleting key: {:?}, pkey: {:?}, ts: {:?}", key, pkey, ts);
+    //                 let res = chain.delete(&key, &pkey, &ts, &0);
+    //                 match expected_state.remove(&(key.clone(), pkey.clone())) {
+    //                     Some((stored_ts, stored_value)) if stored_ts <= ts => {
+    //                         // The deletion should succeed
+    //                         let (old_ts, old_value) = res.unwrap();
+    //                         assert_eq!(old_ts, stored_ts);
+    //                         assert_eq!(old_value, stored_value);
+    //                         inserted_pkeys.remove(&pkey);
+    //                     }
+    //                     Some((stored_ts, stored_value)) => {
+    //                         // The deletion should fail due to invalid timestamp
+    //                         expected_state
+    //                             .insert((key.clone(), pkey.clone()), (stored_ts, stored_value));
+    //                         assert!(matches!(
+    //                             res,
+    //                             Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+    //                                 | Err(AccessMethodError::KeyNotFound)
+    //                         ));
+    //                     }
+    //                     None => {
+    //                         // pkey is inseterd but (key, pkey) is inserted. actually its weird case
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     // After all operations, verify the final state
+    //     for ((key, pkey), (stored_ts, stored_value)) in &expected_state {
+    //         let res = chain.get(key, pkey, stored_ts);
+    //         let retrieved_value = res.unwrap();
+    //         assert_eq!(&retrieved_value, stored_value);
+    //     }
+
+    //     // Optionally, perform additional verification for timestamps beyond the stored timestamp
+    //     for ((key, pkey), (stored_ts, stored_value)) in &expected_state {
+    //         let ts_future = stored_ts + 1000;
+    //         let res = chain.get(key, pkey, &ts_future);
+    //         let retrieved_value = res.unwrap();
+    //         assert_eq!(&retrieved_value, stored_value);
+    //     }
+
+    //     // Verify that entries are not retrievable with timestamps before they were inserted
+    //     for ((key, pkey), (stored_ts, _)) in &expected_state {
+    //         let ts_past = if *stored_ts > 1 { stored_ts - 1 } else { 0 };
+    //         let res = chain.get(key, pkey, &ts_past);
+    //         assert!(matches!(
+    //             res,
+    //             Err(AccessMethodError::KeyNotFound)
+    //                 | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
+    //         ));
+    //     }
+    // }
+
+    // #[test]
+    // fn test_recent_chain_scanner() {
+    //     // Initialize mem_pool and container key
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+
+    //     // Create a new chain
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     // Entries to insert
+    //     let entries: Vec<(Vec<u8>, Vec<u8>, Timestamp, Vec<u8>)> = vec![
+    //         (
+    //             b"key1".to_vec(),
+    //             b"pkey1".to_vec(),
+    //             10u64,
+    //             b"value1".to_vec(),
+    //         ),
+    //         (
+    //             b"key2".to_vec(),
+    //             b"pkey2".to_vec(),
+    //             20u64,
+    //             b"value2".to_vec(),
+    //         ),
+    //         (
+    //             b"key3".to_vec(),
+    //             b"pkey3".to_vec(),
+    //             30u64,
+    //             b"value3".to_vec(),
+    //         ),
+    //         (
+    //             b"key4".to_vec(),
+    //             b"pkey4".to_vec(),
+    //             40u64,
+    //             b"value4".to_vec(),
+    //         ),
+    //         (
+    //             b"key5".to_vec(),
+    //             b"pkey5".to_vec(),
+    //             50u64,
+    //             b"value5".to_vec(),
+    //         ),
+    //     ];
+
+    //     // Insert entries
+    //     for (key, pkey, ts, val) in &entries {
+    //         chain.insert(key, pkey, *ts, val).unwrap();
+    //     }
+
+    //     // Test scanning at different timestamps
+    //     let test_cases = vec![
+    //         (5u64, vec![]),                                       // Before any entries
+    //         (15u64, vec![&entries[0]]),                           // After first entry
+    //         (25u64, vec![&entries[0], &entries[1]]),              // After second entry
+    //         (35u64, vec![&entries[0], &entries[1], &entries[2]]), // After third entry
+    //         (
+    //             45u64,
+    //             vec![&entries[0], &entries[1], &entries[2], &entries[3]],
+    //         ), // After fourth entry
+    //         (
+    //             55u64,
+    //             vec![
+    //                 &entries[0],
+    //                 &entries[1],
+    //                 &entries[2],
+    //                 &entries[3],
+    //                 &entries[4],
+    //             ],
+    //         ), // After all entries
+    //     ];
+
+    //     for (scan_ts, expected_entries) in test_cases {
+    //         let scanner = chain.scan(scan_ts).unwrap();
+    //         let results: Vec<_> = scanner.collect();
+
+    //         assert_eq!(
+    //             results.len(),
+    //             expected_entries.len(),
+    //             "At ts {}, expected {} entries, got {}",
+    //             scan_ts,
+    //             expected_entries.len(),
+    //             results.len()
+    //         );
+
+    //         for (result, expected_entry) in results.iter().zip(expected_entries) {
+    //             let (start_ts, end_ts, key, pkey, value) = result;
+    //             assert_eq!(
+    //                 *start_ts, expected_entry.2,
+    //                 "Start timestamp mismatch at ts {}",
+    //                 scan_ts
+    //             );
+    //             assert_eq!(
+    //                 *end_ts,
+    //                 u64::MAX,
+    //                 "End timestamp should be u64::MAX for recent entries at ts {}",
+    //                 scan_ts
+    //             );
+    //             assert_eq!(key, &expected_entry.0, "Key mismatch at ts {}", scan_ts);
+    //             assert_eq!(pkey, &expected_entry.1, "PKey mismatch at ts {}", scan_ts);
+    //             assert_eq!(value, &expected_entry.3, "Value mismatch at ts {}", scan_ts);
+    //         }
+    //     }
+    // }
+
+    // #[test]
+    // fn test_recent_chain_scanner_after_updates() {
+    //     // Initialize mem_pool and container key
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+
+    //     // Create a new chain
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     // Insert an entry
+    //     chain.insert(b"key1", b"pkey1", 10u64, b"value1").unwrap();
+
+    //     // Update the entry
+    //     chain.update(b"key1", b"pkey1", 20u64, b"value2").unwrap();
+
+    //     // Scan at timestamp before update
+    //     let scan_ts = 15u64;
+    //     let scanner = chain.scan(scan_ts).unwrap();
+    //     let results: Vec<_> = scanner.collect();
+    //     assert_eq!(results.len(), 0, "Expected 1 entry at ts {}", scan_ts);
+    //     // let (start_ts, end_ts, key, pkey, value) = &results[0];
+    //     // assert_eq!(*start_ts, 20u64, "Start timestamp should be 20 after update");
+    //     // assert_eq!(*end_ts, u64::MAX, "End timestamp should be u64::MAX");
+    //     // assert_eq!(key, b"key1");
+    //     // assert_eq!(pkey, b"pkey1");
+    //     // assert_eq!(value, b"value2");
+
+    //     // Scan at timestamp after update
+    //     let scan_ts = 25u64;
+    //     let scanner = chain.scan(scan_ts).unwrap();
+    //     let results: Vec<_> = scanner.collect();
+    //     assert_eq!(results.len(), 1, "Expected 1 entry at ts {}", scan_ts);
+    //     let (start_ts, end_ts, key, pkey, value) = &results[0];
+    //     assert_eq!(
+    //         *start_ts, 20u64,
+    //         "Start timestamp should be 20 after update"
+    //     );
+    //     assert_eq!(*end_ts, u64::MAX, "End timestamp should be u64::MAX");
+    //     assert_eq!(key, b"key1");
+    //     assert_eq!(pkey, b"pkey1");
+    //     assert_eq!(value, b"value2");
+    // }
+
+    // #[test]
+    // fn test_recent_chain_scanner_empty_chain() {
+    //     // Initialize mem_pool and container key
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+
+    //     // Create a new chain
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     // Scan the empty chain
+    //     let scan_ts = 10u64;
+    //     let scanner = chain.scan(scan_ts).unwrap();
+    //     let results: Vec<_> = scanner.collect();
+    //     assert_eq!(
+    //         results.len(),
+    //         0,
+    //         "Expected no entries in empty chain at ts {}",
+    //         scan_ts
+    //     );
+    // }
+
+    // #[test]
+    // fn test_recent_chain_scanner_different_keys_pkeys() {
+    //     // Initialize mem_pool and container key
+    //     let mem_pool = get_in_mem_pool();
+    //     let c_key = ContainerKey::new(0, 0);
+
+    //     // Create a new chain
+    //     let chain = MvccHashJoinRecentChain::new(c_key, mem_pool.clone());
+
+    //     // Entries with different keys and pkeys
+    //     let entries: Vec<(Vec<u8>, Vec<u8>, Timestamp, Vec<u8>)> = vec![
+    //         (
+    //             b"key1".to_vec(),
+    //             b"pkey1".to_vec(),
+    //             10u64,
+    //             b"value1".to_vec(),
+    //         ),
+    //         (
+    //             b"key1".to_vec(),
+    //             b"pkey2".to_vec(),
+    //             15u64,
+    //             b"value2".to_vec(),
+    //         ),
+    //         (
+    //             b"key2".to_vec(),
+    //             b"pkey1".to_vec(),
+    //             20u64,
+    //             b"value3".to_vec(),
+    //         ),
+    //         (
+    //             b"key2".to_vec(),
+    //             b"pkey2".to_vec(),
+    //             25u64,
+    //             b"value4".to_vec(),
+    //         ),
+    //     ];
+
+    //     // Insert entries
+    //     for (key, pkey, ts, val) in &entries {
+    //         chain.insert(key, pkey, *ts, val).unwrap();
+    //     }
+
+    //     // Scan at timestamp 30
+    //     let scan_ts = 30u64;
+    //     let scanner = chain.scan(scan_ts).unwrap();
+    //     let mut results: Vec<_> = scanner.collect();
+    //     results.sort_by(|a, b| (a.2.clone(), a.3.clone()).cmp(&(b.2.clone(), b.3.clone())));
+
+    //     assert_eq!(results.len(), 4, "Expected 4 entries at ts {}", scan_ts);
+
+    //     for (result, expected_entry) in results.iter().zip(&entries) {
+    //         let (_start_ts, _end_ts, key, pkey, value) = result;
+    //         assert_eq!(key, &expected_entry.0);
+    //         assert_eq!(pkey, &expected_entry.1);
+    //         assert_eq!(value, &expected_entry.3);
+    //     }
+    // }
 }

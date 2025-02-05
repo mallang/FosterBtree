@@ -525,6 +525,46 @@ pub trait MvccHashJoinHistoryPage {
         self.header().slot_count()
     }
     fn get_entry_at_slot(&self, slot_id: u32) -> MvccEntry;
+
+    fn binary_search_by_end_ts(&self, ts: Timestamp) -> (bool, u32);
+
+    fn insert_slot_at_id(&mut self, slot_id: u32, slot: &Slot);
+    fn delete_slot_at_id(&mut self, slot_id: u32);
+
+    fn slot_offset(&self, slot_id: u32) -> usize {
+        PAGE_HEADER_SIZE + slot_id as usize * SLOT_SIZE
+    }
+    // fn slot(&self, slot_id: u32) -> Option<Slot>;
+    fn set_slot(&mut self, slot_id: u32, slot: &Slot);
+
+    fn total_bytes_used(&self) -> u32 {
+        self.header().total_bytes_used()
+    }
+    fn set_total_bytes_used(&mut self, total_bytes_used: u32) {
+        let mut header = self.header();
+        header.set_total_bytes_used(total_bytes_used);
+        self.set_header(&header);
+    }
+    fn increase_total_bytes_used(&mut self, bytes: u32) {
+        self.set_total_bytes_used(self.total_bytes_used() + bytes);
+    }
+    fn decrease_total_bytes_used(&mut self, bytes: u32) {
+        self.set_total_bytes_used(self.total_bytes_used() - bytes);
+    }
+
+    fn increment_slot_count(&mut self) {
+        let mut header = self.header();
+        header.increment_slot_count();
+        self.set_header(&header);
+    }
+
+    fn decrement_slot_count(&mut self) {
+        let mut header = self.header();
+        header.decrement_slot_count();
+        self.set_header(&header);
+    }
+
+    fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
 }
 
 impl MvccHashJoinHistoryPage for Page {
@@ -547,22 +587,25 @@ impl MvccHashJoinHistoryPage for Page {
             return Err(AccessMethodError::OutOfSpace);
         }
 
+        let (found, slot_id) = self.binary_search_by_end_ts(end_ts);
         let mut header = self.header();
         let record_size = space_need - SLOT_SIZE as u32;
         let rec_offset = header.rec_start_offset() - record_size;
-        let slot_offset = PAGE_HEADER_SIZE as u32 + header.slot_count() * SLOT_SIZE as u32;
-        if rec_offset < slot_offset + SLOT_SIZE as u32 {
-            log_debug!("Not enough space after checking offsets");
-            return Err(AccessMethodError::OutOfSpace);
-        }
+
+        // let slot_offset = PAGE_HEADER_SIZE as u32 + header.slot_count() * SLOT_SIZE as u32;
+        // if rec_offset < slot_offset + SLOT_SIZE as u32 {
+        //     log_debug!("Not enough space after checking offsets");
+        //     return Err(AccessMethodError::OutOfSpace);
+        // }
 
         let slot = Slot::new(key, pkey, start_ts, end_ts, val, rec_offset as usize);
+        self.insert_slot_at_id(slot_id, &slot);
         let slot_bytes = slot.to_bytes();
 
         let record = Record::new(key, pkey, val);
         let record_bytes = record.to_bytes();
 
-        self[slot_offset as usize..slot_offset as usize + SLOT_SIZE].copy_from_slice(&slot_bytes);
+        // self[slot_offset as usize..slot_offset as usize + SLOT_SIZE].copy_from_slice(&slot_bytes);
         self[rec_offset as usize..rec_offset as usize + record_size as usize]
             .copy_from_slice(&record_bytes);
 
@@ -853,13 +896,100 @@ impl MvccHashJoinHistoryPage for Page {
         let mut full_pkey = slot.pkey_prefix().to_vec();
         full_pkey.extend_from_slice(record.remain_pkey());
 
-        MvccEntry {
-            key: full_key,
-            pkey: full_pkey,
-            start_ts: slot.start_ts(),
-            end_ts: slot.end_ts(),
-            value: record.val().to_vec(),
+        MvccEntry::new(
+            full_key,
+            full_pkey,
+            record.val().to_vec(),
+            slot.start_ts(),
+            slot.end_ts(),
+        )
+    }
+
+    fn binary_search_by_end_ts(&self, end_ts: Timestamp) -> (bool, u32) {
+        let mut high = self.slot_count();
+        if high == 0 {
+            return (false, 0);
         }
+
+        high -= 1;
+        let high_ts = self.get_entry_at_slot(high).end_ts;
+
+        if end_ts > high_ts {
+            return (false, high + 1);
+        } else if end_ts == high_ts {
+            return (true, high);
+        } else if high == 0 {
+            return (false, 0);
+        }
+
+        let mut low = 0;
+        let low_ts = self.get_entry_at_slot(low).end_ts;
+
+        if end_ts < low_ts {
+            return (false, 0);
+        } else if end_ts == low_ts {
+            return (true, low);
+        }
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let mid_ts = self.get_entry_at_slot(mid).end_ts;
+
+            if end_ts == mid_ts {
+                return (true, mid);
+            } else if end_ts < mid_ts {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+
+        (false, low)
+    }
+
+    fn insert_slot_at_id(&mut self, slot_id: u32, slot: &Slot) {
+        if slot_id < self.slot_count() {
+            let start_offset = self.slot_offset(slot_id);
+            let end_offset = self.slot_offset(self.slot_count());
+            self.copy_within(start_offset..end_offset, start_offset + SLOT_SIZE);
+        }
+
+        self.set_slot(slot_id, slot);
+        self.increase_total_bytes_used(SLOT_SIZE as u32);
+        self.increment_slot_count();
+    }
+
+    fn delete_slot_at_id(&mut self, slot_id: u32) {
+        if slot_id < self.slot_count() {
+            let start_offset = self.slot_offset(slot_id + 1);
+            let end_offset = self.slot_offset(self.slot_count());
+            self.copy_within(start_offset..end_offset, start_offset - SLOT_SIZE);
+        }
+        self.decrement_slot_count();
+        self.decrease_total_bytes_used(SLOT_SIZE as u32);
+        self.write_bytes(
+            self.slot_offset(self.slot_count()),
+            [0u8; SLOT_SIZE].as_ref(),
+        );
+    }
+
+    // fn slot(&self, slot_id: u32) -> Option<Slot> {
+    //     if slot_id < self.slot_count() {
+    //         let offset = self.slot_offset(slot_id);
+    //         let slot_bytes: [u8; SLOT_SIZE] = self[offset..offset + SLOT_SIZE].try_into().unwrap();
+    //         Some(Slot::from_bytes(&slot_bytes))
+    //     } else {
+    //         None
+    //     }
+    // }
+
+    fn set_slot(&mut self, slot_id: u32, slot: &Slot) {
+        let slot_offset = self.slot_offset(slot_id);
+        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+    }
+
+    fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
+        self[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 }
 

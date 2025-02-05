@@ -1497,22 +1497,36 @@ pub trait TableDataPage: TableDataPageTools {
 
                     if let Some(want_key) = key {
                         if record_key == want_key {
-                            res.push(MvccEntry {
-                                key: record_key,
-                                pkey: record_pkey,
-                                value: commit_record.value,
-                                start_ts: commit_record.start_ts,
-                                end_ts: rec_end_ts,
-                            });
+                            res.push(MvccEntry::new(
+                                record_key,
+                                record_pkey,
+                                commit_record.value,
+                                commit_record.start_ts,
+                                rec_end_ts,
+                            ));
+                            // res.push(MvccEntry {
+                            //     key: record_key,
+                            //     pkey: record_pkey,
+                            //     value: commit_record.value,
+                            //     start_ts: commit_record.start_ts,
+                            //     end_ts: rec_end_ts,
+                            // });
                         }
                     } else {
-                        res.push(MvccEntry {
-                            key: record_key,
-                            pkey: record_pkey,
-                            value: commit_record.value,
-                            start_ts: commit_record.start_ts,
-                            end_ts: rec_end_ts,
-                        });
+                        res.push(MvccEntry::new(
+                            record_key,
+                            record_pkey,
+                            commit_record.value,
+                            commit_record.start_ts,
+                            rec_end_ts,
+                        ));
+                        // res.push(MvccEntry {
+                        //     key: record_key,
+                        //     pkey: record_pkey,
+                        //     value: commit_record.value,
+                        //     start_ts: commit_record.start_ts,
+                        //     end_ts: rec_end_ts,
+                        // });
                     }
                 }
             }
@@ -1542,13 +1556,20 @@ pub trait TableDataPage: TableDataPageTools {
             let mut record = self.next_version(offset);
             while let Some(commit_record) = record {
                 if !commit_record.is_deleted() {
-                    res.push(MvccEntry {
-                        key: key.clone(),
-                        pkey: pkey.clone(),
-                        value: commit_record.value,
-                        start_ts: commit_record.start_ts,
-                        end_ts: prev_ts,
-                    });
+                    res.push(MvccEntry::new(
+                        key.clone(),
+                        pkey.clone(),
+                        commit_record.value,
+                        commit_record.start_ts,
+                        prev_ts,
+                    ));
+                    // res.push(MvccEntry {
+                    //     key: key.clone(),
+                    //     pkey: pkey.clone(),
+                    //     value: commit_record.value,
+                    //     start_ts: commit_record.start_ts,
+                    //     end_ts: prev_ts,
+                    // });
                 }
                 record = self.next_version(commit_record.next_offset);
                 prev_ts = commit_record.start_ts;
