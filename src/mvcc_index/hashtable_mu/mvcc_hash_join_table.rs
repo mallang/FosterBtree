@@ -211,7 +211,7 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         _tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        self.hash_table.upsert(&key, &pkey, ts, &value)
+        self.hash_table.insert(&key, &pkey, ts, &value)
     }
 
     fn get(
@@ -245,7 +245,7 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         _tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        self.hash_table.upsert(&key, &pkey, ts, &value)
+        self.hash_table.update(&key, &pkey, ts, &value)
     }
 
     fn delete(
@@ -284,6 +284,10 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
 }
 
 impl<T: MemPool> MvccHashJoinTable<T> {
+    pub fn test_rehash(&self) {
+        self.hash_table.test_singlethread_rehash();
+    }
+
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEFAULT_NUM_BUCKETS)
     }

@@ -282,6 +282,11 @@ pub use iterators::{
 
 type Result<T> = core::result::Result<T, HashTableAccessMethodError>;
 impl<T: MemPool> DHashSubTable<T> {
+    pub fn test_singlethread_rehash(&self) {
+        self.rehash(self.bucket_num() * 2);
+    }
+
+
     /// assume buckets is not locked!
     ///
     pub fn bucket_num(&self) -> u32 {
@@ -319,6 +324,68 @@ impl<T: MemPool> DHashSubTable<T> {
         // let mut attempts = 0;
         loop {
             match self.upsert_inner(key, pkey, ts, val) {
+                Ok(()) => {
+                    return Ok(());
+                }
+                Err(HashTableAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
+                    // rehash
+
+                    // log_warn!("BEFORE REHASH");
+                    // self.dump_all_entry();
+                    self.rehash(new_hash_size);
+                    // log_warn!("AFTER REHASH");
+                    // self.dump_all_entry();
+                    continue;
+                }
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
+                    // log_debug!("acquire write lock of page failed, re-do");
+                    // attempts += 1;
+                    // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
+                    continue;
+                }
+                Err(_) => {
+                    panic!("should not happen");
+                }
+            }
+        }
+    }
+
+    pub fn insert(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
+        // let base = 2;
+        // let mut attempts = 0;
+        loop {
+            match self.insert_inner(key, pkey, ts, val) {
+                Ok(()) => {
+                    return Ok(());
+                }
+                Err(HashTableAccessMethodError::HashPageOutOfSpace(new_hash_size)) => {
+                    // rehash
+
+                    // log_warn!("BEFORE REHASH");
+                    // self.dump_all_entry();
+                    self.rehash(new_hash_size);
+                    // log_warn!("AFTER REHASH");
+                    // self.dump_all_entry();
+                    continue;
+                }
+                Err(HashTableAccessMethodError::AcquireLockFailed) => {
+                    // log_debug!("acquire write lock of page failed, re-do");
+                    // attempts += 1;
+                    // std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
+                    continue;
+                }
+                Err(_) => {
+                    panic!("should not happen");
+                }
+            }
+        }
+    }
+
+    pub fn update(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
+        // let base = 2;
+        // let mut attempts = 0;
+        loop {
+            match self.update_inner(key, pkey, ts, val) {
                 Ok(()) => {
                     return Ok(());
                 }
@@ -428,7 +495,7 @@ impl<T: MemPool> DHashSubTable<T> {
 
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
             let mut write_page = self.write_page(page_f_key);
-            write_page.dbg_print_slots();
+            // write_page.dbg_print_slots();
             write_page.garbage_collect(safe_ts);
         }
 
@@ -568,7 +635,86 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
+    fn insert_inner(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
+        let buckets = self.buckets_rwlock.read().unwrap();
+        let bucket_num = buckets.len() as u32;
+
+        let bucket_idx = Self::hash_to_index(key, bucket_num);
+
+        let pid = buckets[bucket_idx].page_id();
+        let fid = buckets[bucket_idx].frame_id();
+        let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
+        let acq_result = self.try_write_page(page_f_key).ok();
+        let mut inserted_page = match acq_result {
+            None => {
+                return Err(HashTableAccessMethodError::AcquireLockFailed);
+            }
+            Some(p) => p,
+        };
+        let inserted_result =
+            <Page as TableDataPage>::insert(&mut inserted_page, key, pkey, val, ts);
+
+        match inserted_result {
+            Err(HashTableAccessMethodError::OutOfSpace) => {
+                // rehash
+                return Err(HashTableAccessMethodError::HashPageOutOfSpace(
+                    bucket_num * 2,
+                ));
+            }
+            Err(e) => {
+                panic!(
+                    "should not happen! have checked before insert. err: {:?}, insert_key: {:?}",
+                    e,
+                    str::from_utf8(key),
+                );
+            }
+            Ok(()) => {
+                return Ok(());
+            }
+        }
+    }
+
+    fn update_inner(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
+        let buckets = self.buckets_rwlock.read().unwrap();
+        let bucket_num = buckets.len() as u32;
+
+        let bucket_idx = Self::hash_to_index(key, bucket_num);
+
+        let pid = buckets[bucket_idx].page_id();
+        let fid = buckets[bucket_idx].frame_id();
+        let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
+        let acq_result = self.try_write_page(page_f_key).ok();
+        let mut inserted_page = match acq_result {
+            None => {
+                return Err(HashTableAccessMethodError::AcquireLockFailed);
+            }
+            Some(p) => p,
+        };
+        let inserted_result =
+            <Page as TableDataPage>::update(&mut inserted_page, key, pkey, val, ts);
+
+        match inserted_result {
+            Err(HashTableAccessMethodError::OutOfSpace) => {
+                // rehash
+                return Err(HashTableAccessMethodError::HashPageOutOfSpace(
+                    bucket_num * 2,
+                ));
+            }
+            Err(e) => {
+                panic!(
+                    "should not happen! have checked before insert. err: {:?}, insert_key: {:?}",
+                    e,
+                    str::from_utf8(key),
+                );
+            }
+            Ok(()) => {
+                return Ok(());
+            }
+        }
+    }
+
     fn rehash(&self, hash_size: u32) -> bool {
+        println!("[REHASH] rehash call to new size: {}", hash_size);
         // ensure that re-hash only does once
         let _rehash_guard = self.rehash_mutex.lock().unwrap();
 

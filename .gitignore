@@ -1,3 +1,5 @@
 /target
 log*
 .DS_Store
+benches/hash_join/csv
+output/

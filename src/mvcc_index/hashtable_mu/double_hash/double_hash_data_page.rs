@@ -378,14 +378,14 @@ mod record {
     use super::DELETE_MARKER_IN_VAL_SIZE;
 
     #[derive(Debug, Clone)]
-    pub struct CommittedRecord {
+    pub struct CommittedRecord<'a> {
         pub next_offset: u32,
         pub start_ts: u64,
         pub val_size: u32,
-        pub value: Vec<u8>,
+        pub value: &'a [u8],
     }
 
-    impl CommittedRecord {
+    impl<'a> CommittedRecord<'a> {
         pub fn is_deleted(&self) -> bool {
             self.val_size == DELETE_MARKER_IN_VAL_SIZE
         }
@@ -418,13 +418,13 @@ mod record {
             }
         }
 
-        pub fn space_need(&self) -> u32 {
-            if self.is_deleted() {
-                8 + 4 + 4
-            } else {
-                8 + 4 + 4 + self.value.len() as u32
-            }
-        }
+        // pub fn space_need(&self) -> u32 {
+        //     if self.is_deleted() {
+        //         8 + 4 + 4
+        //     } else {
+        //         8 + 4 + 4 + self.value.len() as u32
+        //     }
+        // }
 
         pub fn val_size_from_bytes(bytes: &[u8]) -> Option<u32> {
             let res = u32::from_be_bytes(
@@ -829,7 +829,6 @@ pub trait TableDataPageBase {
             let val_size = CommittedRecord::val_size_from_bytes(bytes);
             let val = {
                 self.read_bytes(off as usize + 8 + 4 + 4, val_size.unwrap_or(0) as usize)
-                    .to_vec()
             };
 
             let val_size = val_size.unwrap_or(DELETE_MARKER_IN_VAL_SIZE);
@@ -1034,6 +1033,8 @@ mod rehash_common {
     use std::collections::BinaryHeap;
     use std::collections::HashMap;
 
+    use crate::mvcc_index::Timestamp;
+
     /// start, len
     type Space = (u32, u32);
     /// SlotID, VersionID
@@ -1045,6 +1046,10 @@ mod rehash_common {
     pub type SlotAddresses = Vec<Space>;
     /// slot_id -> versions
     pub type MapSlotId2VersionsSpace = HashMap<u32, SlotAddresses>;
+
+    /// value, is_delete, ts
+    type VersionRef<'a> = (&'a [u8], bool, Timestamp);  
+    pub type VersionRefVec<'a> = Vec<VersionRef<'a>>;
 }
 use rehash_common::*;
 
@@ -1081,6 +1086,10 @@ pub trait TableDataPageInterface: TableDataPageBase {
         (None, self.slot_count() as usize)
     }
 
+    fn find_slot_idx_to_insert(&self, key: &[u8], pkey: &[u8]) -> (Option<&Slot>, usize) {
+        (None, self.slot_count() as usize)
+    }
+
     fn get_slot_range_by_key(&self, _key: Option<&[u8]>) -> std::ops::Range<usize> {
         0..self.slot_count() as usize
     }
@@ -1088,10 +1097,49 @@ pub trait TableDataPageInterface: TableDataPageBase {
 
 #[cfg(not(feature = "unsorted_page"))]
 pub trait TableDataPageInterface: TableDataPageBase {
+
+    fn find_slot_idx_to_insert(&self, key: &[u8], pkey: &[u8]) -> (Option<&Slot>, usize) {
+        let slot_sli = <Self as TableDataPageBase>::get_slot_slice(&self, 0);
+
+        let probe_slot_fn = |slot: &Slot| -> std::cmp::Ordering {
+            let probe_key_prefix_len = SLOT_KEY_PREFIX_SIZE.min(key.len());
+            let probe_pkey_prefix_len = SLOT_PKEY_PREFIX_SIZE.min(pkey.len());
+
+            let probe = (
+                &key[0..probe_key_prefix_len],
+                &key[probe_key_prefix_len..],
+                &pkey[0..probe_pkey_prefix_len],
+                &pkey[probe_pkey_prefix_len..],
+            );
+            let slot_cmped = {
+                let meta_bytes = {
+                    let meta_size = SlotMeta::space_need_from_slot(slot);
+                    let meta_offset = slot.meta_offset();
+                    self.read_bytes(meta_offset as usize, meta_size as usize)
+                };
+                (
+                    slot.key_prefix(),
+                    SlotMeta::get_remain_key(slot, meta_bytes),
+                    slot.pkey_prefix(),
+                    SlotMeta::get_remain_pkey(slot, meta_bytes),
+                )
+            };
+
+            probe.cmp(&slot_cmped)
+        };
+
+        let find_res = slot_sli.binary_search_by(probe_slot_fn);
+        let smallest_ge_idx = *find_res.as_ref().unwrap_or_else(|x| x);
+        (
+            find_res.ok().map(|idx| self.get_slot_ref(idx)),
+            smallest_ge_idx,
+        )
+    }
+
     fn find_slot_by_kpk(&self, key: &[u8], pkey: &[u8]) -> (Option<&Slot>, usize) {
         let slot_sli = <Self as TableDataPageBase>::get_slot_slice(&self, 0);
 
-        let probe_slot_fn = |slot: &Slot| -> Ordering {
+        let probe_slot_fn = |slot: &Slot| -> std::cmp::Ordering {
             let probe_key_prefix_len = SLOT_KEY_PREFIX_SIZE.min(key.len());
             let probe_pkey_prefix_len = SLOT_PKEY_PREFIX_SIZE.min(pkey.len());
 
@@ -1179,18 +1227,62 @@ pub trait TableDataPageInterface: TableDataPageBase {
 impl TableDataPageInterface for Page {}
 
 pub trait TableDataPageTools: TableDataPageInterface {
-    fn add_commit_version(
+    fn rehash_relocate_slot(
+        &mut self,
+        key: &[u8],
+        pkey: &[u8],
+        versions: VersionRefVec,
+    ) -> Result<()> {
+        // let (_find_slot_res, new_slot_id_optional) = self.find_slot_idx_to_insert(key, pkey);
+        let new_slot_id = self.slot_count() as usize;
+        let slot = {
+            self.insert_slot_and_meta(key, pkey, new_slot_id);
+            self.get_slot_ref(new_slot_id)
+        };
+
+        let (mut _latest_record_offset, mut prev_next_offset) = (
+            0 as u32,
+            slot.meta_offset() + 0,
+        );
+        let mut rec_start_offset = self.rec_start_offset();
+        let mut increase_bytes_delta = 0_u32;
+        for version in versions {
+            let new_record_bytes = 
+                { CommittedRecord::to_bytes(0, version.2, version.0, version.1) };
+            let record_size = new_record_bytes.len() as u32;
+            let record_offset = rec_start_offset - record_size;
+            self.write_bytes(record_offset as usize, &new_record_bytes);
+            rec_start_offset = record_offset;
+            increase_bytes_delta += record_size;
+
+            let update_bytes: [u8; 4] = u32::to_be_bytes(record_offset);
+            self.write_bytes(prev_next_offset as usize, &update_bytes);
+            
+            prev_next_offset = record_offset + 0;
+        }
+
+        let mut header = self.header();
+        header.increase_total_bytes_used(increase_bytes_delta);
+        header.set_rec_start_offset(rec_start_offset);
+        self.set_header(&header);
+
+        Ok(())
+    }
+
+
+    fn add_commit_version_to_exist_slot(
         &mut self,
         key: &[u8],
         pkey: &[u8],
         ts: Timestamp,
         value: &[u8],
+        is_delete: bool,
     ) -> Result<()> {
         let (find_slot_res, new_slot_id_optional) = self.find_slot_by_kpk(key, pkey);
 
         let slot = if let Some(sl) = find_slot_res {
             // slot exist => check only new record size
-            let need_space = CommittedRecord::space_need_from_value(value, false);
+            let need_space = CommittedRecord::space_need_from_value(value, is_delete);
             let free_space = self.free_space_without_compaction();
             if need_space > free_space {
                 return Err(HashTableAccessMethodError::OutOfSpace);
@@ -1198,7 +1290,7 @@ pub trait TableDataPageTools: TableDataPageInterface {
             sl
         } else {
             let need_space =
-                Slot::space_need(key, pkey) + CommittedRecord::space_need_from_value(value, false);
+                Slot::space_need(key, pkey) + CommittedRecord::space_need_from_value(value, is_delete);
             let free_space = self.free_space_without_compaction();
             if need_space > free_space {
                 return Err(HashTableAccessMethodError::OutOfSpace);
@@ -1214,7 +1306,7 @@ pub trait TableDataPageTools: TableDataPageInterface {
             latest_record_res.prev_next_offset,
         );
         let new_record_bytes =
-            { CommittedRecord::to_bytes(latest_record_offset.unwrap_or(0), ts, &value, false) };
+            { CommittedRecord::to_bytes(latest_record_offset.unwrap_or(0), ts, &value, is_delete) };
 
         // insert latest record
         let record_size = new_record_bytes.len() as u32;
@@ -1232,20 +1324,21 @@ pub trait TableDataPageTools: TableDataPageInterface {
         Ok(())
     }
 
-    fn add_delete_version(&mut self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<()> {
-        let (find_slot_res, new_slot_id_optional) = self.find_slot_by_kpk(key, pkey);
+    fn add_commit_version_to_new_slot(
+        &mut self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        value: &[u8],
+        is_delete: bool,
+    ) -> Result<()> {
+        let (find_slot_res, new_slot_id_optional) = self.find_slot_idx_to_insert(key, pkey);
 
         let slot = if let Some(sl) = find_slot_res {
-            // slot exist => check only new record size
-            let need_space = CommittedRecord::space_need_from_value(&[], true);
-            let free_space = self.free_space_without_compaction();
-            if need_space > free_space {
-                return Err(HashTableAccessMethodError::OutOfSpace);
-            }
-            sl
+            unreachable!()
         } else {
             let need_space =
-                Slot::space_need(key, pkey) + CommittedRecord::space_need_from_value(&[], true);
+                Slot::space_need(key, pkey) + CommittedRecord::space_need_from_value(value, is_delete);
             let free_space = self.free_space_without_compaction();
             if need_space > free_space {
                 return Err(HashTableAccessMethodError::OutOfSpace);
@@ -1260,9 +1353,8 @@ pub trait TableDataPageTools: TableDataPageInterface {
             latest_record_res.record_offset,
             latest_record_res.prev_next_offset,
         );
-
         let new_record_bytes =
-            { CommittedRecord::to_bytes(latest_record_offset.unwrap_or(0), ts, &[], true) };
+            { CommittedRecord::to_bytes(latest_record_offset.unwrap_or(0), ts, &value, is_delete) };
 
         // insert latest record
         let record_size = new_record_bytes.len() as u32;
@@ -1279,6 +1371,54 @@ pub trait TableDataPageTools: TableDataPageInterface {
         self.write_bytes(prev_next_offset as usize, &update_bytes);
         Ok(())
     }
+
+    // fn add_delete_version(&mut self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<()> {
+    //     let (find_slot_res, new_slot_id_optional) = self.find_slot_by_kpk(key, pkey);
+
+    //     let slot = if let Some(sl) = find_slot_res {
+    //         // slot exist => check only new record size
+    //         let need_space = CommittedRecord::space_need_from_value(&[], true);
+    //         let free_space = self.free_space_without_compaction();
+    //         if need_space > free_space {
+    //             return Err(HashTableAccessMethodError::OutOfSpace);
+    //         }
+    //         sl
+    //     } else {
+    //         let need_space =
+    //             Slot::space_need(key, pkey) + CommittedRecord::space_need_from_value(&[], true);
+    //         let free_space = self.free_space_without_compaction();
+    //         if need_space > free_space {
+    //             return Err(HashTableAccessMethodError::OutOfSpace);
+    //         }
+    //         self.insert_slot_and_meta(key, pkey, new_slot_id_optional);
+    //         self.get_slot_ref(new_slot_id_optional)
+    //     };
+
+    //     let latest_record_res =
+    //         self.find_latest_record_before_ts_by_slot(slot, |record_ts: Timestamp| record_ts <= ts);
+    //     let (latest_record_offset, prev_next_offset) = (
+    //         latest_record_res.record_offset,
+    //         latest_record_res.prev_next_offset,
+    //     );
+
+    //     let new_record_bytes =
+    //         { CommittedRecord::to_bytes(latest_record_offset.unwrap_or(0), ts, &[], true) };
+
+    //     // insert latest record
+    //     let record_size = new_record_bytes.len() as u32;
+    //     let record_offset = self.rec_start_offset() - record_size;
+    //     self.write_bytes(record_offset as usize, &new_record_bytes);
+
+    //     let mut header = self.header();
+    //     header.increase_total_bytes_used(record_size);
+    //     header.set_rec_start_offset(record_offset);
+    //     self.set_header(&header);
+
+    //     // update prev next
+    //     let update_bytes: [u8; 4] = u32::to_be_bytes(record_offset);
+    //     self.write_bytes(prev_next_offset as usize, &update_bytes);
+    //     Ok(())
+    // }
 
     fn rehash_export_to_new_page(
         &self,
@@ -1302,8 +1442,9 @@ pub trait TableDataPageTools: TableDataPageInterface {
         for (idx, slot) in slot_sli.iter().enumerate() {
             let key = self.get_key_by_slot(slot);
             if is_new_page_fn(&key) {
-                let pkey = self.get_pkey_by_slot(slot);
-                new_page.insert_slot_and_meta(&key, &pkey, new_page.slot_count() as usize);
+                
+                // new_page.insert_slot_and_meta(&key, &pkey, new_page.slot_count() as usize);
+
                 // add meta space to free space
                 let meta_offset = slot.meta_offset();
                 let meta_size = SlotMeta::space_need_from_slot(slot);
@@ -1312,33 +1453,39 @@ pub trait TableDataPageTools: TableDataPageInterface {
                 // insert versions to new page and collect free_space info
                 let mut offset = get_first_record_offset_fn(slot);
                 let mut record = self.next_version(offset);
+                let mut versions = VersionRefVec::new();
                 while let Some(commit_record) = record {
                     if commit_record.is_deleted() {
                         free_space.push((
                             offset,
                             CommittedRecord::space_need_from_value(&commit_record.value, true),
                         ));
-                        new_page
-                            .add_delete_version(&key, &pkey, commit_record.start_ts)
-                            .unwrap();
+                        // new_page
+                        //     .add_commit_version_to_exist_slot(&key, &pkey, commit_record.start_ts, &[], true)
+                        //     .unwrap();
+                        versions.push((&[], true, commit_record.start_ts));
                     } else {
                         free_space.push((
                             offset,
                             CommittedRecord::space_need_from_value(&commit_record.value, false),
                         ));
-                        new_page
-                            .add_commit_version(
-                                &key,
-                                &pkey,
-                                commit_record.start_ts,
-                                &commit_record.value,
-                            )
-                            .unwrap();
+                        // new_page
+                        //     .add_commit_version_to_exist_slot(
+                        //         &key,
+                        //         &pkey,
+                        //         commit_record.start_ts,
+                        //         &commit_record.value,
+                        //         false,
+                        //     )
+                        //     .unwrap();
+                        versions.push((&commit_record.value, false, commit_record.start_ts));
                     }
 
                     record = self.next_version(commit_record.next_offset);
                     offset = commit_record.next_offset;
                 }
+                let pkey = self.get_pkey_by_slot(slot);
+                new_page.rehash_relocate_slot(&key, &pkey, versions).unwrap();
             } else {
                 // left out
                 left_ids.push(idx as u32);
@@ -1356,7 +1503,15 @@ pub trait TableDataPage: TableDataPageTools {
     }
 
     fn upsert(&mut self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) -> Result<()> {
-        self.add_commit_version(key, pkey, ts, value)
+        self.add_commit_version_to_exist_slot(key, pkey, ts, value, false)
+    }
+
+    fn update(&mut self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) -> Result<()> {
+        self.add_commit_version_to_exist_slot(key, pkey, ts, value, false)
+    }
+
+    fn insert(&mut self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) -> Result<()> {
+        self.add_commit_version_to_new_slot(key, pkey, ts, value, false)
     }
 
     fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<Vec<u8>> {
@@ -1385,7 +1540,7 @@ pub trait TableDataPage: TableDataPageTools {
     }
 
     fn delete(&mut self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<()> {
-        self.add_delete_version(key, pkey, ts)
+        self.add_commit_version_to_exist_slot(key, pkey, ts,&[],  true)
     }
 
     /// return free space
@@ -1497,6 +1652,7 @@ pub trait TableDataPage: TableDataPageTools {
 
                     if let Some(want_key) = key {
                         if record_key == want_key {
+<<<<<<< Updated upstream
                             res.push(MvccEntry::new(
                                 record_key,
                                 record_pkey,
@@ -1527,6 +1683,24 @@ pub trait TableDataPage: TableDataPageTools {
                         //     start_ts: commit_record.start_ts,
                         //     end_ts: rec_end_ts,
                         // });
+=======
+                            res.push(MvccEntry {
+                                key: record_key,
+                                pkey: record_pkey,
+                                value: commit_record.value.to_vec(),
+                                start_ts: commit_record.start_ts,
+                                end_ts: rec_end_ts,
+                            });
+                        }
+                    } else {
+                        res.push(MvccEntry {
+                            key: record_key,
+                            pkey: record_pkey,
+                            value: commit_record.value.to_vec(),
+                            start_ts: commit_record.start_ts,
+                            end_ts: rec_end_ts,
+                        });
+>>>>>>> Stashed changes
                     }
                 }
             }
@@ -1556,6 +1730,7 @@ pub trait TableDataPage: TableDataPageTools {
             let mut record = self.next_version(offset);
             while let Some(commit_record) = record {
                 if !commit_record.is_deleted() {
+<<<<<<< Updated upstream
                     res.push(MvccEntry::new(
                         key.clone(),
                         pkey.clone(),
@@ -1570,6 +1745,15 @@ pub trait TableDataPage: TableDataPageTools {
                     //     start_ts: commit_record.start_ts,
                     //     end_ts: prev_ts,
                     // });
+=======
+                    res.push(MvccEntry {
+                        key: key.clone(),
+                        pkey: pkey.clone(),
+                        value: commit_record.value.to_vec(),
+                        start_ts: commit_record.start_ts,
+                        end_ts: prev_ts,
+                    });
+>>>>>>> Stashed changes
                 }
                 record = self.next_version(commit_record.next_offset);
                 prev_ts = commit_record.start_ts;
@@ -1634,7 +1818,7 @@ pub trait TableDataPage: TableDataPageTools {
                 res.push(DeltaEntry {
                     key,
                     pkey,
-                    value_delta: Delta::Inserted(large_ts_commit_record.value),
+                    value_delta: Delta::Inserted(large_ts_commit_record.value.to_vec()),
                 });
             } else if large_ts_commit_record.is_deleted() {
                 // delete
@@ -1650,7 +1834,7 @@ pub trait TableDataPage: TableDataPageTools {
                 res.push(DeltaEntry {
                     key,
                     pkey,
-                    value_delta: Delta::Updated(large_ts_commit_record.value),
+                    value_delta: Delta::Updated(large_ts_commit_record.value.to_vec()),
                 });
             }
         }
