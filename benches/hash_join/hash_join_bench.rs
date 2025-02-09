@@ -213,13 +213,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                     op.ts,
                     u64::MAX,
                 );
-                // let new_entry = MvccEntry {
-                //     key: key.clone(),
-                //     pkey: op.pkey.clone(),
-                //     value: op.value.clone(),
-                //     start_ts: op.ts,
-                //     end_ts: u64::MAX,
-                // };
                 entries.push(new_entry);
             }
             "delete" => {
@@ -273,6 +266,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start_time_hj = Instant::now();
 
     // Execute operations from ops.csv on HashJoinTable
+    let mut commit_cnt = 0;
     for op in &ops {
         match op.op_type.as_str() {
             "insert" => {
@@ -299,8 +293,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             "get" => {
                 let _ = hash_join_table.get(&op.key, &op.pkey, op.ts)?;
             }
-            "commit" | "scan" => {
+            "commit" => {
                 // Implement commit if needed
+                // commit_cnt += 1;
+                // if commit_cnt == 5000 {
+                //     hash_join_table.garbage_collect(Timestamp::MAX)?;
+                // }
+
+            }
+            "scan" => {
+                // Impl scan if needed
             }
             _ => {
                 eprintln!("Unknown operation: {}", op.op_type);
@@ -630,31 +632,32 @@ fn check_full_consistency_hash_join_table(
     // Compare the sets
     if hjt_entries != expected_entries {
         is_consistent = false;
-        let missing_entries = expected_entries.difference(&hjt_entries);
-        let extra_entries = hjt_entries.difference(&expected_entries);
+        // let missing_entries = expected_entries.difference(&hjt_entries);
+        // let extra_entries = hjt_entries.difference(&expected_entries);
 
-        for entry in missing_entries {
-            eprintln!(
-                "Missing entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
-                entry.start_ts,
-                if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
-                bytes_to_string(&entry.key),
-                bytes_to_string(&entry.pkey),
-                bytes_to_string(&entry.value)
-            );
-        }
+        // for entry in missing_entries {
+        //     eprintln!(
+        //         "Missing entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
+        //         entry.start_ts,
+        //         if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
+        //         bytes_to_string(&entry.key),
+        //         bytes_to_string(&entry.pkey),
+        //         bytes_to_string(&entry.value)
+        //     );
+        // }
 
-        for entry in extra_entries {
-            eprintln!(
-                "Extra entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
-                entry.start_ts,
-                if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
-                bytes_to_string(&entry.key),
-                bytes_to_string(&entry.pkey),
-                bytes_to_string(&entry.value)
-            );
-        }
+        // for entry in extra_entries {
+        //     eprintln!(
+        //         "Extra entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
+        //         entry.start_ts,
+        //         if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
+        //         bytes_to_string(&entry.key),
+        //         bytes_to_string(&entry.pkey),
+        //         bytes_to_string(&entry.value)
+        //     );
+        // }
     }
+
 
     Ok(is_consistent)
 }
