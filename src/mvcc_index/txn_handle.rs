@@ -127,7 +127,7 @@ mod mvcctxn {
         pub(super) committed: AtomicBool,
     }
 
-    const READ_COMMITTED_TS: u64 = crate::mvcc_index::Timestamp::MAX;
+    const READ_COMMITTED_TS: u64 = crate::prelude::Timestamp::MAX;
 
     impl<T: MemPool, InnerIndex: MvccIndex<T>> Transaction<T, InnerIndex> {
         pub fn get(

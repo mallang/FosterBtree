@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use crate::bp::MemPoolStatus;
+use crate::{bp::MemPoolStatus, mvcc_index::MvccEntry};
 
 pub mod append_only_store;
 pub mod chain;
@@ -19,6 +19,7 @@ pub enum AccessMethodError {
     RecordTooLarge,
     OutOfSpace, // For ReadOptimizedPage
     OutOfSpaceForUpdate(Vec<u8>),
+    OutOfSpaceForMvccUpdate(MvccEntry),
     NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
     InvalidTimestamp,               // For MVCC
     Other(String),
@@ -101,6 +102,9 @@ impl fmt::Display for AccessMethodError {
             AccessMethodError::OutOfSpace => write!(f, "Out of space"),
             AccessMethodError::OutOfSpaceForUpdate(key) => {
                 write!(f, "Out of space for update: {:?}", key)
+            }
+            AccessMethodError::OutOfSpaceForMvccUpdate(entry) => {
+                write!(f, "Out of space for MVCC update, old_entry: {:?}", entry)
             }
             AccessMethodError::NeedToUpdateMVCC(ts, val) => {
                 write!(f, "Need to update MVCC: ts: {}, val: {:?}", ts, val)

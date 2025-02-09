@@ -6,9 +6,7 @@ use std::{
 
 use crate::{
     bp::{ContainerId, DatabaseId, MemPool},
-    mvcc_index::{
-        hash_join::mvcc_hash_join::MvccHashJoinTable, MvccIndex, Timestamp, TxId, TxInfo,
-    },
+    mvcc_index::{hash_join::chained_hash_table::ChainedHashTable, MvccIndex, TxId, TxInfo},
 };
 
 use super::{
