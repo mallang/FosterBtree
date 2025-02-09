@@ -30,13 +30,13 @@ pub struct TxInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MvccEntry {
-    key: Vec<u8>,
-    pkey: Vec<u8>,
-    value: Vec<u8>,
+    pub key: Vec<u8>,
+    pub pkey: Vec<u8>,
+    pub value: Vec<u8>,
 
-    tx_id: TxId,
-    start_ts: Timestamp,
-    end_ts: Timestamp,
+    pub tx_id: TxId,
+    pub start_ts: Timestamp,
+    pub end_ts: Timestamp,
     // pub page_id: PageId,
     // pub slot_id: SlotId,
 }

@@ -1,5 +1,5 @@
 use dashmap::mapref::entry;
-use fbtree::mvcc_index::{MvccEntry, MvccIndex, Timestamp};
+use fbtree::mvcc_index::{MvccEntry, MvccIndex};
 // use fbtree::{mvcc_index::hash_join::mvcc_hash_join::MvccHashJoinTable, prelude::*};
 use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_table::MvccHashJoinTable, prelude::*};
 use std::collections::{HashMap, HashSet};
