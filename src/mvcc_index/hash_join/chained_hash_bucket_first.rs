@@ -1,13 +1,15 @@
+use dashmap::mapref::entry;
+
 use super::{
-    mvcc_hash_join::MvccHashJoinMetaPage, mvcc_hash_join_history_chain::MvccHashJoinHistoryChain,
-    mvcc_hash_join_recent_chain::MvccHashJoinRecentChain,
-    mvcc_hash_join_second_bucket::SecondTableBucket, Timestamp,
+    chained_hash_bucket_second::SecondBucket, chained_hash_history_chain::ChainedHashHistoryChain,
+    chained_hash_page::ChainedHashMetaPage, chained_hash_recent_chain::ChainedHashRecentChain,
+    Timestamp,
 };
 
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::TxId,
+    mvcc_index::{MvccEntry, TxId},
     page::PageId,
     prelude::AccessMethodError,
 };
@@ -18,20 +20,20 @@ use std::{
     time::Duration,
 };
 
-pub const DEAFAULT_SECOND_BUCKET_NUM: usize = 1024;
+pub const DEAFAULT_SECOND_BUCKET_NUM: usize = 1;
 
-pub struct SecondHashJoinTable<T: MemPool> {
+pub struct FirstBucket<T: MemPool> {
     c_key: ContainerKey,
     mem_pool: Arc<T>,
 
     meta_page_id: PageId,
     meta_frame_id: AtomicU32,
 
-    pub num_buckets: usize,
-    bucket_entries: Vec<Arc<SecondTableBucket<T>>>,
+    bucket_count: usize,
+    bucket_entries: Vec<Arc<SecondBucket<T>>>,
 }
 
-impl<T: MemPool> SecondHashJoinTable<T> {
+impl<T: MemPool> FirstBucket<T> {
     /// Creates a new hash join table with the default number of buckets.
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEAFAULT_SECOND_BUCKET_NUM)
@@ -43,12 +45,12 @@ impl<T: MemPool> SecondHashJoinTable<T> {
         let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
         let meta_page_id = meta_page.get_id();
         let meta_frame_id = AtomicU32::new(meta_page.frame_id());
-        MvccHashJoinMetaPage::init(&mut *meta_page, num_buckets);
-        MvccHashJoinMetaPage::set_bucket_num(&mut *meta_page, num_buckets);
+        ChainedHashMetaPage::init(&mut *meta_page, num_buckets);
+        ChainedHashMetaPage::set_bucket_num(&mut *meta_page, num_buckets);
 
-        let mut bucket_entries: Vec<Arc<SecondTableBucket<T>>> = Vec::with_capacity(num_buckets);
+        let mut bucket_entries: Vec<Arc<SecondBucket<T>>> = Vec::with_capacity(num_buckets);
         for i in 0..num_buckets {
-            let bucket_entry = SecondTableBucket::new(c_key, mem_pool.clone());
+            let bucket_entry = SecondBucket::new(c_key, mem_pool.clone());
             // MvccHashJoinMetaPage::set_bucket_entry(&mut *meta_page, i, &entry);
             bucket_entries.push(Arc::new(bucket_entry));
         }
@@ -59,62 +61,37 @@ impl<T: MemPool> SecondHashJoinTable<T> {
             c_key,
             meta_page_id,
             meta_frame_id,
-            num_buckets,
+            bucket_count: num_buckets,
             bucket_entries,
         }
     }
 
-    pub fn insert(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: &Timestamp,
-        tx_id: &TxId,
-        val: &[u8],
-    ) -> Result<(), AccessMethodError> {
-        let index = self.get_bucket_index(pkey);
+    pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+        let index = self.get_bucket_index(entry.pkey());
         let bucket = &self.bucket_entries[index];
 
-        bucket.insert(key, pkey, ts, tx_id, val)
+        bucket.insert(entry)
     }
 
-    pub fn get(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: &Timestamp,
-    ) -> Result<Vec<u8>, AccessMethodError> {
+    pub fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let index = self.get_bucket_index(pkey);
         let bucket = &self.bucket_entries[index];
 
-        bucket.get(key, pkey, ts)
+        bucket.get(pkey, ts)
     }
 
-    pub fn update(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: &Timestamp,
-        tx_id: &TxId,
-        val: &[u8],
-    ) -> Result<(), AccessMethodError> {
+    pub fn update(&self, pkey: &[u8], entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(pkey);
         let bucket = &self.bucket_entries[index];
 
-        bucket.update(key, pkey, ts, tx_id, val)
+        bucket.update(pkey, entry)
     }
 
-    pub fn delete(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        ts: &Timestamp,
-        tx_id: &TxId,
-    ) -> Result<(), AccessMethodError> {
+    pub fn delete(&self, pkey: &[u8], ts: &Timestamp) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(pkey);
         let bucket = &self.bucket_entries[index];
 
-        bucket.delete(key, pkey, ts, tx_id)
+        bucket.delete(pkey, ts)
     }
 
     /// Read page with given PageFrameKey
@@ -141,15 +118,22 @@ impl<T: MemPool> SecondHashJoinTable<T> {
     fn get_bucket_index(&self, key: &[u8]) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        (hasher.finish() as usize) % self.num_buckets
+        (hasher.finish() as usize) % self.bucket_count
     }
 
-    pub fn get_recent_chain(&self, idx: usize) -> Arc<MvccHashJoinRecentChain<T>> {
-        self.bucket_entries[idx].get_recent_chain()
+    pub fn bucket_count(&self) -> usize {
+        self.bucket_count
     }
 
-    pub fn get_history_chain(&self, idx: usize) -> Arc<MvccHashJoinHistoryChain<T>> {
-        self.bucket_entries[idx].get_history_chain()
+    pub fn bucket_entries(&self, idx: usize) -> &Arc<SecondBucket<T>> {
+        &self.bucket_entries[idx]
     }
-    // Additional methods as needed...
+
+    pub fn recent_chain(&self, idx: usize) -> &Arc<ChainedHashRecentChain<T>> {
+        self.bucket_entries[idx].recent_chain()
+    }
+
+    pub fn history_chain(&self, idx: usize) -> &Arc<ChainedHashHistoryChain<T>> {
+        self.bucket_entries[idx].history_chain()
+    }
 }

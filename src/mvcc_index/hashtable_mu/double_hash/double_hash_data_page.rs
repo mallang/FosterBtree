@@ -373,7 +373,7 @@ mod slot {
 use slot::*;
 
 mod record {
-    use crate::mvcc_index::Timestamp;
+    use crate::prelude::Timestamp;
 
     use super::DELETE_MARKER_IN_VAL_SIZE;
 
