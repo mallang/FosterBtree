@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{self, AtomicU32},
+        atomic::{self, AtomicU32, Ordering},
         Arc,
     },
     time::Duration,
@@ -23,7 +23,7 @@ pub struct ChainedHashHistoryChain<T: MemPool> {
     mem_pool: Arc<T>,
     c_key: ContainerKey,
 
-    first_page_id: PageId,
+    first_page_id: AtomicU32,
     first_frame_id: AtomicU32,
 }
 
@@ -40,7 +40,7 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
         Self {
             mem_pool,
             c_key,
-            first_page_id,
+            first_page_id: AtomicU32::new(first_page_id),
             first_frame_id: AtomicU32::new(first_frame_id),
         }
     }
@@ -49,7 +49,7 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
         Self {
             mem_pool,
             c_key,
-            first_page_id: pid,
+            first_page_id: AtomicU32::new(pid),
             first_frame_id: AtomicU32::new(u32::MAX),
         }
     }
@@ -126,9 +126,9 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
         let mut current_page = self.read_page(page_key);
         loop {
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                if current_page.binary_search(entry.search_key()).0 {
-                    return Err(AccessMethodError::KeyDuplicate);
-                }
+                // if current_page.binary_search(entry.search_key()).0 {
+                //     return Err(AccessMethodError::KeyDuplicate);
+                // }
                 // TODO: check free space may can insert here later.
                 let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key,
@@ -197,12 +197,87 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
         }
     }
 
+    /// Runs garbage collection on every page in the history chain.
+    /// For each page, if the page is fully eligible for GC (i.e. its slot_count is 0 or
+    /// its last slot's end_ts is ≤ `ts`), then the entire page is removed.
+    /// Otherwise, partial GC is applied on that page.
+    pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        let mut prev_page: Option<FrameWriteGuard> = None;
+
+        loop {
+            let gc_whole_page = if current_page.slot_count() == 0 {
+                true
+            } else {
+                let last_slot = current_page.slot(current_page.slot_count() - 1);
+                last_slot.end_ts() <= *ts
+            };
+
+            if gc_whole_page {
+                // The entire page is eligible for GC.
+                // If we have a previous page, we need to update its next pointer.
+                if let Some(mut prev) = prev_page.take() {
+                    // Get the pointer to the next page after current_page.
+                    if let Some((next_pid, next_fid)) = current_page.next_page() {
+                        prev.set_next_page(next_pid, next_fid);
+                    } else {
+                        // No next page, so mark previous page as the tail.
+                        prev.set_next_page(PageId::MAX, u32::MAX);
+                    }
+                    // TODO: free current_page (Done by mem_pool)
+                } else {
+                    // No previous page means current_page is the first page.
+                    if let Some((next_pid, next_fid)) = current_page.next_page() {
+                        // Promote the next page as the new first page.
+                        self.set_first_page_id(next_pid);
+                        current_page = self.read_page(PageFrameKey::new_with_frame_id(
+                            self.c_key, next_pid, next_fid,
+                        ));
+                        // Continue without updating prev_page.
+                        continue;
+                    } else {
+                        // This is the only page and it is fully eligible. Reinitialize it.
+                        let mut writable_page = current_page
+                            .try_upgrade(true)
+                            .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
+                        writable_page.init();
+                        break;
+                    }
+                }
+            } else {
+                // Page is only partially eligible (or not eligible).
+                // Upgrade the page to a writable lock and run partial GC.
+                let mut writable_page = current_page
+                    .try_upgrade(true)
+                    .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
+                writable_page.garbage_collect(ts)?;
+                // Keep this page as the previous page (for updating pointers) in case the next page(s)
+                // are also fully eligible.
+                prev_page = Some(writable_page);
+            }
+
+            // Move to the next page, if any.
+            if let Some((next_pid, next_fid)) = prev_page.as_ref().unwrap().next_page() {
+                current_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub fn first_page_id(&self) -> PageId {
-        self.first_page_id
+        self.first_page_id.load(Ordering::Acquire)
+    }
+
+    pub fn set_first_page_id(&self, pid: PageId) {
+        self.first_page_id.store(pid, Ordering::Release);
     }
 
     pub fn first_frame_id(&self) -> u32 {
-        self.first_frame_id.load(atomic::Ordering::Acquire)
+        self.first_frame_id.load(Ordering::Acquire)
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
@@ -233,25 +308,23 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
     pub fn first_key(&self) -> PageFrameKey {
         PageFrameKey::new_with_frame_id(
             self.c_key,
-            self.first_page_id,
-            self.first_frame_id
-                .load(std::sync::atomic::Ordering::Acquire),
+            self.first_page_id.load(Ordering::Acquire),
+            self.first_frame_id.load(Ordering::Acquire),
         )
     }
 
     fn first_page(&self) -> FrameReadGuard {
-        let first_frame_id = self
-            .first_frame_id
-            .load(std::sync::atomic::Ordering::Acquire);
+        let first_frame_id = self.first_frame_id.load(Ordering::Acquire);
+        let first_page_id = self.first_page_id.load(Ordering::Acquire);
         let first_page = self.read_page(PageFrameKey::new_with_frame_id(
             self.c_key,
-            self.first_page_id,
+            first_page_id,
             first_frame_id,
         ));
         if first_page.frame_id() != first_frame_id {
             log_debug!("Frame of the first page has been changed. Trying to fix the frame id");
             self.first_frame_id
-                .store(first_page.frame_id(), std::sync::atomic::Ordering::Release);
+                .store(first_page.frame_id(), Ordering::Release);
         }
         first_page
     }
@@ -325,6 +398,34 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
         ));
         stat_str
     }
+
+    /// Returns a tuple: (page_count, total_kv_count, usage_sum, max_usage, min_usage)
+    pub fn summary_metrics(&self) -> (usize, usize, f64, f64, f64) {
+        let mut page_count = 0;
+        let mut total_kv_count = 0;
+        let mut usage_sum = 0.0;
+        let mut max_usage: f64 = 0.0;
+        let mut min_usage = f64::MAX;
+        let mut current_page = self.first_page();
+        loop {
+            page_count += 1;
+            let kv = current_page.slot_count();
+            total_kv_count += kv;
+            let used_bytes = current_page.header().total_bytes_used();
+            let usage = (used_bytes as f64 / AVAILABLE_PAGE_SIZE as f64) * 100.0;
+            usage_sum += usage;
+            max_usage = max_usage.max(usage as f64);
+            min_usage = min_usage.min(usage as f64);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                current_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+            } else {
+                break;
+            }
+        }
+        (page_count, total_kv_count, usage_sum, max_usage, min_usage)
+    }
 }
 
 /// Opportunistically try to fix the next page frame id
@@ -348,8 +449,8 @@ impl<T: MemPool> Clone for ChainedHashHistoryChain<T> {
         Self {
             mem_pool: Arc::clone(&self.mem_pool),
             c_key: self.c_key,
-            first_page_id: self.first_page_id,
-            first_frame_id: AtomicU32::new(self.first_frame_id.load(atomic::Ordering::SeqCst)),
+            first_page_id: AtomicU32::new(self.first_page_id()),
+            first_frame_id: AtomicU32::new(self.first_frame_id()),
         }
     }
 }
@@ -1090,348 +1191,198 @@ mod tests {
             "Full scan did not return all inserted entries"
         );
     }
+
+    #[test]
+    fn test_history_chain_garbage_collect() {
+        use std::sync::Arc;
+
+        // Create a mem pool and initialize a history chain.
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(20, 0);
+        let history_chain = Arc::new(ChainedHashHistoryChain::new(c_key, mem_pool.clone()));
+
+        // Insert several history entries.
+        // For example, for one primary key, insert 5 versions:
+        // Entry 0: [100,150)
+        // Entry 1: [150,200)
+        // Entry 2: [200,250)
+        // Entry 3: [250,300)
+        // Entry 4: [300,350)
+        let num_entries = 5;
+        let key = b"key-history-gc".to_vec();
+        let pkey = b"pkey-history-gc".to_vec();
+        for i in 0..num_entries {
+            let start_ts = 100 + i * 50;
+            let end_ts = start_ts + 50;
+            let value = format!("value-{}", i).into_bytes();
+            let mut entry = MvccEntry::new(key.clone(), pkey.clone(), value, start_ts, end_ts);
+            history_chain
+                .insert(&mut entry)
+                .expect(&format!("Insert failed for entry {}", i));
+        }
+        // println!("History chain stats before GC:\n{}", history_chain.stat());
+
+        // Choose a GC timestamp such that the entire first page is eligible.
+        // For example, if the first page holds entries with end_ts up to 250,
+        // then let gc_ts = 251 so that the whole page qualifies.
+        let gc_ts: Timestamp = 251;
+        history_chain
+            .garbage_collect(&gc_ts)
+            .expect("History chain GC failed");
+        // println!("History chain stats after GC:\n{}", history_chain.stat());
+
+        // Now traverse the chain and verify that every remaining entry has end_ts > gc_ts.
+        let mut current_page = history_chain.first_page();
+        loop {
+            for idx in 0..current_page.slot_count() {
+                let entry = HashJoinPage::get_entry_at_slot_id(&*current_page, idx)
+                    .expect(&format!("Failed to get entry at slot {}", idx));
+                assert!(
+                    entry.end_ts() > gc_ts,
+                    "Entry at slot {} in page {} has end_ts {} ≤ gc_ts {}",
+                    idx,
+                    current_page.get_id(),
+                    entry.end_ts(),
+                    gc_ts
+                );
+            }
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                current_page = history_chain.read_page(PageFrameKey::new_with_frame_id(
+                    history_chain.c_key,
+                    next_pid,
+                    next_fid,
+                ));
+            } else {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_history_chain_gc_with_generated_entries() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        // Create a mem pool and initialize a history chain.
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(20, 0);
+        let history_chain = Arc::new(ChainedHashHistoryChain::new(c_key, mem_pool.clone()));
+
+        // Generate history entries for multiple primary keys.
+        // For example, generate entries for 100 primary keys with 10 versions each.
+        let num_pkeys = 100;
+        let versions_per_pkey = 10;
+        let base_start = 100; // For each pkey, version 0 is [100, 110), version 1 is [110, 120), etc.
+        let interval = 10;
+        let key_size = 20;
+        let pkey_size = 20;
+        let value_size = 500;
+        let entries = generate_history_mvcc_entries_multi(
+            num_pkeys,
+            versions_per_pkey,
+            base_start,
+            interval,
+            key_size,
+            pkey_size,
+            value_size,
+        );
+        let total_entries = entries.len();
+        println!("Generated {} history entries", total_entries);
+
+        // Insert all generated history entries into the history chain.
+        for (i, entry) in entries.iter().enumerate() {
+            // upsert_history requires a mutable reference, so we clone each entry.
+            let mut entry_clone = entry.clone();
+            history_chain
+                .insert(&mut entry_clone)
+                .expect(&format!("Insert failed for history entry {}", i));
+        }
+        println!(
+            "History chain statistics BEFORE GC:\n{}",
+            history_chain.stat()
+        );
+
+        // Choose a GC timestamp.
+        // For example, with base_start=100 and interval=10:
+        // Version 0: [100,110), version 1: [110,120), ... version 4: [140,150)
+        // Let gc_ts = 150 so that for each pkey, versions with end_ts ≤ 150 are collected.
+        let gc_ts: Timestamp = 200;
+        history_chain
+            .garbage_collect(&gc_ts)
+            .expect("Garbage collection on chain failed");
+        println!(
+            "History chain statistics AFTER GC:\n{}",
+            history_chain.stat()
+        );
+
+        // --- Verification ---
+        // For each page in the chain, ensure that every remaining slot's end_ts is > gc_ts.
+        let mut current_page = history_chain.first_page();
+        loop {
+            for idx in 0..current_page.slot_count() {
+                let entry = HashJoinPage::get_entry_at_slot_id(&*current_page, idx)
+                    .expect(&format!("Failed to get entry at slot {}", idx));
+                assert!(
+                    entry.end_ts() > gc_ts,
+                    "Entry at slot {} in page {} has end_ts {} ≤ gc_ts {}",
+                    idx,
+                    current_page.get_id(),
+                    entry.end_ts(),
+                    gc_ts
+                );
+            }
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                current_page = history_chain.read_page(PageFrameKey::new_with_frame_id(
+                    history_chain.c_key,
+                    next_pid,
+                    next_fid,
+                ));
+            } else {
+                break;
+            }
+        }
+
+        // Optionally, count the number of remaining entries per primary key.
+        let mut remaining_per_pkey: std::collections::HashMap<Vec<u8>, usize> =
+            std::collections::HashMap::new();
+        let mut current_page = history_chain.first_page();
+        loop {
+            for idx in 0..current_page.slot_count() {
+                let entry = HashJoinPage::get_entry_at_slot_id(&*current_page, idx)
+                    .expect("Failed to get entry during verification");
+                let count = remaining_per_pkey.entry(entry.pkey().to_vec()).or_insert(0);
+                *count += 1;
+            }
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                current_page = history_chain.read_page(PageFrameKey::new_with_frame_id(
+                    history_chain.c_key,
+                    next_pid,
+                    next_fid,
+                ));
+            } else {
+                break;
+            }
+        }
+        // For each primary key, all versions with end_ts ≤ gc_ts should have been removed.
+        // Since versions are generated in order, if the gc_ts = 150, then for each pkey only versions with
+        // v >= (150 - base_start) / interval should remain.
+        let min_remaining_version = ((gc_ts - base_start) / interval) as usize;
+        for (pkey, count) in remaining_per_pkey {
+            // Expected remaining versions per primary key is:
+            // total versions per pkey - min_remaining_version.
+            let expected_remaining = if versions_per_pkey > min_remaining_version {
+                versions_per_pkey - min_remaining_version
+            } else {
+                0
+            };
+            assert_eq!(
+                count,
+                expected_remaining,
+                "For pkey {:?}, expected {} remaining versions, but found {}",
+                String::from_utf8_lossy(&pkey),
+                expected_remaining,
+                count
+            );
+        }
+    }
 }
-
-//     #[test]
-//     fn test_history_chain_insert_and_get() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // Entries to insert
-//         let entries: Vec<(&[u8], &[u8], Timestamp, Timestamp, &[u8])> = vec![
-//             (b"key1", b"pkey1", 10u64, 20u64, b"value1"),
-//             (b"key2", b"pkey2", 15u64, 25u64, b"value2"),
-//             (b"key1", b"pkey1", 20u64, 30u64, b"value3"),
-//         ];
-
-//         // Insert entries
-//         for (key, pkey, start_ts, end_ts, val) in &entries {
-//             chain.insert(key, pkey, *start_ts, *end_ts, val).unwrap();
-//         }
-
-//         // Retrieve entries at different timestamps
-//         let retrieved_val = chain.get(b"key1", b"pkey1", 12u64).unwrap();
-//         assert_eq!(retrieved_val, b"value1");
-
-//         let retrieved_val = chain.get(b"key1", b"pkey1", 22u64).unwrap();
-//         assert_eq!(retrieved_val, b"value3");
-
-//         // Attempt to retrieve a non-existent key
-//         let result = chain.get(b"key3", b"pkey3", 18u64);
-//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-//     }
-
-//     // #[test]
-//     // fn test_history_chain_update() {
-//     //     let mem_pool = get_in_mem_pool();
-//     //     let c_key = ContainerKey::new(0, 0);
-
-//     //     let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//     //     // Insert an entry
-//     //     chain.insert(b"key1", b"pkey1", 10u64, 20u64, b"value1").unwrap();
-
-//     //     // Update the entry's end_ts
-//     //     chain.update(b"key1", b"pkey1", 10u64, 25u64, b"value1").unwrap();
-
-//     //     // Retrieve the entry at a timestamp within the new range
-//     //     let retrieved_val = chain.get(b"key1", b"pkey1", 22u64).unwrap();
-//     //     assert_eq!(retrieved_val, b"value1");
-
-//     //     // Attempt to retrieve at a timestamp outside the new range
-//     //     let result = chain.get(b"key1", b"pkey1", 26u64);
-//     //     assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
-//     // }
-
-//     #[test]
-//     fn test_history_chain_basic_insert_and_get() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // Entries to insert
-//         let entries: Vec<(&[u8], &[u8], Timestamp, Timestamp, &[u8])> = vec![
-//             (b"key1", b"pkey1", 10u64, 20u64, b"value1"),
-//             (b"key2", b"pkey2", 15u64, 25u64, b"value2"),
-//             (b"key3", b"pkey3", 20u64, 30u64, b"value3"),
-//         ];
-
-//         // Insert entries
-//         for (key, pkey, start_ts, end_ts, val) in &entries {
-//             chain.insert(key, pkey, *start_ts, *end_ts, val).unwrap();
-//         }
-
-//         // Retrieve entries at different timestamps
-//         for (key, pkey, start_ts, end_ts, val) in &entries {
-//             let ts_within_range = (*start_ts + *end_ts) / 2;
-//             let retrieved_val = chain.get(key, pkey, ts_within_range).unwrap();
-//             assert_eq!(retrieved_val, *val);
-
-//             // Attempt to retrieve at a timestamp before the range
-//             let ts_before_range = start_ts - 1;
-//             let result = chain.get(key, pkey, ts_before_range);
-//             assert!(matches!(
-//                 result,
-//                 Err(AccessMethodError::KeyNotFound)
-//                     | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-//             ));
-
-//             // Attempt to retrieve at a timestamp after the range
-//             let ts_after_range = end_ts;
-//             let result = chain.get(key, pkey, *ts_after_range);
-//             assert!(matches!(
-//                 result,
-//                 Err(AccessMethodError::KeyNotFound)
-//                     | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-//             ));
-//         }
-//     }
-
-//     #[test]
-//     fn test_history_chain_edge_cases_with_timestamps() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // Insert an entry with minimal timestamp range
-//         chain
-//             .insert(b"key_edge", b"pkey_edge", 0u64, 1u64, b"value_edge")
-//             .unwrap();
-
-//         // Retrieve at start_ts
-//         let retrieved_val = chain.get(b"key_edge", b"pkey_edge", 0u64).unwrap();
-//         assert_eq!(retrieved_val, b"value_edge");
-
-//         // Attempt to retrieve at end_ts (should fail)
-//         let result = chain.get(b"key_edge", b"pkey_edge", 1u64);
-//         assert!(matches!(
-//             result,
-//             Err(AccessMethodError::KeyNotFound)
-//                 | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-//         ));
-//     }
-
-//     #[test]
-//     fn test_history_chain_multiple_versions_same_key() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // Insert multiple versions of the same key-pkey
-//         let versions = vec![
-//             (10u64, 20u64, b"value_v1"),
-//             (20u64, 30u64, b"value_v2"),
-//             (30u64, 40u64, b"value_v3"),
-//         ];
-
-//         for (start_ts, end_ts, val) in &versions {
-//             chain
-//                 .insert(b"key_multi", b"pkey_multi", *start_ts, *end_ts, *val)
-//                 .unwrap();
-//         }
-
-//         // Retrieve each version at different timestamps
-//         for (i, (start_ts, end_ts, val)) in versions.iter().enumerate() {
-//             let ts_within_range = (*start_ts + *end_ts) / 2;
-//             let retrieved_val = chain
-//                 .get(b"key_multi", b"pkey_multi", ts_within_range)
-//                 .unwrap();
-//             assert_eq!(retrieved_val, *val);
-
-//             // Attempt to retrieve at a timestamp outside the range
-//             let ts_out_of_range = if i == 0 { start_ts - 1 } else { 41 };
-//             let result = chain.get(b"key_multi", b"pkey_multi", ts_out_of_range);
-//             assert!(matches!(
-//                 result,
-//                 Err(AccessMethodError::KeyNotFound)
-//                     | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-//             ));
-//         }
-//     }
-
-//     #[test]
-//     fn test_history_chain_insert_causing_page_splits() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // Create a large value to fill the page quickly
-//         let large_val = vec![b'x'; (AVAILABLE_PAGE_SIZE / 4) as usize];
-
-//         // Insert entries until a new page is allocated
-//         let mut inserted_entries = vec![];
-//         for i in 0..10 {
-//             let key = format!("key_page_split_{}", i).into_bytes();
-//             let pkey = format!("pkey_page_split_{}", i).into_bytes();
-//             let start_ts = i * 10;
-//             let end_ts = start_ts + 10;
-//             chain
-//                 .insert(&key, &pkey, start_ts, end_ts, &large_val)
-//                 .unwrap();
-//             inserted_entries.push((key, pkey, start_ts, end_ts, large_val.clone()));
-//         }
-
-//         // Verify that all entries can be retrieved
-//         for (key, pkey, start_ts, end_ts, val) in &inserted_entries {
-//             let ts_within_range = (start_ts + end_ts) / 2;
-//             let retrieved_val = chain.get(key, pkey, ts_within_range).unwrap();
-//             assert_eq!(retrieved_val, *val);
-//         }
-//     }
-
-//     #[test]
-//     fn test_history_chain_retrieve_non_existent_keys() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // Insert some entries
-//         chain
-//             .insert(b"key_exist", b"pkey_exist", 10u64, 20u64, b"value_exist")
-//             .unwrap();
-
-//         // Attempt to retrieve a key that was never inserted
-//         let result = chain.get(b"key_nonexistent", b"pkey_nonexistent", 15u64);
-//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-
-//         // Attempt to retrieve with an incorrect pkey
-//         let result = chain.get(b"key_exist", b"pkey_wrong", 15u64);
-//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-
-//         // Attempt to retrieve with a timestamp outside the range
-//         let result = chain.get(b"key_exist", b"pkey_exist", 25u64);
-//         assert!(matches!(
-//             result,
-//             Err(AccessMethodError::KeyNotFound)
-//                 | Err(AccessMethodError::KeyFoundButInvalidTimestamp)
-//         ));
-//     }
-
-//     #[test]
-//     fn test_history_chain_insert_overlapping_timestamps() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // Insert entries with overlapping timestamp ranges for different keys
-//         chain
-//             .insert(b"key_overlap1", b"pkey1", 10u64, 30u64, b"value1")
-//             .unwrap();
-//         chain
-//             .insert(b"key_overlap2", b"pkey2", 20u64, 40u64, b"value2")
-//             .unwrap();
-
-//         // Retrieve entries at timestamps where ranges overlap
-//         let retrieved_val1 = chain.get(b"key_overlap1", b"pkey1", 25u64).unwrap();
-//         assert_eq!(retrieved_val1, b"value1");
-
-//         let retrieved_val2 = chain.get(b"key_overlap2", b"pkey2", 25u64).unwrap();
-//         assert_eq!(retrieved_val2, b"value2");
-//     }
-
-//     // #[test]
-//     // fn test_history_chain_insert_same_key_overlapping_ranges() {
-//     //     let mem_pool = get_in_mem_pool();
-//     //     let c_key = ContainerKey::new(0, 0);
-
-//     //     let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//     //     // Insert entries with overlapping timestamp ranges for the same key-pkey
-//     //     chain.insert(b"key_same", b"pkey_same", 10u64, 30u64, b"value1").unwrap();
-//     //     chain.insert(b"key_same", b"pkey_same", 20u64, 40u64, b"value2").unwrap();
-
-//     //     // Retrieve at timestamps covered by both ranges
-//     //     let retrieved_val = chain.get(b"key_same", b"pkey_same", 25u64).unwrap();
-//     //     // Depending on the implementation, the chain might return the first or the last inserted value
-//     //     // Let's assume it returns the value with the latest start_ts less than or equal to ts
-//     //     assert_eq!(retrieved_val, b"value2");
-
-//     //     // Retrieve at timestamps covered by only one range
-//     //     let retrieved_val = chain.get(b"key_same", b"pkey_same", 15u64).unwrap();
-//     //     assert_eq!(retrieved_val, b"value1");
-//     // }
-
-//     // #[test]
-//     // fn test_history_chain_insert_with_max_timestamps() {
-//     //     let mem_pool = get_in_mem_pool();
-//     //     let c_key = ContainerKey::new(0, 0);
-
-//     //     let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//     //     let max_timestamp = u64::MAX;
-
-//     //     // Insert an entry with end_ts as u64::MAX
-//     //     chain.insert(b"key_max_ts", b"pkey_max_ts", 50u64, max_timestamp, b"value_max_ts").unwrap();
-
-//     //     // Retrieve at a timestamp less than max_timestamp
-//     //     let retrieved_val = chain.get(b"key_max_ts", b"pkey_max_ts", 100u64).unwrap();
-//     //     assert_eq!(retrieved_val, b"value_max_ts");
-
-//     //     // Attempt to retrieve at max_timestamp (should fail as end_ts is exclusive)
-//     //     let result = chain.get(b"key_max_ts", b"pkey_max_ts", max_timestamp);
-//     //     assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
-//     // }
-
-//     #[test]
-//     fn test_history_chain_insert_many_entries_spanning_multiple_pages() {
-//         let mem_pool = get_in_mem_pool();
-//         let c_key = ContainerKey::new(0, 0);
-
-//         let chain = MvccHashJoinHistoryChain::new(c_key, mem_pool.clone());
-
-//         // We'll calculate the number of entries needed to fill more than one page.
-//         // We'll use small keys and values to make the calculation straightforward.
-//         let key_base = b"key_multi_page";
-//         let pkey_base = b"pkey_multi_page";
-//         let val_base = b"value_multi_page";
-
-//         // Determine the space needed per entry.
-//         let key = key_base;
-//         let pkey = pkey_base;
-//         let val = val_base;
-//         let start_ts = 10u64;
-//         let end_ts = 20u64;
-
-//         let space_per_entry =
-//             <Page as HashJoinPage>::space_need(key, pkey, val) as usize;
-
-//         // Calculate the number of entries to exceed one page
-//         let available_space = AVAILABLE_PAGE_SIZE;
-//         let entries_per_page = available_space / space_per_entry;
-//         let num_entries = entries_per_page * 3; // Enough to fill 3 pages
-
-//         // Insert entries
-//         for i in 0..num_entries {
-//             let key = format!("{}{}", std::str::from_utf8(key_base).unwrap(), i).into_bytes();
-//             let pkey = format!("{}{}", std::str::from_utf8(pkey_base).unwrap(), i).into_bytes();
-//             let val = format!("{}{}", std::str::from_utf8(val_base).unwrap(), i).into_bytes();
-//             let start_ts = 10u64 + i as u64;
-//             let end_ts = start_ts + 10;
-//             chain.insert(&key, &pkey, start_ts, end_ts, &val).unwrap();
-//         }
-
-//         // Retrieve entries
-//         for i in 0..num_entries {
-//             let key = format!("{}{}", std::str::from_utf8(key_base).unwrap(), i).into_bytes();
-//             let pkey = format!("{}{}", std::str::from_utf8(pkey_base).unwrap(), i).into_bytes();
-//             let val = format!("{}{}", std::str::from_utf8(val_base).unwrap(), i).into_bytes();
-//             let ts = 15u64 + i as u64; // Within the timestamp range of each entry
-
-//             let retrieved_val = chain.get(&key, &pkey, ts).unwrap();
-//             assert_eq!(retrieved_val, val);
-//         }
-
-//         // Optionally, verify that attempting to retrieve an entry at an invalid timestamp fails
-//         let invalid_ts = 5u64; // Before any entry's start_ts
-//         let result = chain.get(&key_base.to_vec(), &pkey_base.to_vec(), invalid_ts);
-//         assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
-//     }
-// }

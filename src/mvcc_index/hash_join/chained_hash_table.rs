@@ -165,21 +165,13 @@ impl<T: MemPool> ChainedHashTable<T> {
         let second_table = &self.bucket_entries[index];
 
         second_table.delete(pkey, ts)
-        // let (recent_chain, history_chain) = &self.bucket_entries[index];
-
-        // let old_result = recent_chain.delete(&key, &pkey, ts);
-        // match old_result {
-        //     Ok((old_ts, old_val)) => {
-        //         // Insert the old record into the history chain
-        //         history_chain.insert(&key, &pkey, old_ts, ts, &old_val)
-        //     }
-        //     Err(e) => Err(e),
-        // }
     }
 
-    /// Flushes the in-memory bucket entries back to the meta page.
-    fn flush_bucket_entries(&self) -> Result<(), AccessMethodError> {
-        todo!()
+    pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
+        for bucket in &self.bucket_entries {
+            bucket.garbage_collect(ts)?;
+        }
+        Ok(())
     }
 
     /// Read page with given PageFrameKey
@@ -342,7 +334,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
-        self.garbage_collect(safe_ts)
+        self.garbage_collect(&safe_ts)
     }
 
     fn scan_all(&self) -> Result<Self::ScanAllIter, AccessMethodError> {
@@ -603,21 +595,19 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn test_chained_hash_table() -> Result<(), AccessMethodError> {
-    //     // 1) Create your mem_pool (adjust for your environment)
-    //     let mem_pool = get_in_mem_pool();
-    //     let c_key = ContainerKey::new(1, 1);
+    #[test]
+    fn test_chained_hash_table() -> Result<(), AccessMethodError> {
+        // 1) Create your mem_pool (adjust for your environment)
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(1, 1);
 
-    //     // 2) Build a ChainedHashTable<InMemPool> using the trait’s `create` method
-    //     let index = <ChainedHashTable<InMemPool> as MvccIndex<InMemPool>>::create(
-    //         c_key,
-    //         mem_pool.clone(),
-    //     )?;
+        // 2) Build a ChainedHashTable<InMemPool> using the trait’s `create` method
+        let index =
+            <ChainedHashTable<InMemPool> as MvccIndex<InMemPool>>::create(c_key, mem_pool.clone())?;
 
-    //     // 3) Pass the index to the generic test function
-    //     test_basic_index_ops(&index)
-    // }
+        // 3) Pass the index to the generic test function
+        test_basic_index_ops(&index)
+    }
 
     //     #[test]
     //     fn test_meta_page_init() {
