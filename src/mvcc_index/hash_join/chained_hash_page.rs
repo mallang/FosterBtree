@@ -495,6 +495,8 @@ pub trait HashJoinPage {
         slot_id: usize,
     ) -> Result<MvccEntry, AccessMethodError>;
 
+    fn garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError>;
+
     fn search_slot(&self, sort_key: &[u8]) -> (bool, usize) {
         // if PARAMS.get().as_ref().unwrap().sorted == "True" {
         //     self.binary_search(sort_key)
@@ -532,6 +534,11 @@ pub trait HashJoinPage {
         header.set_next_page(next_page_id, frame_id);
         self.set_header(&header);
     }
+    fn set_next_page_frame(&mut self, page_frame: (PageId, u32)) {
+        let mut header = self.header();
+        header.set_next_page(page_frame.0, page_frame.1);
+        self.set_header(&header);
+    }
     fn rec_start_offset(&self) -> usize {
         self.header().rec_start_offset()
     }
@@ -542,6 +549,11 @@ pub trait HashJoinPage {
     }
     fn slot_count(&self) -> usize {
         self.header().slot_count()
+    }
+    fn set_slot_count(&mut self, slot_count: usize) {
+        let mut header = self.header();
+        header.set_slot_count(slot_count);
+        self.set_header(&header);
     }
     fn slot_end_offset(&self) -> usize {
         PAGE_HEADER_SIZE + self.slot_count() * SLOT_SIZE
@@ -715,7 +727,7 @@ impl HashJoinPage for Page {
             return Err(AccessMethodError::KeyNotFound);
         }
         let slot = self.slot(slot_id);
-        if slot.start_ts() > *ts || slot.end_ts() <= *ts {
+        if *ts < slot.start_ts() || slot.end_ts() <= *ts {
             return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
         }
         self.get_entry_at_slot_id(slot_id)
@@ -767,6 +779,13 @@ impl HashJoinPage for Page {
         entry: &MvccEntry,
         slot_id: usize,
     ) -> Result<MvccEntry, AccessMethodError> {
+        let old_slot = HashJoinPage::slot(self, slot_id);
+        if entry.start_ts() < old_slot.start_ts() {
+            let mut old_entry = entry.clone();
+            old_entry.set_end_ts(&old_slot.start_ts());
+            return Ok(old_entry);
+        }
+
         let mut new_slot = Slot::new(
             entry.key(),
             entry.pkey(),
@@ -778,7 +797,6 @@ impl HashJoinPage for Page {
         );
         let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
 
-        let old_slot = HashJoinPage::slot(self, slot_id);
         let old_rec = HashJoinPage::record(self, slot_id);
 
         let old_rec_size = old_rec.size();
@@ -800,7 +818,7 @@ impl HashJoinPage for Page {
                     old_rec.pkey().to_vec(),
                     old_rec.val().to_vec(),
                     old_slot.start_ts(),
-                    old_slot.end_ts(),
+                    entry.start_ts(),
                 );
                 self.delete_slot_at_id(slot_id);
                 self.decrease_total_bytes_used(old_rec_size);
@@ -831,7 +849,7 @@ impl HashJoinPage for Page {
                     old_rec.pkey().to_vec(),
                     old_rec.val().to_vec(),
                     old_slot.start_ts(),
-                    old_slot.end_ts(),
+                    entry.start_ts(),
                 );
                 self.delete_slot_at_id(slot_id);
                 self.decrease_total_bytes_used(old_rec_size);
@@ -852,7 +870,7 @@ impl HashJoinPage for Page {
             old_rec.pkey().to_vec(),
             old_rec.val().to_vec(),
             old_slot.start_ts(),
-            old_slot.end_ts(),
+            entry.start_ts(),
         );
 
         Ok(old_entry)
@@ -890,6 +908,43 @@ impl HashJoinPage for Page {
             slot.end_ts(),
         );
         Ok(old_entry)
+    }
+
+    fn garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError> {
+        let end_idx = self.binary_search_by_end_ts(*ts);
+
+        let mut total_deleted_rec_size = 0;
+        let mut deleted_slots = 0;
+
+        for idx in (0..end_idx).rev() {
+            let slot = self.slot(idx);
+            if slot.end_ts() > *ts {
+                panic!("Page should be sorted by end_ts");
+            }
+            let rec = self.record(idx);
+            total_deleted_rec_size += rec.size();
+            deleted_slots += 1;
+            if slot.offset() == self.rec_start_offset() {
+                self.set_rec_start_offset(slot.offset() + rec.size());
+            }
+        }
+        assert_eq!(deleted_slots, end_idx);
+
+        let current_slot_count = self.slot_count();
+        if deleted_slots > 0 {
+            let src_start = self.slot_offset(deleted_slots);
+            let src_end = self.slot_offset(current_slot_count);
+            let dest_offset = self.slot_offset(0);
+            self.copy_within(src_start..src_end, dest_offset);
+
+            self.set_slot_count(current_slot_count - deleted_slots);
+        }
+
+        HashJoinPage::decrease_total_bytes_used(
+            self,
+            deleted_slots * SLOT_SIZE + total_deleted_rec_size,
+        );
+        Ok(())
     }
 
     fn binary_search(&self, sort_key: &[u8]) -> (bool, usize) {
@@ -2011,5 +2066,96 @@ mod tests {
         );
         assert_eq!(fetched_c.start_ts(), 200);
         assert_eq!(fetched_c.end_ts(), 250);
+    }
+
+    #[test]
+    fn test_history_page_garbage_collect() {
+        // Create a new, empty page and initialize it.
+        let mut page = Page::new_empty();
+        HashJoinPage::init(&mut page);
+
+        // Use the same key and pkey for all history entries.
+        let key = b"key-history-gc".to_vec();
+        let pkey = b"pkey-history-gc".to_vec();
+
+        // Insert several history entries with increasing timestamp intervals.
+        // For example, insert 5 entries with intervals:
+        // Entry 0: valid [100,150)
+        // Entry 1: valid [150,200)
+        // Entry 2: valid [200,250)
+        // Entry 3: valid [250,300)
+        // Entry 4: valid [300,350)
+        let num_entries = 5;
+        for i in 0..num_entries {
+            let start_ts = 100 + i * 50;
+            let end_ts = start_ts + 50;
+            let value = format!("value-history-{}", i).into_bytes();
+            let mut entry = MvccEntry::new(key.clone(), pkey.clone(), value, start_ts, end_ts);
+            let res = HashJoinPage::upsert_history(&mut page, &mut entry);
+            assert!(
+                res.is_ok(),
+                "upsert_history failed for entry {}: {:?}",
+                i,
+                res.err()
+            );
+        }
+        // println!("Page statistics before GC:\n{}", page.stat());
+
+        // for i in 0..page.slot_count() {
+        //     // print key, pkey, value, start_ts, end_ts in human readable format
+        //     let entry = HashJoinPage::get_entry_at_slot_id(&page, i)
+        //         .expect(&format!("Failed to get entry at slot {}", i));
+        //     println!(
+        //         "Slot {}: key={}, pkey={}, value={}, start_ts={}, end_ts={}",
+        //         i,
+        //         String::from_utf8_lossy(entry.key()),
+        //         String::from_utf8_lossy(entry.pkey()),
+        //         String::from_utf8_lossy(entry.value()),
+        //         entry.start_ts(),
+        //         entry.end_ts()
+        //     );
+        // }
+
+        // Define the garbage collection timestamp.
+        // We choose gc_ts = 220. This means any history entry with end_ts <= 220 should be collected.
+        let gc_ts: Timestamp = 220;
+        let gc_res = HashJoinPage::garbage_collect(&mut page, &gc_ts);
+        assert!(
+            gc_res.is_ok(),
+            "garbage_collect failed with ts {}: {:?}",
+            gc_ts,
+            gc_res.err()
+        );
+
+        // for i in 0..page.slot_count() {
+        //     // print key, pkey, value, start_ts, end_ts in human readable format
+        //     let entry = HashJoinPage::get_entry_at_slot_id(&page, i)
+        //         .expect(&format!("Failed to get entry at slot {}", i));
+        //     println!(
+        //         "Slot {}: key={}, pkey={}, value={}, start_ts={}, end_ts={}",
+        //         i,
+        //         String::from_utf8_lossy(entry.key()),
+        //         String::from_utf8_lossy(entry.pkey()),
+        //         String::from_utf8_lossy(entry.value()),
+        //         entry.start_ts(),
+        //         entry.end_ts()
+        //     );
+        // }
+
+        // println!("Page statistics after GC:\n{}", page.stat());
+
+        // Now, iterate over all remaining slots in the page.
+        // Every remaining entry must have an end_ts greater than gc_ts.
+        for idx in 0..page.slot_count() {
+            let entry = HashJoinPage::get_entry_at_slot_id(&page, idx)
+                .expect(&format!("Failed to get entry at slot {}", idx));
+            assert!(
+                entry.end_ts() > gc_ts,
+                "Entry at slot {} has end_ts {} which is not greater than gc_ts {}",
+                idx,
+                entry.end_ts(),
+                gc_ts
+            );
+        }
     }
 }

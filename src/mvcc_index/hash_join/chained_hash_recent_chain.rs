@@ -553,6 +553,34 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         ));
         stat_str
     }
+
+    /// Returns a tuple: (page_count, total_kv_count, usage_sum, max_usage, min_usage)
+    pub fn summary_metrics(&self) -> (usize, usize, f64, f64, f64) {
+        let mut page_count = 0;
+        let mut total_kv_count = 0;
+        let mut usage_sum = 0.0;
+        let mut max_usage: f64 = 0.0;
+        let mut min_usage = f64::MAX;
+        let mut current_page = self.first_page();
+        loop {
+            page_count += 1;
+            let kv = current_page.slot_count();
+            total_kv_count += kv;
+            let used_bytes = current_page.header().total_bytes_used();
+            let usage = (used_bytes as f64 / AVAILABLE_PAGE_SIZE as f64) * 100.0;
+            usage_sum += usage;
+            max_usage = max_usage.max(usage as f64);
+            min_usage = min_usage.min(usage as f64);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                current_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+            } else {
+                break;
+            }
+        }
+        (page_count, total_kv_count, usage_sum, max_usage, min_usage)
+    }
 }
 
 /// Opportunistically try to fix the next page frame id
