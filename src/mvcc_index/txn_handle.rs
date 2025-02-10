@@ -6,7 +6,7 @@ use std::{
 
 use crate::bp::{ContainerKey, MemPool};
 
-use super::{hashtable_mu::mvcc_hash_join_table::MvccHashJoinTable, Delta, MvccIndex, Timestamp};
+use super::{hashtable_mu::mvcc_hash_join_table::OpenAddrHashTable, Delta, MvccIndex, Timestamp};
 
 mod watermark {
     use std::collections::BTreeMap;
@@ -138,10 +138,11 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT get in a committed txn");
             }
-            let value = self
-                .txn_hash_table
-                .hash_table_inner
-                .get(key, pkey, READ_COMMITTED_TS)?;
+            let value = self.txn_hash_table.hash_table_inner.get(
+                key.as_ref(),
+                pkey.as_ref(),
+                READ_COMMITTED_TS,
+            )?;
             Ok(value)
         }
 
@@ -193,9 +194,12 @@ mod mvcctxn {
             if self.committed.load(std::sync::atomic::Ordering::SeqCst) {
                 panic!("can NOT update in a committed txn");
             }
-            self.txn_hash_table
-                .hash_table_inner
-                .delete(key, pkey, self.begin_ts, 0)?;
+            self.txn_hash_table.hash_table_inner.delete(
+                key.as_ref(),
+                pkey.as_ref(),
+                self.begin_ts,
+                0,
+            )?;
 
             Ok(())
         }
@@ -224,16 +228,16 @@ pub struct TxnMvccHashTable<T: MemPool, M: MvccIndex<T>> {
     phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: MemPool> TxnMvccHashTable<T, MvccHashJoinTable<T>> {
+impl<T: MemPool + 'static> TxnMvccHashTable<T, OpenAddrHashTable<T>> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Arc<Self> {
         Arc::new(Self {
-            hash_table_inner: Arc::new(MvccHashJoinTable::new(c_key, mem_pool)),
+            hash_table_inner: Arc::new(OpenAddrHashTable::new(c_key, mem_pool)),
             mvcc: MvccInner::new(1),
             phantom: std::marker::PhantomData,
         })
     }
 
-    fn txn_new(self: &Arc<Self>, write_ts: Timestamp) -> Transaction<T, MvccHashJoinTable<T>> {
+    fn txn_new(self: &Arc<Self>, write_ts: Timestamp) -> Transaction<T, OpenAddrHashTable<T>> {
         let txn = Transaction {
             begin_ts: write_ts,
             txn_hash_table: self.clone(),

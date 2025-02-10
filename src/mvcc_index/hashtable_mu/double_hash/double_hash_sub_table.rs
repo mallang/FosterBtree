@@ -19,6 +19,7 @@ use crate::{
         MvccIndex, Timestamp,
     },
     page::{Page, PageId},
+    prelude::AccessMethodError,
 };
 
 use super::{
@@ -286,7 +287,6 @@ impl<T: MemPool> DHashSubTable<T> {
         self.rehash(self.bucket_num() * 2);
     }
 
-
     /// assume buckets is not locked!
     ///
     pub fn bucket_num(&self) -> u32 {
@@ -350,7 +350,13 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn insert(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
+    pub fn insert(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        val: &[u8],
+    ) -> core::result::Result<(), AccessMethodError> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -381,7 +387,13 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn update(&self, key: &[u8], pkey: &[u8], ts: Timestamp, val: &[u8]) -> Result<()> {
+    pub fn update(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        val: &[u8],
+    ) -> core::result::Result<(), AccessMethodError> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -412,7 +424,12 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<Option<Vec<u8>>> {
+    pub fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> core::result::Result<Option<Vec<u8>>, AccessMethodError> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -435,7 +452,11 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn get_keys(&self, key: &[u8], ts: Timestamp) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub fn get_keys(
+        &self,
+        key: &[u8],
+        ts: Timestamp,
+    ) -> core::result::Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -455,7 +476,12 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn delete(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<()> {
+    pub fn delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> core::result::Result<(), AccessMethodError> {
         // let base = 2;
         // let mut attempts = 0;
         loop {
@@ -486,7 +512,10 @@ impl<T: MemPool> DHashSubTable<T> {
         }
     }
 
-    pub fn garbage_collect(&self, safe_ts: Timestamp) -> Result<()> {
+    pub fn garbage_collect(
+        &self,
+        safe_ts: Timestamp,
+    ) -> core::result::Result<(), AccessMethodError> {
         let buckets = self.buckets_rwlock.read().unwrap();
 
         for bucket_idx in 0..buckets.len() {

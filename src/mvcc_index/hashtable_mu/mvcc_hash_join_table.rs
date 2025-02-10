@@ -8,15 +8,17 @@ use crate::{
     bp::{ContainerKey, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hashtable_mu::hash_join_table_common::{HashTableAccessMethodError, DEFAULT_NUM_BUCKETS},
-        MvccIndex, Timestamp, TxId,
+        hashtable_mu::hash_join_table_common::DEFAULT_NUM_BUCKETS, Delta, MvccEntry, MvccIndex,
+        Timestamp, TxId,
     },
     page::PageId,
+    prelude::AccessMethodError,
 };
 
 use super::{
     double_hash::double_hash_sub_table::{
-        DHashSubTable, SubTableDeltaScannerOption, SubTableScanner, SubTableScannerOption,
+        DHashSubTable, SubTableDeltaScanner, SubTableDeltaScannerOption, SubTableScanner,
+        SubTableScannerOption,
     },
     hash_join_table_common::MvccHashJoinMetaPage,
 };
@@ -179,7 +181,7 @@ mod iterator {
 use iterator::*;
 
 type TableStruct<T> = DHashSubTable<T>;
-pub struct MvccHashJoinTable<T: MemPool> {
+pub struct OpenAddrHashTable<T: MemPool> {
     mem_pool: Arc<T>,
     c_key: ContainerKey,
 
@@ -188,14 +190,15 @@ pub struct MvccHashJoinTable<T: MemPool> {
     hash_table: Arc<TableStruct<T>>,
 }
 
-impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
+impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
     type Key = Vec<u8>;
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
-    type Error = HashTableAccessMethodError;
-    type DeltaIter = MvccDeltaScanner<T, Self>;
-    type Iter = MvccSimpleScanner<T, Self>;
-    type ScanKeyIter = MvccKeyScanner<T, Self>;
+    type Error = AccessMethodError;
+    type Iter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>;
+    type DeltaIter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>;
+    type ScanKeyIter = Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>;
+    type ScanAllIter = Box<dyn Iterator<Item = MvccEntry> + Send>;
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
     where
         Self: Sized,
@@ -216,8 +219,8 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
 
     fn get(
         &self,
-        key: impl AsRef<[u8]>,
-        pkey: impl AsRef<[u8]>,
+        key: &[u8],
+        pkey: &[u8],
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
         self.hash_table.get(key.as_ref(), pkey.as_ref(), ts)
@@ -233,7 +236,7 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
 
     fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error> {
         let option = SubTableScannerOption::OneVersionAllKeys(ts);
-        let ret = Self::Iter::new(&self.hash_table, option);
+        let ret = Box::new(MvccSimpleScanner::<T, Self>::new(&self.hash_table, option));
         Ok(ret)
     }
 
@@ -250,8 +253,8 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
 
     fn delete(
         &self,
-        key: impl AsRef<[u8]>,
-        pkey: impl AsRef<[u8]>,
+        key: &[u8],
+        pkey: &[u8],
         ts: Timestamp,
         _tx_id: TxId,
     ) -> Result<(), Self::Error> {
@@ -267,13 +270,13 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
             small_ts: from_ts,
             large_ts: to_ts,
         };
-        let ret = Self::DeltaIter::new(&self.hash_table, option);
+        let ret = Box::new(MvccDeltaScanner::<T, Self>::new(&self.hash_table, option));
         Ok(ret)
     }
 
     fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error> {
         let option = SubTableScannerOption::OneVersionOneKey(ts, key.clone());
-        let ret = Self::ScanKeyIter::new(&self.hash_table, option);
+        let ret = Box::new(MvccKeyScanner::<T, Self>::new(&self.hash_table, option));
         Ok(ret)
     }
 
@@ -281,9 +284,13 @@ impl<T: MemPool> MvccIndex<T> for MvccHashJoinTable<T> {
         self.hash_table.garbage_collect(safe_ts)?;
         Ok(())
     }
+
+    fn scan_all(&self) -> Result<Self::ScanAllIter, Self::Error> {
+        Ok(Box::new(self.scan_all_inner().unwrap()))
+    }
 }
 
-impl<T: MemPool> MvccHashJoinTable<T> {
+impl<T: MemPool> OpenAddrHashTable<T> {
     pub fn test_rehash(&self) {
         self.hash_table.test_singlethread_rehash();
     }
@@ -323,7 +330,7 @@ impl<T: MemPool> MvccHashJoinTable<T> {
         }
     }
 
-    pub fn scan_all(&self) -> Result<SubTableScanner<T>, HashTableAccessMethodError> {
+    fn scan_all_inner(&self) -> core::result::Result<SubTableScanner<T>, AccessMethodError> {
         let option = SubTableScannerOption::AllVersionsAllKeys;
         let scan_iter = self.hash_table.scan_mvcc_entries(option);
         Ok(scan_iter)
@@ -493,7 +500,7 @@ mod test_ops {
     fn simple_insert() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = OpenAddrHashTable::new(c_key, mem_pool);
         hash_join_table
             .insert(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -511,7 +518,7 @@ mod test_ops {
     fn many_inserts_until_rehash() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16);
+        let hash_join_table = OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16);
 
         let pair_space_need = space_need(
             &format!("{:06}", 1).as_bytes().to_vec(),
@@ -548,7 +555,7 @@ mod test_ops {
     fn test_many_inserts_and_reads() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
+        let hash_join_table = Arc::new(OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         for i in (0..1000).into_iter() {
             let key = format!("key__{}", i).into_bytes();
@@ -578,7 +585,7 @@ mod test_ops {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
+        let hash_join_table = Arc::new(OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         let hash_join_table_clone = hash_join_table.clone();
         let handle = thread::spawn(move || {
@@ -641,8 +648,8 @@ mod test_ops {
     fn simple_update_same_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table: MvccHashJoinTable<crate::prelude::InMemPool> =
-            MvccHashJoinTable::new(c_key, mem_pool);
+        let hash_join_table: OpenAddrHashTable<crate::prelude::InMemPool> =
+            OpenAddrHashTable::new(c_key, mem_pool);
         hash_join_table
             .insert(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -668,7 +675,7 @@ mod test_ops {
     fn simple_update_different_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = OpenAddrHashTable::new(c_key, mem_pool);
         hash_join_table
             .insert(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -696,7 +703,7 @@ mod test_ops {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
+        let hash_join_table = Arc::new(OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         let hash_join_table_clone = hash_join_table.clone();
 
@@ -777,7 +784,7 @@ mod test_ops {
     fn simple_delete_same_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = OpenAddrHashTable::new(c_key, mem_pool);
         hash_join_table
             .insert(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -810,7 +817,7 @@ mod test_ops {
     fn simple_delete_different_timestamp() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::new(c_key, mem_pool);
+        let hash_join_table = OpenAddrHashTable::new(c_key, mem_pool);
         hash_join_table
             .insert(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
@@ -838,7 +845,7 @@ mod test_ops {
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
+        let hash_join_table = Arc::new(OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         let hash_join_table_clone = hash_join_table.clone();
 
@@ -894,7 +901,7 @@ mod test_ops {
         for i in 0..1000 {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
-            let get_result: Result<Option<Vec<u8>>, HashTableAccessMethodError> =
+            let get_result: Result<Option<Vec<u8>>, AccessMethodError> =
                 hash_join_table.get(&key, &pkey, 2);
             assert_eq!(get_result.unwrap(), None);
         }
@@ -914,7 +921,7 @@ mod test_ops {
     fn test_insert_and_scan() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
+        let hash_join_table = Arc::new(OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         // 1..100 inserts
         for i in (0..100).into_iter().step_by(1) {
@@ -940,7 +947,7 @@ mod test_ops {
         // Initialize the hash join table using the MvccIndex trait
         let mem_pool = get_in_mem_pool(); // You need to implement or import this function
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = MvccHashJoinTable::create(c_key, mem_pool.clone()).unwrap();
+        let hash_join_table = OpenAddrHashTable::create(c_key, mem_pool.clone()).unwrap();
 
         let data_num = 1000 as usize;
         let data = (0..data_num)
@@ -1011,7 +1018,7 @@ mod test_ops {
     fn test_garbage_collect() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(MvccHashJoinTable::new_with_bucket_num(c_key, mem_pool, 16));
+        let hash_join_table = Arc::new(OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16));
 
         let hash_join_table_clone = hash_join_table.clone();
 

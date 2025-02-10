@@ -1,7 +1,7 @@
 use dashmap::mapref::entry;
-use fbtree::mvcc_index::{MvccEntry, MvccIndex};
-// use fbtree::{mvcc_index::hash_join::mvcc_hash_join::MvccHashJoinTable, prelude::*};
-use fbtree::{mvcc_index::hashtable_mu::mvcc_hash_join_table::MvccHashJoinTable, prelude::*};
+use fbtree::mvcc_index::hashtable_mu::mvcc_hash_join_table::OpenAddrHashTable;
+use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccEntry, MvccIndex};
+use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut history_data_file: Option<String> = None;
     // let mut scan_ops_file: Option<String> = None;
     let mut limit_ops: Option<usize> = None;
+    let mut use_chain_flag: bool = true;
 
     // Simple argument parsing loop
     // We expect something like:
@@ -85,6 +86,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     i += 1;
                 }
             }
+            "--open_address" => {
+                use_chain_flag = false;
+                i += 1;
+            }
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
                 i += 1;
@@ -93,14 +98,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Check required arguments
-    if data_file.is_none()
-        || ops_file.is_none()
-        // || recent_data_file.is_none()
-        // || history_data_file.is_none()
-        // || scan_ops_file.is_none()
+    if data_file.is_none() || ops_file.is_none()
+    // || recent_data_file.is_none()
+    // || history_data_file.is_none()
+    // || scan_ops_file.is_none()
     {
         eprintln!("Usage:");
-        eprintln!("  {} -df <data_file> -of <ops_file> [-n <num_ops>]", args[0]);
+        eprintln!(
+            "  {} -df <data_file> -of <ops_file> [-n <num_ops>] [--open_address(chain is default)]",
+            args[0]
+        );
         return Ok(());
     }
 
@@ -130,13 +137,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let op_num = ops.len();
-    
 
     // Initialize the hash join table using the MvccIndex trait
     let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
-    let hash_join_table = MvccHashJoinTable::create(c_key, mem_pool.clone())?;
-
+    let hash_join_table = if use_chain_flag {
+        Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+    } else {
+        Box::new(OpenAddrHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+    };
     // Initialize Rust's default HashMap
     let mut rust_hash_map: HashMap<Vec<u8>, Vec<MvccEntry>> = HashMap::new();
 
@@ -202,7 +211,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     let duration_hashmap_load = start_time_hashmap_load.elapsed();
-    let data_num = rust_hash_map.iter().map(|x| x.1.iter().map(|x| &x.pkey[..]).collect::<HashSet<&[u8]>>().len()).sum::<usize>();
+    let data_num = rust_hash_map
+        .iter()
+        .map(|x| {
+            x.1.iter()
+                .map(|x| &x.pkey[..])
+                .collect::<HashSet<&[u8]>>()
+                .len()
+        })
+        .sum::<usize>();
     println!(
         "Loaded {} entries into Rust HashMap in {} ns",
         data_num,
@@ -240,7 +257,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let _ = hash_join_table.get(&op.key, &op.pkey, op.ts)?;
             }
             "commit" => {
-               // ignore
+                // ignore
             }
             "scan" => {
                 // Impl scan if needed
@@ -382,7 +399,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // if commit_cnt == 5000 {
                 //     hash_join_table.garbage_collect(Timestamp::MAX)?;
                 // }
-
             }
             "scan" => {
                 // Impl scan if needed
@@ -405,52 +421,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     println!();
-    // for _ in 0..5 {
-    //     for op in &ops {
-    //         match op.op_type.as_str() {
-    //             "insert" => {
-    //                 hash_join_table.insert(
-    //                     op.key.clone(),
-    //                     op.pkey.clone(),
-    //                     op.ts,
-    //                     op.tx_id,
-    //                     op.value.clone(),
-    //                 )?;
-    //             }
-    //             "update" => {
-    //                 hash_join_table.update(
-    //                     op.key.clone(),
-    //                     op.pkey.clone(),
-    //                     op.ts,
-    //                     op.tx_id,
-    //                     op.value.clone(),
-    //                 )?;
-    //             }
-    //             "delete" => {
-    //                 hash_join_table.delete(&op.key, &op.pkey, op.ts, op.tx_id)?;
-    //             }
-    //             "get" => {
-    //                 let _ = hash_join_table.get(&op.key, &op.pkey, op.ts)?;
-    //             }
-    //             "commit" => {
-    //                 // Implement commit if needed
-    //                 // commit_cnt += 1;
-    //                 // if commit_cnt == 5000 {
-    //                 //     hash_join_table.garbage_collect(Timestamp::MAX)?;
-    //                 // }
-    
-    //             }
-    //             "scan" => {
-    //                 // Impl scan if needed
-    //             }
-    //             _ => {
-    //                 eprintln!("Unknown operation: {}", op.op_type);
-    //             }
-    //         }
-    //     }
-    // }
-    
-
     Ok(())
 }
 
@@ -516,7 +486,6 @@ fn bytes_to_string(bytes: &[u8]) -> String {
             .collect::<String>(),
     }
 }
-
 
 fn scan_rust_hash_map(rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>, ts: u64) -> Vec<MvccEntry> {
     let mut results = Vec::new();

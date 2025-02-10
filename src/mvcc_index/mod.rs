@@ -4,8 +4,8 @@ pub mod txn_handle;
 pub type TxId = u64; // Transaction ID
 
 use crate::{
-    bp::{ContainerKey, MemPool},
-    prelude::Timestamp,
+    bp::{ContainerKey, InMemPool, MemPool},
+    prelude::{AccessMethodError, Timestamp},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -127,14 +127,15 @@ impl Hash for MvccEntry {
 }
 
 pub trait MvccIndex<T: MemPool>: Send + Sync {
-    type Key: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
-    type PKey: Clone + PartialEq + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
-    type Value: Clone + Debug + Send + Sync;
+    type Key: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
+    type PKey: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
+    type Value: Clone + Debug + Send + Sync + AsRef<[u8]>;
     type Error: Error + Debug + Send + Sync + 'static;
     // type MemPoolType: MemPool;
     type Iter: Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send;
     type DeltaIter: Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send;
     type ScanKeyIter: Iterator<Item = (Self::PKey, Self::Value)> + Send;
+    type ScanAllIter: Iterator<Item = MvccEntry> + Send;
 
     /// Creates a new instance of the index.
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
@@ -155,8 +156,8 @@ pub trait MvccIndex<T: MemPool>: Send + Sync {
     /// Returns `None` if no matching record is found at that timestamp.
     fn get(
         &self,
-        key: impl AsRef<[u8]>,
-        pkey: impl AsRef<[u8]>,
+        key: &[u8],
+        pkey: &[u8],
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error>;
 
@@ -182,8 +183,8 @@ pub trait MvccIndex<T: MemPool>: Send + Sync {
     /// Deletes the key-primary key tuple at the given timestamp.
     fn delete(
         &self,
-        key: impl AsRef<[u8]>,
-        pkey: impl AsRef<[u8]>,
+        key: &[u8],
+        pkey: &[u8],
         ts: Timestamp,
         tx_id: TxId,
     ) -> Result<(), Self::Error>;
@@ -206,6 +207,8 @@ pub trait MvccIndex<T: MemPool>: Send + Sync {
     /// Performs garbage collection for entries up to the specified timestamp.
     /// This should remove entries that are no longer needed due to transaction commits.
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error>;
+
+    fn scan_all(&self) -> Result<Self::ScanAllIter, Self::Error>;
 }
 
 /// Represents a change (delta) in the value of a key-primary key tuple.
@@ -223,3 +226,17 @@ pub struct DeltaEntry<V> {
     pub key: Vec<u8>,
     pub pkey: Vec<u8>,
 }
+
+pub type BoxMvccIndexMemPool = Box<
+    dyn MvccIndex<
+        InMemPool,
+        Key = Vec<u8>,
+        PKey = Vec<u8>,
+        Value = Vec<u8>,
+        Error = AccessMethodError,
+        Iter = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>,
+        DeltaIter = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)> + Send>,
+        ScanKeyIter = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>,
+        ScanAllIter = Box<dyn Iterator<Item = MvccEntry> + Send>,
+    >,
+>;

@@ -827,9 +827,7 @@ pub trait TableDataPageBase {
             let ts = CommittedRecord::ts_from_bytes(bytes);
             let next_offset = CommittedRecord::next_offset_from_bytes(bytes);
             let val_size = CommittedRecord::val_size_from_bytes(bytes);
-            let val = {
-                self.read_bytes(off as usize + 8 + 4 + 4, val_size.unwrap_or(0) as usize)
-            };
+            let val = { self.read_bytes(off as usize + 8 + 4 + 4, val_size.unwrap_or(0) as usize) };
 
             let val_size = val_size.unwrap_or(DELETE_MARKER_IN_VAL_SIZE);
             CommittedRecord {
@@ -1048,7 +1046,7 @@ mod rehash_common {
     pub type MapSlotId2VersionsSpace = HashMap<u32, SlotAddresses>;
 
     /// value, is_delete, ts
-    type VersionRef<'a> = (&'a [u8], bool, Timestamp);  
+    type VersionRef<'a> = (&'a [u8], bool, Timestamp);
     pub type VersionRefVec<'a> = Vec<VersionRef<'a>>;
 }
 use rehash_common::*;
@@ -1097,7 +1095,6 @@ pub trait TableDataPageInterface: TableDataPageBase {
 
 #[cfg(not(feature = "unsorted_page"))]
 pub trait TableDataPageInterface: TableDataPageBase {
-
     fn find_slot_idx_to_insert(&self, key: &[u8], pkey: &[u8]) -> (Option<&Slot>, usize) {
         let slot_sli = <Self as TableDataPageBase>::get_slot_slice(&self, 0);
 
@@ -1240,14 +1237,11 @@ pub trait TableDataPageTools: TableDataPageInterface {
             self.get_slot_ref(new_slot_id)
         };
 
-        let (mut _latest_record_offset, mut prev_next_offset) = (
-            0 as u32,
-            slot.meta_offset() + 0,
-        );
+        let (mut _latest_record_offset, mut prev_next_offset) = (0 as u32, slot.meta_offset() + 0);
         let mut rec_start_offset = self.rec_start_offset();
         let mut increase_bytes_delta = 0_u32;
         for version in versions {
-            let new_record_bytes = 
+            let new_record_bytes =
                 { CommittedRecord::to_bytes(0, version.2, version.0, version.1) };
             let record_size = new_record_bytes.len() as u32;
             let record_offset = rec_start_offset - record_size;
@@ -1257,7 +1251,7 @@ pub trait TableDataPageTools: TableDataPageInterface {
 
             let update_bytes: [u8; 4] = u32::to_be_bytes(record_offset);
             self.write_bytes(prev_next_offset as usize, &update_bytes);
-            
+
             prev_next_offset = record_offset + 0;
         }
 
@@ -1268,7 +1262,6 @@ pub trait TableDataPageTools: TableDataPageInterface {
 
         Ok(())
     }
-
 
     fn add_commit_version_to_exist_slot(
         &mut self,
@@ -1289,8 +1282,8 @@ pub trait TableDataPageTools: TableDataPageInterface {
             }
             sl
         } else {
-            let need_space =
-                Slot::space_need(key, pkey) + CommittedRecord::space_need_from_value(value, is_delete);
+            let need_space = Slot::space_need(key, pkey)
+                + CommittedRecord::space_need_from_value(value, is_delete);
             let free_space = self.free_space_without_compaction();
             if need_space > free_space {
                 return Err(HashTableAccessMethodError::OutOfSpace);
@@ -1337,8 +1330,8 @@ pub trait TableDataPageTools: TableDataPageInterface {
         let slot = if let Some(sl) = find_slot_res {
             unreachable!()
         } else {
-            let need_space =
-                Slot::space_need(key, pkey) + CommittedRecord::space_need_from_value(value, is_delete);
+            let need_space = Slot::space_need(key, pkey)
+                + CommittedRecord::space_need_from_value(value, is_delete);
             let free_space = self.free_space_without_compaction();
             if need_space > free_space {
                 return Err(HashTableAccessMethodError::OutOfSpace);
@@ -1442,7 +1435,6 @@ pub trait TableDataPageTools: TableDataPageInterface {
         for (idx, slot) in slot_sli.iter().enumerate() {
             let key = self.get_key_by_slot(slot);
             if is_new_page_fn(&key) {
-                
                 // new_page.insert_slot_and_meta(&key, &pkey, new_page.slot_count() as usize);
 
                 // add meta space to free space
@@ -1485,7 +1477,9 @@ pub trait TableDataPageTools: TableDataPageInterface {
                     offset = commit_record.next_offset;
                 }
                 let pkey = self.get_pkey_by_slot(slot);
-                new_page.rehash_relocate_slot(&key, &pkey, versions).unwrap();
+                new_page
+                    .rehash_relocate_slot(&key, &pkey, versions)
+                    .unwrap();
             } else {
                 // left out
                 left_ids.push(idx as u32);
@@ -1540,7 +1534,7 @@ pub trait TableDataPage: TableDataPageTools {
     }
 
     fn delete(&mut self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<()> {
-        self.add_commit_version_to_exist_slot(key, pkey, ts,&[],  true)
+        self.add_commit_version_to_exist_slot(key, pkey, ts, &[], true)
     }
 
     /// return free space
