@@ -102,6 +102,9 @@ impl<T: MemPool> FirstBucket<T> {
     }
 
     fn get_bucket_index(&self, key: &[u8]) -> usize {
+        if self.bucket_count == 1 {
+            return 0;
+        }
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.bucket_count

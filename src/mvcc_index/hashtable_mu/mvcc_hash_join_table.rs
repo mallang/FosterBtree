@@ -288,6 +288,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
     fn scan_all(&self) -> Result<Self::ScanAllIter, Self::Error> {
         Ok(Box::new(self.scan_all_inner().unwrap()))
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl<T: MemPool> OpenAddrHashTable<T> {

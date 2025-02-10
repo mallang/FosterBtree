@@ -28,7 +28,7 @@ use rand::seq::index;
 use serde::{Deserialize, Serialize};
 
 pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
-pub const DEAFAULT_FIRST_BUCKET_NUM: usize = 1024;
+pub const DEAFAULT_FIRST_BUCKET_NUM: usize = 128;
 
 pub struct ChainedHashTable<T: MemPool> {
     c_key: ContainerKey,
@@ -219,6 +219,157 @@ impl<T: MemPool> ChainedHashTable<T> {
     pub fn scan_all(self: &Arc<Self>) -> Result<ChainedHashTableScanner<T>, AccessMethodError> {
         Ok(ChainedHashTableScanner::new_full_scan(self))
     }
+
+    /// Returns a human‑readable status string for the ChainedHashTable.
+    ///
+    /// This aggregates statistics across:
+    ///  - First buckets (total, unused),
+    ///  - Second buckets (total count and average per first bucket),
+    ///  - Chain lengths (average number of pages per second bucket, for both recent and history),
+    ///  - Average page usage (in %) per page,
+    ///  - And average number of key–value pairs per page.
+    pub fn stat(&self) -> String {
+        let total_first_buckets = self.bucket_entries.len();
+        let mut unused_first_buckets = 0;
+        let mut total_second_buckets = 0;
+
+        // Global accumulators for the recent chain.
+        let mut total_recent_pages = 0;
+        let mut total_recent_kv_count = 0;
+        let mut total_recent_usage = 0.0;
+        // Global accumulators for the history chain.
+        let mut total_history_pages = 0;
+        let mut total_history_kv_count = 0;
+        let mut total_history_usage = 0.0;
+
+        // Iterate over every first bucket.
+        for first_bucket in &self.bucket_entries {
+            // Each first bucket is itself a hashmap of second buckets.
+            let second_buckets = first_bucket.bucket_count();
+            total_second_buckets += second_buckets;
+
+            // Local accumulators for this first bucket.
+            let mut bucket_recent_pages = 0;
+            let mut bucket_recent_kv_count = 0;
+            let mut bucket_recent_usage = 0.0;
+
+            let mut bucket_history_pages = 0;
+            let mut bucket_history_kv_count = 0;
+            let mut bucket_history_usage = 0.0;
+
+            // Process every second bucket inside the first bucket.
+            for i in 0..second_buckets {
+                let second_bucket = first_bucket.bucket_entries(i);
+                // Get summary metrics for the recent chain.
+                let (r_pages, r_kvs, r_usage, _r_max, _r_min) =
+                    second_bucket.recent_chain().summary_metrics();
+                // Get summary metrics for the history chain.
+                let (h_pages, h_kvs, h_usage, _h_max, _h_min) =
+                    second_bucket.history_chain().summary_metrics();
+
+                bucket_recent_pages += r_pages;
+                bucket_recent_kv_count += r_kvs;
+                bucket_recent_usage += r_usage;
+
+                bucket_history_pages += h_pages;
+                bucket_history_kv_count += h_kvs;
+                bucket_history_usage += h_usage;
+            }
+
+            // If this first bucket has no pages in both chains, mark it as unused.
+            if bucket_recent_pages == 0 && bucket_history_pages == 0 {
+                unused_first_buckets += 1;
+            }
+
+            total_recent_pages += bucket_recent_pages;
+            total_recent_kv_count += bucket_recent_kv_count;
+            total_recent_usage += bucket_recent_usage;
+
+            total_history_pages += bucket_history_pages;
+            total_history_kv_count += bucket_history_kv_count;
+            total_history_usage += bucket_history_usage;
+        }
+
+        // Compute average number of second buckets per first bucket.
+        let avg_second_buckets_per_first = if total_first_buckets > 0 {
+            total_second_buckets as f64 / total_first_buckets as f64
+        } else {
+            0.0
+        };
+
+        // Now, we want the average chain length per second bucket, not per first bucket.
+        let avg_recent_chain_len = if total_second_buckets > 0 {
+            total_recent_pages as f64 / total_second_buckets as f64
+        } else {
+            0.0
+        };
+
+        let avg_history_chain_len = if total_second_buckets > 0 {
+            total_history_pages as f64 / total_second_buckets as f64
+        } else {
+            0.0
+        };
+
+        // Compute the average page usage (in percent) per page.
+        let avg_recent_page_usage = if total_recent_pages > 0 {
+            total_recent_usage / total_recent_pages as f64
+        } else {
+            0.0
+        };
+
+        let avg_history_page_usage = if total_history_pages > 0 {
+            total_history_usage / total_history_pages as f64
+        } else {
+            0.0
+        };
+
+        // Compute the average number of key–value pairs per page.
+        let avg_recent_kv_per_page = if total_recent_pages > 0 {
+            total_recent_kv_count as f64 / total_recent_pages as f64
+        } else {
+            0.0
+        };
+
+        let avg_history_kv_per_page = if total_history_pages > 0 {
+            total_history_kv_count as f64 / total_history_pages as f64
+        } else {
+            0.0
+        };
+
+        // Compose the final status string.
+        let mut stat_str = String::new();
+        stat_str.push_str("=== ChainedHashTable Stats ===\n\n");
+        stat_str.push_str(&format!("Total first buckets: {}\n", total_first_buckets));
+        stat_str.push_str(&format!(
+            "Unused first buckets: {}\n\n",
+            unused_first_buckets
+        ));
+        stat_str.push_str(&format!("Total second buckets: {}\n", total_second_buckets));
+        stat_str.push_str(&format!(
+            "Average second buckets per first bucket: {:.2}\n\n",
+            avg_second_buckets_per_first
+        ));
+        stat_str.push_str("Average chain length (in pages) per second bucket:\n");
+        stat_str.push_str(&format!("  Recent chain: {:.2}\n", avg_recent_chain_len));
+        stat_str.push_str(&format!(
+            "  History chain: {:.2}\n\n",
+            avg_history_chain_len
+        ));
+        stat_str.push_str("Average page usage (in %) per page:\n");
+        stat_str.push_str(&format!("  Recent chain: {:.2}\n", avg_recent_page_usage));
+        stat_str.push_str(&format!(
+            "  History chain: {:.2}\n\n",
+            avg_history_page_usage
+        ));
+        stat_str.push_str("Average number of key–value pairs per page:\n");
+        stat_str.push_str(&format!("  Recent chain: {:.2}\n", avg_recent_kv_per_page));
+        stat_str.push_str(&format!(
+            "  History chain: {:.2}\n",
+            avg_history_kv_per_page
+        ));
+
+        stat_str
+    }
 }
 
 impl<T: MemPool> Clone for ChainedHashTable<T> {
@@ -341,6 +492,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         Ok(Box::new(ChainedHashTableScanner::new_full_scan(&Arc::new(
             self.clone(),
         ))))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

@@ -125,8 +125,9 @@ impl Hash for MvccEntry {
         self.value.hash(state);
     }
 }
+use std::any::Any;
 
-pub trait MvccIndex<T: MemPool>: Send + Sync {
+pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     type Key: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
     type PKey: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
     type Value: Clone + Debug + Send + Sync + AsRef<[u8]>;
@@ -209,6 +210,8 @@ pub trait MvccIndex<T: MemPool>: Send + Sync {
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error>;
 
     fn scan_all(&self) -> Result<Self::ScanAllIter, Self::Error>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Represents a change (delta) in the value of a key-primary key tuple.

@@ -421,6 +421,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     println!();
+
+    // After finishing all operations, print the statistics.
+    println!("===STAT_START===");
+    if use_chain_flag {
+        if let Some(chained_hash_table) = hash_join_table
+            .as_any()
+            .downcast_ref::<ChainedHashTable<_>>()
+        {
+            println!(
+                "{}",
+                ChainedHashTable::<InMemPool>::stat(chained_hash_table)
+            );
+        }
+    }
+    println!("===STAT_END===");
+
+    println!();
+
     Ok(())
 }
 
