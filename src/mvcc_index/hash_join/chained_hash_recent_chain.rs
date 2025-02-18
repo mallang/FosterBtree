@@ -2,7 +2,7 @@ use core::panic;
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{self, AtomicU32},
+        atomic::{self, AtomicU32, AtomicU64},
         Arc,
     },
     time::Duration,

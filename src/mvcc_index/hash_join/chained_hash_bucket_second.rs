@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 use dashmap::mapref::entry;
 
@@ -13,6 +19,12 @@ use super::{
     chained_hash_history_chain::ChainedHashHistoryChain,
     chained_hash_recent_chain::ChainedHashRecentChain,
 };
+
+pub static RECENT_GET_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+pub static HISTORY_GET_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static RECENT_GET_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static HISTORY_GET_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub struct SecondBucket<T: MemPool> {
     c_key: ContainerKey,
@@ -40,12 +52,22 @@ impl<T: MemPool> SecondBucket<T> {
     }
 
     pub fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
+        let recent_start = Instant::now();
         let recent_result = self.recent_chain.get(pkey, ts);
+        let recent_duration = recent_start.elapsed().as_nanos() as u64;
+        // Accumulate the duration globally
+        RECENT_GET_TOTAL_NS.fetch_add(recent_duration, Ordering::Relaxed);
+        RECENT_GET_COUNT.fetch_add(1, Ordering::Relaxed);
         match recent_result {
             Ok(entry) => Ok(entry),
             Err(AccessMethodError::KeyNotFound)
             | Err(AccessMethodError::KeyFoundButInvalidTimestamp) => {
+                let history_start = Instant::now();
                 let history_entry = self.history_chain.get(pkey, ts);
+                let history_duration = history_start.elapsed().as_nanos() as u64;
+                // Accumulate the history chain duration globally
+                HISTORY_GET_TOTAL_NS.fetch_add(history_duration, Ordering::Relaxed);
+                HISTORY_GET_COUNT.fetch_add(1, Ordering::Relaxed);
                 match history_entry {
                     Ok(entry) => Ok(entry),
                     Err(e) => Err(e),

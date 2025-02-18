@@ -1,3 +1,4 @@
+pub mod hash_heap;
 pub mod hash_join;
 pub mod hashtable_mu;
 pub mod txn_handle;

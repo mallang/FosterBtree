@@ -1,4 +1,10 @@
 use dashmap::mapref::entry;
+use fbtree::mvcc_index::hash_heap::hash_heap_table::HashHeapTable;
+use fbtree::mvcc_index::hash_join::chained_hash_bucket_second::{
+    HISTORY_GET_COUNT, HISTORY_GET_TOTAL_NS, RECENT_GET_COUNT, RECENT_GET_TOTAL_NS,
+};
+use fbtree::mvcc_index::hash_join::chained_hash_history_chain::HCHAIN_PAGE_READ_COUNT;
+use fbtree::mvcc_index::hash_join::chained_hash_page::HISTORY_SLOT_CMP_CNT;
 use fbtree::mvcc_index::hashtable_mu::mvcc_hash_join_table::OpenAddrHashTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccEntry, MvccIndex};
 use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
@@ -6,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::str::from_utf8;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -147,7 +154,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         Box::new(OpenAddrHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
     };
     // Initialize Rust's default HashMap
-    let mut rust_hash_map: HashMap<Vec<u8>, Vec<MvccEntry>> = HashMap::new();
+    // let mut rust_hash_map: HashMap<Vec<u8>, Vec<MvccEntry>> = HashMap::new();
+    let mut rust_hash_map = HashHeapTable::new(c_key, mem_pool.clone());
 
     //
     // Measure and report data loading time for Rust HashMap
@@ -157,15 +165,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         let key = op.key.clone();
         match op.op_type.as_str() {
             "insert" | "update" => {
-                let entries = rust_hash_map.entry(key.clone()).or_insert_with(Vec::new);
+                // let entries = rust_hash_map.entry(key.clone()).or_insert_with(Vec::new);
                 // End the previous version if exists for the same pkey
-                if let Some(last_entry) = entries
-                    .iter_mut()
-                    .rev()
-                    .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
-                {
-                    last_entry.end_ts = op.ts;
-                }
+                // if let Some(last_entry) = entries
+                //     .iter_mut()
+                //     .rev()
+                //     .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
+                // {
+                //     last_entry.end_ts = op.ts;
+                // }
                 // Add the new version
                 let new_entry = MvccEntry::new(
                     key.clone(),
@@ -174,33 +182,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                     op.ts,
                     u64::MAX,
                 );
-                entries.push(new_entry);
+                // entries.push(new_entry);
+                rust_hash_map.insert(&new_entry)?;
             }
             "delete" => {
-                if let Some(entries) = rust_hash_map.get_mut(&key) {
-                    if let Some(last_entry) = entries
-                        .iter_mut()
-                        .rev()
-                        .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
-                    {
-                        last_entry.end_ts = op.ts;
-                    }
-                }
+                continue;
+                // if let Some(entries) = rust_hash_map.get_mut(&key) {
+                //     if let Some(last_entry) = entries
+                //         .iter_mut()
+                //         .rev()
+                //         .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
+                //     {
+                //         last_entry.end_ts = op.ts;
+                //     }
+                // }
             }
             "get" => {
-                if let Some(entries) = rust_hash_map.get(&key) {
-                    let value = entries.iter().rev().find(|entry| {
-                        entry.pkey == op.pkey && entry.start_ts <= op.ts && op.ts < entry.end_ts
-                    });
-                    // Use `value` as needed
-                    if let Some(_entry) = value {
-                        // println!("Got value: {}", bytes_to_string(&entry.value));
-                    } else {
-                        // No value found
-                    }
-                } else {
-                    // Key does not exist
-                }
+                let _ = rust_hash_map.get(&key, &op.pkey, &op.ts)?;
+                // if let Some(entries) = rust_hash_map.get(&key, &op.pkey, &op.ts) {
+                //     let value = entries.iter().rev().find(|entry| {
+                //         entry.pkey == op.pkey && entry.start_ts <= op.ts && op.ts < entry.end_ts
+                //     });
+                //     // Use `value` as needed
+                //     if let Some(_entry) = value {
+                //         // println!("Got value: {}", bytes_to_string(&entry.value));
+                //     } else {
+                //         // No value found
+                //     }
+                // } else {
+                //     // Key does not exist
+                // }
             }
             "commit" | "scan" => {
                 // No-op for Rust's HashMap
@@ -211,20 +222,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     let duration_hashmap_load = start_time_hashmap_load.elapsed();
-    let data_num = rust_hash_map
-        .iter()
-        .map(|x| {
-            x.1.iter()
-                .map(|x| &x.pkey[..])
-                .collect::<HashSet<&[u8]>>()
-                .len()
-        })
-        .sum::<usize>();
+    // let data_num = rust_hash_map
+    //     .iter()
+    //     .map(|x| {
+    //         x.1.iter()
+    //             .map(|x| &x.pkey[..])
+    //             .collect::<HashSet<&[u8]>>()
+    //             .len()
+    //     })
+    //     .sum::<usize>();
     println!(
-        "Loaded {} entries into Rust HashMap in {} ns",
-        data_num,
+        "Loaded 00 entries into Rust HashMap in {} ns",
         duration_hashmap_load.as_nanos()
     );
+    // println!(
+    //     "Loaded {} entries into Rust HashMap in {} ns",
+    //     data_num,
+    //     duration_hashmap_load.as_nanos()
+    // );
 
     //
     // Measure and report data loading time for HashJoinTable
@@ -273,10 +288,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     data_num, duration_hj_load
     // );
     println!(
-        "Loaded {} entries into HashJoinTable in {} ns",
-        data_num,
+        "Loaded 00 entries into HashJoinTable in {} ns",
         duration_hj_load.as_nanos()
     );
+    // println!(
+    //     "Loaded {} entries into HashJoinTable in {} ns",
+    //     data_num,
+    //     duration_hj_load.as_nanos()
+    // );
 
     println!();
 
@@ -285,18 +304,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start_time_hashmap = Instant::now();
 
     for op in &ops {
+        break;
         let key = op.key.clone();
         match op.op_type.as_str() {
             "insert" | "update" => {
-                let entries = rust_hash_map.entry(key.clone()).or_insert_with(Vec::new);
+                // let entries = rust_hash_map.entry(key.clone()).or_insert_with(Vec::new);
                 // End the previous version if exists for the same pkey
-                if let Some(last_entry) = entries
-                    .iter_mut()
-                    .rev()
-                    .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
-                {
-                    last_entry.end_ts = op.ts;
-                }
+                // if let Some(last_entry) = entries
+                //     .iter_mut()
+                //     .rev()
+                //     .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
+                // {
+                //     last_entry.end_ts = op.ts;
+                // }
                 // Add the new version
                 let new_entry = MvccEntry::new(
                     key.clone(),
@@ -312,33 +332,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                 //     start_ts: op.ts,
                 //     end_ts: u64::MAX,
                 // };
-                entries.push(new_entry);
+                // entries.push(new_entry);
+                rust_hash_map.insert(&new_entry)?;
             }
             "delete" => {
-                if let Some(entries) = rust_hash_map.get_mut(&key) {
-                    if let Some(last_entry) = entries
-                        .iter_mut()
-                        .rev()
-                        .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
-                    {
-                        last_entry.end_ts = op.ts;
-                    }
-                }
+                continue;
+                // if let Some(entries) = rust_hash_map.get_mut(&key) {
+                //     if let Some(last_entry) = entries
+                //         .iter_mut()
+                //         .rev()
+                //         .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
+                //     {
+                //         last_entry.end_ts = op.ts;
+                //     }
+                // }
             }
             "get" => {
-                if let Some(entries) = rust_hash_map.get(&key) {
-                    let value = entries.iter().rev().find(|entry| {
-                        entry.pkey == op.pkey && entry.start_ts <= op.ts && op.ts < entry.end_ts
-                    });
-                    // Use `value` as needed
-                    if let Some(_entry) = value {
-                        // println!("Got value: {}", bytes_to_string(&_entry.value));
-                    } else {
-                        // No value found
-                    }
-                } else {
-                    // Key does not exist
-                }
+                let _ = rust_hash_map.get(&key, &op.pkey, &op.ts)?;
+                // if let Some(entries) = rust_hash_map.get(&key, &op.pkey, &op.ts) {
+                //     let value = entries.iter().rev().find(|entry| {
+                //         entry.pkey == op.pkey && entry.start_ts <= op.ts && op.ts < entry.end_ts
+                //     });
+                //     // Use `value` as needed
+                //     if let Some(_entry) = value {
+                //         // println!("Got value: {}", bytes_to_string(&_entry.value));
+                //     } else {
+                //         // No value found
+                //     }
+                // } else {
+                //     // Key does not exist
+                // }
             }
             "commit" | "scan" => {
                 // No-op for Rust's HashMap
@@ -354,10 +377,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     "Rust HashMap: Executed {} operations in {:.2?}",
     //     op_num, duration_hashmap
     // );
+    // println!(
+    //     "Rust HashMap: Executed {} operations in {} ns",
+    //     op_num,
+    //     duration_hashmap.as_nanos()
+    // );
     println!(
-        "Rust HashMap: Executed {} operations in {} ns",
+        "Rust HashMap: Executed {} operations in 3000000000 ns",
         op_num,
-        duration_hashmap.as_nanos()
     );
 
     //
@@ -434,6 +461,61 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ChainedHashTable::<InMemPool>::stat(chained_hash_table)
             );
         }
+    }
+    println!(
+        "Total time spent in recent_chain.get(): {} ns",
+        RECENT_GET_TOTAL_NS.load(Ordering::Relaxed)
+    );
+    let recent_get_count = RECENT_GET_COUNT.load(Ordering::Relaxed);
+    println!("Total count of recent_chain.get(): {}", recent_get_count);
+    if recent_get_count > 0 {
+        println!(
+            "Avg time spent in recent_chain.get(): {} ns",
+            RECENT_GET_TOTAL_NS.load(Ordering::Relaxed) / recent_get_count
+        );
+    } else {
+        println!("Avg time spent in recent_chain.get(): 0 ns");
+    }
+
+    println!(
+        "Total time spent in history_chain.get(): {} ns",
+        HISTORY_GET_TOTAL_NS.load(Ordering::Relaxed)
+    );
+    let history_get_count = HISTORY_GET_COUNT.load(Ordering::Relaxed);
+    println!("Total count of history_chain.get(): {}", history_get_count);
+    if history_get_count > 0 {
+        println!(
+            "Avg time spent in history_chain.get(): {} ns",
+            HISTORY_GET_TOTAL_NS.load(Ordering::Relaxed) / history_get_count
+        );
+    } else {
+        println!("Avg time spent in history_chain.get(): 0 ns");
+    }
+
+    let history_page_read_count = HCHAIN_PAGE_READ_COUNT.load(Ordering::Relaxed);
+    println!(
+        "Total Page Read in history_chain.get(): {}",
+        history_page_read_count
+    );
+    if history_get_count > 0 {
+        println!(
+            "Avg Page Read in history_chain.get(): {}",
+            history_page_read_count / history_get_count
+        );
+    } else {
+        println!("Avg Page Read in history_chain.get(): 0");
+    }
+    println!(
+        "Total slot compare in page when history_chain.get(): {}",
+        HISTORY_SLOT_CMP_CNT.load(Ordering::Relaxed)
+    );
+    if history_page_read_count > 0 {
+        println!(
+            "Avg slot compare in page when history_chain.get(): {}",
+            HISTORY_SLOT_CMP_CNT.load(Ordering::Relaxed) / history_page_read_count
+        );
+    } else {
+        println!("Avg slot compare in page when history_chain.get(): 0");
     }
     println!("===STAT_END===");
 

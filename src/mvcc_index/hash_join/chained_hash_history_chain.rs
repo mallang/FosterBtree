@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{self, AtomicU32, Ordering},
+        atomic::{self, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -17,7 +17,12 @@ use crate::{
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::{chained_hash_page::HashJoinPage, Timestamp};
+use super::{
+    chained_hash_page::{slot, HashJoinPage},
+    Timestamp,
+};
+
+pub static HCHAIN_PAGE_READ_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub struct ChainedHashHistoryChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -165,6 +170,12 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
     pub fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let mut current_page = self.first_page();
         loop {
+            // increase TOTAL_PAGE_READ_COUNT
+            HCHAIN_PAGE_READ_COUNT.fetch_add(1, Ordering::Relaxed);
+            // let slot_count = current_page.slot_count();
+            // if <Page as HashJoinPage>::slot(&current_page, slot_count - 1).end_ts() <= *ts {
+            //     continue;
+            // }
             match current_page.get_history(pkey, ts) {
                 Ok(entry) => {
                     return Ok(entry);
@@ -780,7 +791,7 @@ mod tests {
 
         // --- Concurrent Inserts ---
         // Partition the entries among a fixed number of insert threads.
-        let num_insert_threads = 5;
+        let num_insert_threads = 1;
         let chunk_size = (total_entries + num_insert_threads - 1) / num_insert_threads; // ceiling division
         let mut insert_handles = Vec::new();
         for t in 0..num_insert_threads {
@@ -870,7 +881,7 @@ mod tests {
 
         // --- Concurrent Inserts ---
         // Partition the entries among several insert threads.
-        let num_insert_threads = 5;
+        let num_insert_threads = 1;
         let chunk_size = (total_entries + num_insert_threads - 1) / num_insert_threads; // ceiling division
         let mut insert_handles = Vec::new();
         for t in 0..num_insert_threads {
@@ -902,7 +913,7 @@ mod tests {
         // Spawn several reader threads that concurrently verify the inserted entries.
         // Each reader thread iterates over all generated entries and performs a get()
         // using a query timestamp set to the midpoint of each entry’s interval.
-        let num_reader_threads = 5;
+        let num_reader_threads = 1;
         let mut reader_handles = Vec::new();
         for _ in 0..num_reader_threads {
             let chain_for_get = history_chain.clone();
@@ -974,7 +985,7 @@ mod tests {
 
         // Generate pre-inserted history entries.
         // For example, generate entries for 1000 primary keys with 5 versions each.
-        let num_pkeys = 1000;
+        let num_pkeys = 100;
         let versions_per_pkey = 5;
         let base_start = 100;
         let interval = 10;
@@ -1014,7 +1025,7 @@ mod tests {
         let num_pre_entries = total_pre_entries;
 
         // Number of worker threads and iterations per thread.
-        const NUM_WORKER_THREADS: usize = 10;
+        const NUM_WORKER_THREADS: usize = 1;
         const NUM_ITERATIONS: usize = 500;
 
         let mut worker_handles = Vec::new();

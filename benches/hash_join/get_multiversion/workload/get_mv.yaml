@@ -1,6 +1,6 @@
 num_transactions: 10000
 
-min_cmds_per_tx: 8
-max_cmds_per_tx: 12
+min_cmds_per_tx: 10
+max_cmds_per_tx: 10
 
-ratio_step_percent: 20
+ratio_step_percent: 50

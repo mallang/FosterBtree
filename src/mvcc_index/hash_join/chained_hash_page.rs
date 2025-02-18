@@ -5,7 +5,7 @@ use crate::{
 };
 // use std::result::Result::Ok;
 pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
-
+pub static HISTORY_SLOT_CMP_CNT: AtomicU64 = AtomicU64::new(0);
 mod header {
     use crate::page::{PageId, AVAILABLE_PAGE_SIZE};
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
@@ -165,6 +165,10 @@ mod header {
     }
 }
 use header::*;
+use std::{
+    result::Result::Ok,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 pub mod slot {
     use crate::{mvcc_index::TxId, prelude::Timestamp};
@@ -468,7 +472,7 @@ use record::*;
 
 pub trait HashJoinPage {
     fn init(&mut self);
-
+    fn heap_insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
     fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
     fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError>;
     fn insert_at_slot_id(
@@ -478,6 +482,7 @@ pub trait HashJoinPage {
     ) -> Result<(), AccessMethodError>;
 
     fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
+    fn heap_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn get_history(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn get_entry_at_slot_id(&self, slot_id: usize) -> Result<MvccEntry, AccessMethodError>;
 
@@ -671,6 +676,20 @@ impl HashJoinPage for Page {
         Ok(())
     }
 
+    fn heap_insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+        let rec = Record::new(entry.key(), entry.pkey(), entry.value());
+        if SLOT_SIZE + rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
+            return Err(AccessMethodError::RecordTooLarge);
+        } else if SLOT_SIZE + rec.size() > HashJoinPage::free_space_before_compaction(&*self) {
+            if SLOT_SIZE + rec.size() > HashJoinPage::free_space_after_compaction(&*self) {
+                return Err(AccessMethodError::OutOfSpace);
+            }
+            // TODO: (JUN) Need to compact the page
+            return Err(AccessMethodError::OutOfSpace);
+        }
+        self.insert_at_slot_id(entry, self.slot_count())
+    }
+
     fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError> {
         let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
         if SLOT_SIZE + new_rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
@@ -735,6 +754,8 @@ impl HashJoinPage for Page {
     fn get_history(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let start_idx = self.binary_search_by_end_ts(*ts);
         for idx in start_idx..self.slot_count() {
+            // increase HISTORY_SLOT_CMP_CNT
+            HISTORY_SLOT_CMP_CNT.fetch_add(1, Ordering::Relaxed);
             let slot = self.slot(idx);
             if slot.start_ts() <= *ts {
                 let rec = self.record(idx);
@@ -761,6 +782,37 @@ impl HashJoinPage for Page {
             slot.start_ts(),
             slot.end_ts(),
         ))
+    }
+
+    fn heap_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
+        let mut best_candidate: Option<(usize, Timestamp)> = None;
+        // Iterate over every slot.
+        for i in 0..self.slot_count() {
+            let rec = self.record(i);
+            // Only consider slots with the matching primary key.
+            if rec.pkey() == pkey {
+                let slot = self.slot(i);
+                let start = slot.start_ts();
+                // Only consider versions that were inserted before or at the query timestamp.
+                if start <= *ts {
+                    // Update best_candidate if this slot's start_ts is greater than any seen so far.
+                    match best_candidate {
+                        Some((_, best_start)) if start > best_start => {
+                            best_candidate = Some((i, start));
+                        }
+                        None => {
+                            best_candidate = Some((i, start));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Some((idx, _)) = best_candidate {
+            self.get_entry_at_slot_id(idx)
+        } else {
+            Err(AccessMethodError::KeyNotFound)
+        }
     }
 
     fn update(&mut self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError> {
