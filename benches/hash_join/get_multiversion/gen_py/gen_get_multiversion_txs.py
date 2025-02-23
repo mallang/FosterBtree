@@ -133,102 +133,102 @@ def generate_transactions_and_operations(
                 tx_commit_op_id[tx['tx_id']] = op_id
             op_id += 1
 
-    # Build dependency graph
-    graph = defaultdict(set)
-    in_degree = defaultdict(int)
+    # # Build dependency graph
+    # graph = defaultdict(set)
+    # in_degree = defaultdict(int)
 
-    # Collect operations per pkey
-    pkey_ops = defaultdict(list)
-    for op in all_operations:
-        pkey = op['pkey']
-        if op['op_type'] != 'commit' and pkey:
-            pkey_ops[pkey].append(op)
+    # # Collect operations per pkey
+    # pkey_ops = defaultdict(list)
+    # for op in all_operations:
+    #     pkey = op['pkey']
+    #     if op['op_type'] != 'commit' and pkey:
+    #         pkey_ops[pkey].append(op)
 
-    # Enforce intra-transaction order (including commit)
-    tx_ops = defaultdict(list)
-    for op in all_operations:
-        tx_ops[op['tx_id']].append(op)
+    # # Enforce intra-transaction order (including commit)
+    # tx_ops = defaultdict(list)
+    # for op in all_operations:
+    #     tx_ops[op['tx_id']].append(op)
 
-    for tx_id, ops in tx_ops.items():
-        ops.sort(key=lambda x: x['ts'])
-        for i in range(len(ops) - 1):
-            from_op = ops[i]['id']
-            to_op = ops[i + 1]['id']
-            if to_op not in graph[from_op]:
-                graph[from_op].add(to_op)
-                in_degree[to_op] += 1
+    # for tx_id, ops in tx_ops.items():
+    #     ops.sort(key=lambda x: x['ts'])
+    #     for i in range(len(ops) - 1):
+    #         from_op = ops[i]['id']
+    #         to_op = ops[i + 1]['id']
+    #         if to_op not in graph[from_op]:
+    #             graph[from_op].add(to_op)
+    #             in_degree[to_op] += 1
 
-    # Build mapping from tx_id to ts
-    tx_ts = {tx['tx_id']: tx['ts'] for tx in transactions}
+    # # Build mapping from tx_id to ts
+    # tx_ts = {tx['tx_id']: tx['ts'] for tx in transactions}
 
-    # Collect pkeys touched by each transaction
-    tx_pkeys = defaultdict(set)
-    for op in all_operations:
-        tx_id = op['tx_id']
-        if op['op_type'] != 'commit' and op['pkey']:
-            tx_pkeys[tx_id].add(op['pkey'])
+    # # Collect pkeys touched by each transaction
+    # tx_pkeys = defaultdict(set)
+    # for op in all_operations:
+    #     tx_id = op['tx_id']
+    #     if op['op_type'] != 'commit' and op['pkey']:
+    #         tx_pkeys[tx_id].add(op['pkey'])
 
-    # Build pkey to list of transactions that touch it
-    pkey_tx_list = defaultdict(list)
-    for pkey, ops in pkey_ops.items():
-        tx_ids = set()
-        for op in ops:
-            tx_id = op['tx_id']
-            if tx_id not in tx_ids:
-                tx_ids.add(tx_id)
-                pkey_tx_list[pkey].append((tx_id, tx_ts[tx_id]))
-        # Sort transactions by ts
-        pkey_tx_list[pkey].sort(key=lambda x: x[1])
+    # # Build pkey to list of transactions that touch it
+    # pkey_tx_list = defaultdict(list)
+    # for pkey, ops in pkey_ops.items():
+    #     tx_ids = set()
+    #     for op in ops:
+    #         tx_id = op['tx_id']
+    #         if tx_id not in tx_ids:
+    #             tx_ids.add(tx_id)
+    #             pkey_tx_list[pkey].append((tx_id, tx_ts[tx_id]))
+    #     # Sort transactions by ts
+    #     pkey_tx_list[pkey].sort(key=lambda x: x[1])
 
-    # Build mapping of tx_id to pkey to ops
-    tx_pkey_ops = defaultdict(lambda: defaultdict(list))
-    for op in all_operations:
-        tx_id = op['tx_id']
-        pkey = op['pkey']
-        if op['op_type'] != 'commit' and pkey:
-            tx_pkey_ops[tx_id][pkey].append(op)
+    # # Build mapping of tx_id to pkey to ops
+    # tx_pkey_ops = defaultdict(lambda: defaultdict(list))
+    # for op in all_operations:
+    #     tx_id = op['tx_id']
+    #     pkey = op['pkey']
+    #     if op['op_type'] != 'commit' and pkey:
+    #         tx_pkey_ops[tx_id][pkey].append(op)
 
-    # Enforce inter-transaction commit dependencies
-    for pkey, tx_list in pkey_tx_list.items():
-        for i in range(len(tx_list) - 1):
-            tx_id_from = tx_list[i][0]
-            tx_id_to = tx_list[i + 1][0]
-            commit_op_id = tx_commit_op_id[tx_id_from]
-            # For all operations in tx_id_to on this pkey, add dependency
-            for op in tx_pkey_ops[tx_id_to][pkey]:
-                if op['id'] not in graph[commit_op_id]:
-                    graph[commit_op_id].add(op['id'])
-                    in_degree[op['id']] += 1
+    # # Enforce inter-transaction commit dependencies
+    # for pkey, tx_list in pkey_tx_list.items():
+    #     for i in range(len(tx_list) - 1):
+    #         tx_id_from = tx_list[i][0]
+    #         tx_id_to = tx_list[i + 1][0]
+    #         commit_op_id = tx_commit_op_id[tx_id_from]
+    #         # For all operations in tx_id_to on this pkey, add dependency
+    #         for op in tx_pkey_ops[tx_id_to][pkey]:
+    #             if op['id'] not in graph[commit_op_id]:
+    #                 graph[commit_op_id].add(op['id'])
+    #                 in_degree[op['id']] += 1
 
-    # Perform randomized topological sort
-    zero_in_degree = [op['id'] for op in all_operations if in_degree[op['id']] == 0]
-    random.shuffle(zero_in_degree)
-    sorted_ops = []
-    visited = set()
+    # # Perform randomized topological sort
+    # zero_in_degree = [op['id'] for op in all_operations if in_degree[op['id']] == 0]
+    # random.shuffle(zero_in_degree)
+    # sorted_ops = []
+    # visited = set()
 
-    while zero_in_degree:
-        op_id = zero_in_degree.pop()
-        if op_id in visited:
-            continue
-        op = all_operations[op_id]
-        sorted_ops.append(op)
-        visited.add(op_id)
+    # while zero_in_degree:
+    #     op_id = zero_in_degree.pop()
+    #     if op_id in visited:
+    #         continue
+    #     op = all_operations[op_id]
+    #     sorted_ops.append(op)
+    #     visited.add(op_id)
 
-        neighbors = list(graph[op_id])
-        random.shuffle(neighbors)  # Shuffle to introduce randomness
-        for neighbor in neighbors:
-            in_degree[neighbor] -= 1
-            if in_degree[neighbor] == 0:
-                zero_in_degree.append(neighbor)
-                random.shuffle(zero_in_degree)
+    #     neighbors = list(graph[op_id])
+    #     random.shuffle(neighbors)  # Shuffle to introduce randomness
+    #     for neighbor in neighbors:
+    #         in_degree[neighbor] -= 1
+    #         if in_degree[neighbor] == 0:
+    #             zero_in_degree.append(neighbor)
+    #             random.shuffle(zero_in_degree)
 
-    if len(sorted_ops) != len(all_operations):
-        raise ValueError("Cycle detected in operations; cannot perform topological sort.")
+    # if len(sorted_ops) != len(all_operations):
+    #     raise ValueError("Cycle detected in operations; cannot perform topological sort.")
 
     # Write mixed operations to ops.csv
     with open(ops_file, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        for op in sorted_ops:
+        for op in all_operations:
             writer.writerow([
                 op['tx_id'], op['ts'], op['op_type'], op['key'], op['pkey'], op['value']
             ])
