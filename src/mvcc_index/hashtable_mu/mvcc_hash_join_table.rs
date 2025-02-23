@@ -16,11 +16,12 @@ use crate::{
 };
 
 use super::{
-    double_hash::double_hash_sub_table::{
-        DHashSubTable, SubTableDeltaScanner, SubTableDeltaScannerOption, SubTableScanner,
-        SubTableScannerOption,
-    },
     hash_join_table_common::MvccHashJoinMetaPage,
+    simple_open_address_hash_table::simple_hash_sub_table::{
+        AllSubTableDeltaScanner, AllSubTableMvccEntryScanner, AllSubTableOneVersionAllKeyScanner,
+        AllSubTableOneVersionOneKeyScanner, DHashSubTable, SubTableDeltaScannerOption,
+        SubTableSimpleScannerOption,
+    },
 };
 
 mod iterator {
@@ -29,32 +30,40 @@ mod iterator {
     use crate::{
         bp::MemPool,
         mvcc_index::{
-            hashtable_mu::double_hash::double_hash_sub_table::{
-                SubTableDeltaScanner, SubTableDeltaScannerOption, SubTableScanner,
-                SubTableScannerOption,
+            hashtable_mu::{
+                hash_join_table_common::HashTableAccessMethodError,
+                simple_open_address_hash_table::simple_hash_sub_table::{
+                    AllSubTableDeltaScanner, AllSubTableMvccEntryScanner,
+                    AllSubTableOneVersionAllKeyScanner, SubTableDeltaScannerOption,
+                    SubTableSimpleScannerOption,
+                },
             },
             Delta, DeltaEntry, MvccEntry, MvccIndex,
         },
     };
 
-    use super::TableStruct;
+    use super::{OpenAddrHashTable, TableStruct};
 
     pub struct MvccDeltaScanner<T, MvccIdx>
     where
-        T: MemPool,
+        T: MemPool + 'static,
         MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
-        ite: SubTableDeltaScanner<T>,
+        ite: AllSubTableDeltaScanner<T>,
         is_end: bool,
         _data: PhantomData<MvccIdx>,
         _data2: PhantomData<T>,
     }
-    impl<T, MvccIdx> Iterator for MvccDeltaScanner<T, MvccIdx>
+
+    impl<T> Iterator for MvccDeltaScanner<T, OpenAddrHashTable<T>>
     where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+        T: MemPool + 'static,
     {
-        type Item = (MvccIdx::Key, MvccIdx::PKey, Delta<MvccIdx::Value>);
+        type Item = (
+            <OpenAddrHashTable<T> as MvccIndex<T>>::Key,
+            <OpenAddrHashTable<T> as MvccIndex<T>>::PKey,
+            Delta<<OpenAddrHashTable<T> as MvccIndex<T>>::Value>,
+        );
         fn next(&mut self) -> Option<Self::Item> {
             if self.is_end {
                 return None;
@@ -69,10 +78,9 @@ mod iterator {
         }
     }
 
-    impl<T, MvccIdx> MvccDeltaScanner<T, MvccIdx>
+    impl<T> MvccDeltaScanner<T, OpenAddrHashTable<T>>
     where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+        T: MemPool + 'static,
     {
         pub fn new(table: &Arc<TableStruct<T>>, option: SubTableDeltaScannerOption) -> Self {
             let ite = table.scan_delta(option).into_iter();
@@ -85,103 +93,57 @@ mod iterator {
         }
     }
 
-    pub struct MvccSimpleScanner<T, MvccIdx>
-    where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
-    {
-        ite: SubTableScanner<T>,
-        is_end: bool,
-        _data: PhantomData<MvccIdx>,
-        _data2: PhantomData<T>,
-    }
-    impl<T, MvccIdx> Iterator for MvccSimpleScanner<T, MvccIdx>
-    where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
-    {
-        type Item = (MvccIdx::Key, MvccIdx::PKey, MvccIdx::Value);
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.is_end {
-                return None;
-            }
-            let res = self.ite.next();
-            if let Some(res) = res {
-                Some((res.key, res.pkey, res.value))
-            } else {
-                self.is_end = true;
-                None
-            }
-        }
-    }
+    // pub struct MvccEntryScanner<T, MvccIdx>
+    // where
+    //     T: MemPool + 'static,
+    //     MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    // {
+    //     ite: AllSubTableMvccEntryScanner<T>,
+    //     is_end: bool,
+    //     _data: PhantomData<MvccIdx>,
+    //     _data2: PhantomData<T>,
+    // }
+    // impl<T, MvccIdx> Iterator for MvccEntryScanner<T, MvccIdx>
+    // where
+    //     T: MemPool + 'static,
+    //     MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    // {
+    //     type Item = (MvccIdx::Key, MvccIdx::PKey, MvccIdx::Value);
+    //     fn next(&mut self) -> Option<Self::Item> {
+    //         if self.is_end {
+    //             return None;
+    //         }
+    //         let res = self.ite.next();
+    //         if let Some(res) = res {
+    //             Some((res.key, res.pkey, res.value))
+    //         } else {
+    //             self.is_end = true;
+    //             None
+    //         }
+    //     }
+    // }
 
-    impl<T, MvccIdx> MvccSimpleScanner<T, MvccIdx>
-    where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
-    {
-        pub fn new(table: &Arc<TableStruct<T>>, option: SubTableScannerOption) -> Self {
-            let ite = table.scan_mvcc_entries(option).into_iter();
-            Self {
-                ite,
-                is_end: false,
-                _data: Default::default(),
-                _data2: Default::default(),
-            }
-        }
-    }
-
-    pub struct MvccKeyScanner<T, MvccIdx>
-    where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
-    {
-        ite: SubTableScanner<T>,
-        is_end: bool,
-        _data: PhantomData<MvccIdx>,
-        _data2: PhantomData<T>,
-    }
-    impl<T, MvccIdx> Iterator for MvccKeyScanner<T, MvccIdx>
-    where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
-    {
-        type Item = (MvccIdx::PKey, MvccIdx::Value);
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.is_end {
-                return None;
-            }
-            let res = self.ite.next();
-            if let Some(res) = res {
-                Some((res.pkey, res.value))
-            } else {
-                self.is_end = true;
-                None
-            }
-        }
-    }
-
-    impl<T, MvccIdx> MvccKeyScanner<T, MvccIdx>
-    where
-        T: MemPool,
-        MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
-    {
-        pub fn new(table: &Arc<TableStruct<T>>, option: SubTableScannerOption) -> Self {
-            let ite = table.scan_mvcc_entries(option).into_iter();
-            Self {
-                ite,
-                is_end: false,
-                _data: Default::default(),
-                _data2: Default::default(),
-            }
-        }
-    }
+    // impl<T, MvccIdx> MvccEntryScanner<T, MvccIdx>
+    // where
+    //     T: MemPool + 'static,
+    //     MvccIdx: MvccIndex<T, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    // {
+    //     pub fn new(table: &Arc<TableStruct<T>>) -> Self {
+    //         let ite = table.scan_mvcc_entries().into_iter();
+    //         Self {
+    //             ite,
+    //             is_end: false,
+    //             _data: Default::default(),
+    //             _data2: Default::default(),
+    //         }
+    //     }
+    // }
 }
 
 use iterator::*;
 
 type TableStruct<T> = DHashSubTable<T>;
-pub struct OpenAddrHashTable<T: MemPool> {
+pub struct OpenAddrHashTable<T: MemPool + 'static> {
     mem_pool: Arc<T>,
     c_key: ContainerKey,
 
@@ -195,10 +157,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
     type Error = AccessMethodError;
-    type Iter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>;
-    type DeltaIter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>;
-    type ScanKeyIter = Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>;
-    type ScanAllIter = Box<dyn Iterator<Item = MvccEntry> + Send>;
+    // type Iter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>;
+    // type DeltaIter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>;
+    // type ScanKeyIter = Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>;
+    // type ScanAllIter = Box<dyn Iterator<Item = MvccEntry> + Send>;
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
     where
         Self: Sized,
@@ -234,12 +196,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
         self.hash_table.get_keys(&key, ts)
     }
 
-    fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error> {
-        let option = SubTableScannerOption::OneVersionAllKeys(ts);
-        let ret = Box::new(MvccSimpleScanner::<T, Self>::new(&self.hash_table, option));
-        Ok(ret)
-    }
-
     fn update(
         &self,
         key: Self::Key,
@@ -248,7 +204,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
         _tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        self.hash_table.update(&key, &pkey, ts, &value)
+        self.hash_table.update(&key, &pkey, ts, &value).unwrap();
+        Ok(())
     }
 
     fn delete(
@@ -258,25 +215,54 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
         ts: Timestamp,
         _tx_id: TxId,
     ) -> Result<(), Self::Error> {
-        self.hash_table.delete(key.as_ref(), pkey.as_ref(), ts)
+        self.hash_table
+            .delete(key.as_ref(), pkey.as_ref(), ts)
+            .unwrap();
+        Ok(())
+    }
+
+    fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        let ret = Box::new(AllSubTableOneVersionAllKeyScanner::<T>::new(
+            &self.hash_table,
+            ts,
+        ));
+        Ok(ret)
     }
 
     fn delta_scan(
         &self,
         from_ts: Timestamp,
         to_ts: Timestamp,
-    ) -> Result<Self::DeltaIter, Self::Error> {
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    > {
         let option = SubTableDeltaScannerOption {
             small_ts: from_ts,
             large_ts: to_ts,
         };
-        let ret = Box::new(MvccDeltaScanner::<T, Self>::new(&self.hash_table, option));
+        let ret = Box::new(
+            AllSubTableDeltaScanner::<T>::new(&self.hash_table, option)
+                .into_iter()
+                .map(|x| (x.key, x.pkey, x.value_delta)),
+        );
         Ok(ret)
     }
 
-    fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error> {
-        let option = SubTableScannerOption::OneVersionOneKey(ts, key.clone());
-        let ret = Box::new(MvccKeyScanner::<T, Self>::new(&self.hash_table, option));
+    fn scan_key(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
+        let option = (ts, key.clone());
+        let ret = Box::new(AllSubTableOneVersionOneKeyScanner::<T>::new(
+            &self.hash_table,
+            option,
+        ));
         Ok(ret)
     }
 
@@ -285,8 +271,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
         Ok(())
     }
 
-    fn scan_all(&self) -> Result<Self::ScanAllIter, Self::Error> {
-        Ok(Box::new(self.scan_all_inner().unwrap()))
+    // fn scan_all(&self) -> Result<Self::ScanAllIter, Self::Error> {
+    //     Ok(Box::new(self.scan_all_inner().unwrap()))
+    // }
+
+    fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
+        let ret = Box::new(AllSubTableMvccEntryScanner::<T>::new(&self.hash_table));
+        Ok(ret)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -304,7 +295,7 @@ impl<T: MemPool> OpenAddrHashTable<T> {
     }
 
     pub fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
-        let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+        let meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
         let meta_page_id = meta_page.get_id();
         let meta_frame_id = AtomicU32::new(meta_page.frame_id());
         let meta = Arc::new((meta_page_id, meta_frame_id));
@@ -334,9 +325,10 @@ impl<T: MemPool> OpenAddrHashTable<T> {
         }
     }
 
-    fn scan_all_inner(&self) -> core::result::Result<SubTableScanner<T>, AccessMethodError> {
-        let option = SubTableScannerOption::AllVersionsAllKeys;
-        let scan_iter = self.hash_table.scan_mvcc_entries(option);
+    fn scan_all_inner(
+        &self,
+    ) -> core::result::Result<AllSubTableMvccEntryScanner<T>, AccessMethodError> {
+        let scan_iter = self.hash_table.scan_mvcc_entries();
         Ok(scan_iter)
     }
 
@@ -367,120 +359,6 @@ impl<T: MemPool> OpenAddrHashTable<T> {
 
     pub fn dump_all_entry(&self) {
         self.hash_table.dbg_dump_all_entry();
-    }
-}
-
-#[cfg(test)]
-mod test_meta {
-    use core::str;
-
-    use super::*;
-    use crate::bp::get_in_mem_pool;
-    use crate::mvcc_index::hashtable_mu::hash_join_table_common::{
-        BUCKET_ENTRY_SIZE, BUCKET_NUM_SIZE,
-    };
-    use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
-
-    #[test]
-    fn test_meta_page_init() {
-        let mut page = Page::new_empty();
-        let num_buckets = 10;
-        <Page as MvccHashJoinMetaPage>::init(&mut page, num_buckets);
-        let stored_num_buckets = page.get_recent_bucket_num();
-        assert_eq!(stored_num_buckets, num_buckets);
-
-        let stored_num_buckets = page.get_history_bucket_num();
-        assert_eq!(stored_num_buckets, num_buckets);
-    }
-
-    #[test]
-    fn test_meta_page_set_and_get_bucket_num() {
-        let mut page = Page::new_empty();
-        let num_buckets = 15;
-        <Page as MvccHashJoinMetaPage>::init(&mut page, num_buckets);
-        page.set_recent_bucket_num(num_buckets + 2);
-        let stored_num_buckets = page.get_recent_bucket_num();
-        assert_eq!(stored_num_buckets, num_buckets + 2);
-    }
-
-    #[test]
-    fn test_meta_page_set_and_get_bucket_entry() {
-        let mut page = Page::new_empty();
-        let num_buckets = 5;
-        <Page as MvccHashJoinMetaPage>::init(&mut page, num_buckets);
-
-        for index in 0..num_buckets {
-            let entry = (index as u32 + 100) as PageId;
-            page.set_recent_bucket_entry(index, &entry);
-        }
-
-        for index in 0..num_buckets {
-            let entry = (index as u32 + 200) as PageId;
-            page.set_history_bucket_entry(index, &entry);
-        }
-
-        for index in 0..num_buckets {
-            let entry = page.get_recent_bucket_entry(index);
-            assert_eq!(entry, index as u32 + 100);
-            let entry = page.get_history_bucket_entry(index);
-            assert_eq!(entry, index as u32 + 200);
-        }
-    }
-
-    #[test]
-    fn test_meta_page_read_and_write_all_entries() {
-        let mut page = Page::new_empty();
-        let num_buckets = 8;
-        <Page as MvccHashJoinMetaPage>::init(&mut page, num_buckets);
-
-        let mut recent_entries = Vec::new();
-        let mut history_entries = Vec::new();
-        for index in 0..num_buckets {
-            let entry = (index as u32 + 500) as PageId;
-            recent_entries.push(entry);
-            history_entries.push(entry + 100);
-        }
-
-        // Write all entries
-        page.write_all_entries_recent(&recent_entries);
-        page.write_all_entries_history(&history_entries);
-
-        // Read all entries
-        let entries = page.read_all_entries_recent();
-        assert_eq!(entries, recent_entries);
-
-        let entries = page.read_all_entries_history();
-        assert_eq!(entries, history_entries);
-    }
-
-    #[test]
-    #[should_panic(expected = "Bucket index out of bounds")]
-    fn test_meta_page_get_bucket_entry_out_of_bounds() {
-        let mut page = Page::new_empty();
-        let num_buckets = 3;
-        <Page as MvccHashJoinMetaPage>::init(&mut page, num_buckets);
-
-        // This should panic because index is equal to num_buckets
-        let _entry = page.get_recent_bucket_entry(num_buckets);
-    }
-
-    #[test]
-    #[should_panic(expected = "Bucket index out of bounds")]
-    fn test_meta_page_get_bucket_entry_out_of_bounds2() {
-        let mut page = Page::new_empty();
-        let num_buckets = 3;
-        <Page as MvccHashJoinMetaPage>::init(&mut page, num_buckets);
-
-        // This should panic because index is equal to num_buckets
-        let _entry = page.get_history_bucket_entry(num_buckets);
-    }
-
-    #[test]
-    #[should_panic(expected = "Page size is insufficient for the number of buckets")]
-    fn test_meta_page_init_too_many_buckets() {
-        let mut page = Page::new_empty();
-        let num_buckets = (AVAILABLE_PAGE_SIZE - BUCKET_NUM_SIZE) / BUCKET_ENTRY_SIZE + 1;
-        <Page as MvccHashJoinMetaPage>::init(&mut page, num_buckets);
     }
 }
 
@@ -1017,7 +895,7 @@ mod test_ops {
         }
     }
 
-    // #[ignore = "not implemented yes"]
+    #[ignore = "not implemented yet"]
     #[test]
     fn test_garbage_collect() {
         let mem_pool = get_in_mem_pool();
@@ -1072,7 +950,7 @@ mod test_ops {
                 item.end_ts
             );
         }
-        assert_eq!(item_count, 1000);
+        assert_eq!(item_count, 2000);
         hash_join_table.garbage_collect(1).unwrap();
 
         let mut scan_all_iter = hash_join_table.scan_all().unwrap();

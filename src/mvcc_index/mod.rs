@@ -1,6 +1,7 @@
 pub mod hash_heap;
 pub mod hash_join;
 pub mod hashtable_mu;
+pub mod rust_hash_map;
 pub mod txn_handle;
 pub type TxId = u64; // Transaction ID
 
@@ -134,10 +135,10 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     type Value: Clone + Debug + Send + Sync + AsRef<[u8]>;
     type Error: Error + Debug + Send + Sync + 'static;
     // type MemPoolType: MemPool;
-    type Iter: Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send;
-    type DeltaIter: Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send;
-    type ScanKeyIter: Iterator<Item = (Self::PKey, Self::Value)> + Send;
-    type ScanAllIter: Iterator<Item = MvccEntry> + Send;
+    // type Iter: Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send;
+    // type DeltaIter: Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send;
+    // type ScanKeyIter: Iterator<Item = (Self::PKey, Self::Value)> + Send;
+    // type ScanAllIter: Iterator<Item = MvccEntry> + Send;
 
     /// Creates a new instance of the index.
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
@@ -192,11 +193,18 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     ) -> Result<(), Self::Error>;
 
     /// Scans the index and returns an iterator over key-primary key-value tuples valid at the given timestamp.
-    fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error>;
+    fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>;
 
     /// Scans all entries with the given key at the specified timestamp.
     /// Returns an iterator over primary key and value pairs.
-    fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error>;
+    fn scan_key(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error>;
 
     /// Delta scan between two timestamps.
     /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.
@@ -204,13 +212,16 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         &self,
         from_ts: Timestamp,
         to_ts: Timestamp,
-    ) -> Result<Self::DeltaIter, Self::Error>;
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    >;
 
     /// Performs garbage collection for entries up to the specified timestamp.
     /// This should remove entries that are no longer needed due to transaction commits.
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error>;
 
-    fn scan_all(&self) -> Result<Self::ScanAllIter, Self::Error>;
+    fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error>;
 
     fn as_any(&self) -> &dyn Any;
 }
@@ -231,6 +242,16 @@ pub struct DeltaEntry<V> {
     pub pkey: Vec<u8>,
 }
 
+impl<V> DeltaEntry<V> {
+    pub fn new(key: Vec<u8>, pkey: Vec<u8>, value_delta: Delta<V>) -> Self {
+        Self {
+            value_delta,
+            key,
+            pkey,
+        }
+    }
+}
+
 pub type BoxMvccIndexMemPool = Box<
     dyn MvccIndex<
         InMemPool,
@@ -238,9 +259,13 @@ pub type BoxMvccIndexMemPool = Box<
         PKey = Vec<u8>,
         Value = Vec<u8>,
         Error = AccessMethodError,
-        Iter = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>,
-        DeltaIter = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)> + Send>,
-        ScanKeyIter = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>,
-        ScanAllIter = Box<dyn Iterator<Item = MvccEntry> + Send>,
     >,
 >;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashTableType {
+    Chained,
+    OpenAddressing,
+    HeapTable,
+    RustHashMap,
+}

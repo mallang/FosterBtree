@@ -733,7 +733,9 @@ impl<T: MemPool> Iterator for ChainedHashHeapChainScanner<T> {
                     .unwrap();
                 self.current_slot_id += 1;
                 if self.filter_by_ts {
-                    if self.ts < entry.start_ts() || entry.end_ts <= self.ts {
+                    if self.ts < entry.start_ts()
+                        || (entry.end_ts <= self.ts && entry.end_ts != u64::MAX)
+                    {
                         continue;
                     } else {
                         return Some(entry);

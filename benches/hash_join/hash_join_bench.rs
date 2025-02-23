@@ -1,6 +1,8 @@
 use dashmap::mapref::entry;
+use fbtree::mvcc_index::hash_heap::hash_heap_table::HashHeapTable;
 use fbtree::mvcc_index::hashtable_mu::mvcc_hash_join_table::OpenAddrHashTable;
-use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccEntry, MvccIndex};
+use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
+use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
 use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -17,7 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut history_data_file: Option<String> = None;
     // let mut scan_ops_file: Option<String> = None;
     let mut limit_ops: Option<usize> = None;
-    let mut use_chain_flag: bool = true;
+    let mut hash_table_t: HashTableType = HashTableType::HeapTable;
 
     // Simple argument parsing loop
     // We expect something like:
@@ -84,9 +86,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                     i += 1;
                 }
             }
-            "--open_address" => {
-                use_chain_flag = false;
-                i += 1;
+            "-t" => {
+                if i + 1 < args.len() {
+                    if let Ok(type_name) = args[i + 1].parse::<String>() {
+                        match type_name.as_str() {
+                            "open_address" => {
+                                hash_table_t = HashTableType::OpenAddressing;
+                            }
+                            "chain" => {
+                                hash_table_t = HashTableType::Chained;
+                            }
+                            "heap" => {
+                                hash_table_t = HashTableType::HeapTable;
+                            }
+                            "rust" => {
+                                hash_table_t = HashTableType::RustHashMap;
+                            }
+                            _ => {
+                                eprintln!("Warning: Invalid hash table type, ignoring...");
+                            }
+                        }
+                        i += 2;
+                    } else {
+                        eprintln!("Warning: Invalid number after -t, ignoring...");
+                        i += 2;
+                    }
+                } else {
+                    eprintln!("Warning: -n specified without a following number, ignoring...");
+                    i += 1;
+                }
             }
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
@@ -103,7 +131,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // || scan_ops_file.is_none()
     {
         eprintln!("Usage:");
-        eprintln!("  {} -df <data_file> -of <ops_file> -rdf <recent_data_file> -hdf <history_data_file> -sof <scan_ops_file> [-n <num_ops>] [--open_address(chain is default)]", args[0]);
+        eprintln!("  {} -df <data_file> -of <ops_file> -rdf <recent_data_file> -hdf <history_data_file> -sof <scan_ops_file> -t <open_address/chain/heap> [-n <num_ops>] ", args[0]);
         return Ok(());
     }
 
@@ -139,37 +167,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
 
-    let hash_join_table = if use_chain_flag {
-        Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
-    } else {
-        Box::new(OpenAddrHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+    let hash_join_table = match hash_table_t {
+        HashTableType::Chained => {
+            Box::new(ChainedHashTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
+        }
+        HashTableType::OpenAddressing => {
+            Box::new(OpenAddrHashTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
+        }
+        HashTableType::HeapTable => {
+            Box::new(HashHeapTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+        }
+        HashTableType::RustHashMap => {
+            Box::new(MvccRustHashMap::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
+        }
     };
-    // Initialize Rust's default HashMap
-    let mut rust_hash_map: HashMap<Vec<u8>, Vec<MvccEntry>> = HashMap::new();
 
-    //
-    // Measure and report data loading time for Rust HashMap
-    let start_time_hashmap_load = Instant::now();
-    // Load data into Rust's HashMap
-    for (key, pkey, value) in &data {
-        let entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), 0, u64::MAX);
-        rust_hash_map
-            .entry(key.clone())
-            .or_insert_with(Vec::new)
-            .push(entry);
-    }
-    let duration_hashmap_load = start_time_hashmap_load.elapsed();
-    // println!(
-    //     "Loaded {} entries into Rust HashMap in {:.2?}",
-    //     data_num, duration_hashmap_load
-    // );
-    println!(
-        "Loaded {} entries into Rust HashMap in {} ns",
-        data_num,
-        duration_hashmap_load.as_nanos()
-    );
-
-    //
     // Measure and report data loading time for HashJoinTable
     let start_time_hj_load = Instant::now();
     // Load data into the hash join table
@@ -185,88 +197,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Loaded {} entries into HashJoinTable in {} ns",
         data_num,
         duration_hj_load.as_nanos()
-    );
-
-    println!();
-
-    //
-    // Start the benchmark for Rust's HashMap
-    let start_time_hashmap = Instant::now();
-
-    for op in &ops {
-        let key = op.key.clone();
-        match op.op_type.as_str() {
-            "insert" | "update" => {
-                let entries = rust_hash_map.entry(key.clone()).or_insert_with(Vec::new);
-                // End the previous version if exists for the same pkey
-                if let Some(last_entry) = entries
-                    .iter_mut()
-                    .rev()
-                    .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
-                {
-                    last_entry.end_ts = op.ts;
-                }
-                // Add the new version
-                let new_entry = MvccEntry::new(
-                    key.clone(),
-                    op.pkey.clone(),
-                    op.value.clone(),
-                    op.ts,
-                    u64::MAX,
-                );
-                // let new_entry = MvccEntry {
-                //     key: key.clone(),
-                //     pkey: op.pkey.clone(),
-                //     value: op.value.clone(),
-                //     start_ts: op.ts,
-                //     end_ts: u64::MAX,
-                // };
-                entries.push(new_entry);
-            }
-            "delete" => {
-                if let Some(entries) = rust_hash_map.get_mut(&key) {
-                    if let Some(last_entry) = entries
-                        .iter_mut()
-                        .rev()
-                        .find(|e| e.pkey == op.pkey && e.end_ts == u64::MAX)
-                    {
-                        last_entry.end_ts = op.ts;
-                    }
-                }
-            }
-            "get" => {
-                if let Some(entries) = rust_hash_map.get(&key) {
-                    let value = entries.iter().rev().find(|entry| {
-                        entry.pkey == op.pkey && entry.start_ts <= op.ts && op.ts < entry.end_ts
-                    });
-                    // Use `value` as needed
-                    if let Some(_entry) = value {
-                        // println!("Got value: {}", bytes_to_string(&entry.value));
-                    } else {
-                        // No value found
-                    }
-                } else {
-                    // Key does not exist
-                }
-            }
-            "commit" | "scan" => {
-                // No-op for Rust's HashMap
-            }
-            _ => {
-                eprintln!("Unknown operation: {}", op.op_type);
-            }
-        }
-    }
-
-    let duration_hashmap = start_time_hashmap.elapsed();
-    // println!(
-    //     "Rust HashMap: Executed {} operations in {:.2?}",
-    //     op_num, duration_hashmap
-    // );
-    println!(
-        "Rust HashMap: Executed {} operations in {} ns",
-        op_num,
-        duration_hashmap.as_nanos()
     );
 
     //
@@ -324,11 +254,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Perform consistency checks
     let expected_recent_data = read_expected_data_file(&recent_data_file)?;
-    let is_consistent_hj =
-        check_consistency_hash_join_table(&hash_join_table, &expected_recent_data)?;
+    let is_recent_consistent =
+        check_recent_entries_consistency(&hash_join_table, &expected_recent_data);
     println!(
-        "HashJoinTable recent data consistency check: {}",
-        if is_consistent_hj { "PASSED" } else { "FAILED" }
+        "Recent consistency check for hash join table {}",
+        if is_recent_consistent {
+            "PASSED"
+        } else {
+            "FAILED"
+        }
     );
 
     let expected_full_data = {
@@ -347,23 +281,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             "FAILED"
         }
-    );
-
-    let is_consistent_hashmap = check_consistency_hash_map(&rust_hash_map, &expected_recent_data);
-    println!(
-        "Rust HashMap consistency check: {}",
-        if is_consistent_hashmap {
-            "PASSED"
-        } else {
-            "FAILED"
-        }
-    );
-
-    let is_consistent =
-        check_consistency_between_hash_join_and_hash_map(&hash_join_table, &rust_hash_map)?;
-    println!(
-        "Consistency check between HashJoinTable and Rust HashMap: {}",
-        if is_consistent { "PASSED" } else { "FAILED" }
     );
 
     Ok(())
@@ -491,122 +408,6 @@ fn read_expected_full_data_file(
     Ok(data)
 }
 
-// Function to check consistency of HashJoinTable with expected data
-fn check_consistency_hash_join_table(
-    hash_join_table: &BoxMvccIndexMemPool,
-    expected_data: &HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
-) -> Result<bool, Box<dyn Error>> {
-    let mut is_consistent = true;
-
-    // Collect entries from HashJoinTable
-    let mut hjt_entries: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
-    let scanner = hash_join_table.scan(u64::MAX)?;
-    for entry in scanner {
-        // hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
-        hjt_entries.insert((entry.0, entry.1), entry.2);
-    }
-
-    // Compare expected data with HashJoinTable entries
-    for ((key, pkey), expected_value) in expected_data {
-        match hjt_entries.get(&(key.clone(), pkey.clone())) {
-            Some(value) => {
-                if value != expected_value {
-                    eprintln!(
-                        "Mismatch for key '{}', pkey '{}': expected '{}', got '{}'",
-                        bytes_to_string(&key),
-                        bytes_to_string(&pkey),
-                        bytes_to_string(expected_value),
-                        bytes_to_string(value)
-                    );
-                    is_consistent = false;
-                }
-            }
-            None => {
-                // eprintln!(
-                //     "Missing entry in HashJoinTable for key '{}', pkey '{}'",
-                //     bytes_to_string(&key),
-                //     bytes_to_string(&pkey)
-                // );
-                is_consistent = false;
-            }
-        }
-    }
-
-    // Check for any extra entries in HashJoinTable not present in expected data
-    for ((key, pkey), value) in hjt_entries {
-        if !expected_data.contains_key(&(key.clone(), pkey.clone())) {
-            eprintln!(
-                "Extra entry in HashJoinTable: key '{}', pkey '{}', value '{}'",
-                bytes_to_string(&key),
-                bytes_to_string(&pkey),
-                bytes_to_string(&value)
-            );
-            is_consistent = false;
-        }
-    }
-
-    Ok(is_consistent)
-}
-
-fn check_consistency_between_hash_join_and_hash_map(
-    hash_join_table: &BoxMvccIndexMemPool,
-    rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>,
-) -> Result<bool, Box<dyn Error>> {
-    let mut is_consistent = true;
-
-    // Collect entries from HashJoinTable valid at ts = u64::MAX
-    let mut hjt_entries: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
-    let scanner = hash_join_table.scan(u64::MAX)?;
-    for entry in scanner {
-        // hjt_entries.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
-        hjt_entries.insert((entry.0, entry.1), entry.2);
-    }
-
-    // Collect current entries from rust_hash_map
-    let rust_entries = get_current_entries_from_rust_hash_map(rust_hash_map);
-
-    // Compare entries in Rust HashMap with entries in HashJoinTable
-    for ((key, pkey), value) in &rust_entries {
-        match hjt_entries.get(&(key.clone(), pkey.clone())) {
-            Some(hjt_value) => {
-                if hjt_value != value {
-                    eprintln!(
-                        "Mismatch for key '{}', pkey '{}': Rust HashMap value '{}', HashJoinTable value '{}'",
-                        bytes_to_string(key),
-                        bytes_to_string(pkey),
-                        bytes_to_string(value),
-                        bytes_to_string(hjt_value)
-                    );
-                    is_consistent = false;
-                }
-            }
-            None => {
-                // eprintln!(
-                //     "Missing entry in HashJoinTable for key '{}', pkey '{}'",
-                //     bytes_to_string(key),
-                //     bytes_to_string(pkey)
-                // );
-                is_consistent = false;
-            }
-        }
-    }
-
-    // Check for any extra entries in HashJoinTable not present in Rust HashMap
-    for ((key, pkey), hjt_value) in &hjt_entries {
-        if !rust_entries.contains_key(&(key.clone(), pkey.clone())) {
-            eprintln!(
-                "Extra entry in HashJoinTable: key '{}', pkey '{}', value '{}'",
-                bytes_to_string(key),
-                bytes_to_string(pkey),
-                bytes_to_string(hjt_value)
-            );
-            is_consistent = false;
-        }
-    }
-
-    Ok(is_consistent)
-}
-
 fn check_full_consistency_hash_join_table(
     hash_join_table: &BoxMvccIndexMemPool,
     expected_data: &Vec<(u64, u64, Vec<u8>, Vec<u8>, Vec<u8>)>,
@@ -631,74 +432,34 @@ fn check_full_consistency_hash_join_table(
     // Compare the sets
     if hjt_entries != expected_entries {
         is_consistent = false;
-        // let missing_entries = expected_entries.difference(&hjt_entries);
-        // let extra_entries = hjt_entries.difference(&expected_entries);
+        let missing_entries = expected_entries.difference(&hjt_entries);
+        let extra_entries = hjt_entries.difference(&expected_entries);
 
-        // for entry in missing_entries {
-        //     eprintln!(
-        //         "Missing entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
-        //         entry.start_ts,
-        //         if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
-        //         bytes_to_string(&entry.key),
-        //         bytes_to_string(&entry.pkey),
-        //         bytes_to_string(&entry.value)
-        //     );
-        // }
+        for entry in missing_entries {
+            eprintln!(
+                "Missing entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
+                entry.start_ts,
+                if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
+                bytes_to_string(&entry.key),
+                bytes_to_string(&entry.pkey),
+                bytes_to_string(&entry.value)
+            );
+        }
 
-        // for entry in extra_entries {
-        //     eprintln!(
-        //         "Extra entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
-        //         entry.start_ts,
-        //         if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
-        //         bytes_to_string(&entry.key),
-        //         bytes_to_string(&entry.pkey),
-        //         bytes_to_string(&entry.value)
-        //     );
-        // }
+        for entry in extra_entries {
+            eprintln!(
+                "Extra entry in HashJoinTable: start_ts '{}', end_ts '{}', key '{}', pkey '{}', value '{}'",
+                entry.start_ts,
+                if entry.end_ts == u64::MAX { -1 } else { entry.end_ts as i64 },
+                bytes_to_string(&entry.key),
+                bytes_to_string(&entry.pkey),
+                bytes_to_string(&entry.value)
+            );
+        }
     }
 
     Ok(is_consistent)
 }
-
-// fn read_scan_ops_file(
-//     file_path: &str,
-// ) -> Result<Vec<(u64, Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>)>, Box<dyn Error>> {
-//     let mut scan_operations = Vec::new();
-
-//     let file = File::open(file_path)?;
-//     let reader = io::BufReader::new(file);
-//     let mut lines = reader.lines();
-
-//     while let Some(line) = lines.next() {
-//         let line = line?;
-//         if line.trim().is_empty() {
-//             continue;
-//         }
-
-//         let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-//         if parts.len() == 3 && parts[0] == "scan" && parts[1] == "ts" {
-//             let ts = parts[2].parse::<u64>()?;
-//             let mut entries = Vec::new();
-
-//             while let Some(entry_line) = lines.next() {
-//                 let entry_line = entry_line?;
-//                 if entry_line.trim().is_empty() {
-//                     break;
-//                 }
-//                 let entry_parts: Vec<&str> = entry_line.split(',').map(|s| s.trim()).collect();
-//                 if entry_parts.len() >= 3 {
-//                     let key = entry_parts[0].as_bytes().to_vec();
-//                     let pkey = entry_parts[1].as_bytes().to_vec();
-//                     let value = entry_parts[2].as_bytes().to_vec();
-//                     entries.push((key, pkey, value));
-//                 }
-//             }
-//             scan_operations.push((ts, entries));
-//         }
-//     }
-
-//     Ok(scan_operations)
-// }
 
 // Function to convert byte arrays to strings safely
 fn bytes_to_string(bytes: &[u8]) -> String {
@@ -711,54 +472,16 @@ fn bytes_to_string(bytes: &[u8]) -> String {
     }
 }
 
-fn get_current_entries(rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>) -> Vec<MvccEntry> {
-    let mut current_entries = Vec::new();
-    for (key, entries) in rust_hash_map {
-        for entry in entries {
-            if entry.end_ts == u64::MAX {
-                current_entries.push(entry.clone());
-            }
-        }
-    }
-    current_entries
-}
-
-fn get_current_entries_from_rust_hash_map(
-    rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>,
-) -> HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> {
-    let mut current_entries = HashMap::new();
-    for (key, entries) in rust_hash_map {
-        for entry in entries {
-            if entry.end_ts == u64::MAX {
-                current_entries.insert((key.clone(), entry.pkey.clone()), entry.value.clone());
-            }
-        }
-    }
-    current_entries
-}
-
-fn scan_rust_hash_map(rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>, ts: u64) -> Vec<MvccEntry> {
-    let mut results = Vec::new();
-    for entries in rust_hash_map.values() {
-        for entry in entries {
-            if entry.start_ts <= ts && ts < entry.end_ts {
-                results.push(entry.clone());
-            }
-        }
-    }
-    results
-}
-
-fn check_consistency_hash_map(
-    rust_hash_map: &HashMap<Vec<u8>, Vec<MvccEntry>>,
+fn check_recent_entries_consistency(
+    hash_join_table: &BoxMvccIndexMemPool,
     expected_data: &HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
 ) -> bool {
-    let current_entries = get_current_entries(rust_hash_map);
+    let current_entries = hash_join_table.scan(u64::MAX).unwrap().collect::<Vec<_>>();
     let mut is_consistent = true;
 
     let mut rust_entries_map: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>> = HashMap::new();
     for entry in current_entries {
-        rust_entries_map.insert((entry.key.clone(), entry.pkey.clone()), entry.value.clone());
+        rust_entries_map.insert((entry.0, entry.1), entry.2);
     }
 
     // Compare current entries with expected data
@@ -802,3 +525,43 @@ fn check_consistency_hash_map(
 
     is_consistent
 }
+
+// fn read_scan_ops_file(
+//     file_path: &str,
+// ) -> Result<Vec<(u64, Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>)>, Box<dyn Error>> {
+//     let mut scan_operations = Vec::new();
+
+//     let file = File::open(file_path)?;
+//     let reader = io::BufReader::new(file);
+//     let mut lines = reader.lines();
+
+//     while let Some(line) = lines.next() {
+//         let line = line?;
+//         if line.trim().is_empty() {
+//             continue;
+//         }
+
+//         let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+//         if parts.len() == 3 && parts[0] == "scan" && parts[1] == "ts" {
+//             let ts = parts[2].parse::<u64>()?;
+//             let mut entries = Vec::new();
+
+//             while let Some(entry_line) = lines.next() {
+//                 let entry_line = entry_line?;
+//                 if entry_line.trim().is_empty() {
+//                     break;
+//                 }
+//                 let entry_parts: Vec<&str> = entry_line.split(',').map(|s| s.trim()).collect();
+//                 if entry_parts.len() >= 3 {
+//                     let key = entry_parts[0].as_bytes().to_vec();
+//                     let pkey = entry_parts[1].as_bytes().to_vec();
+//                     let value = entry_parts[2].as_bytes().to_vec();
+//                     entries.push((key, pkey, value));
+//                 }
+//             }
+//             scan_operations.push((ts, entries));
+//         }
+//     }
+
+//     Ok(scan_operations)
+// }

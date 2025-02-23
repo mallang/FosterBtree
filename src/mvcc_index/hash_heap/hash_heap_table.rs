@@ -24,7 +24,7 @@ use super::hash_heap_chain::ChainedHashHeapChain;
 pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
 pub const DEAFAULT_FIRST_BUCKET_NUM: usize = 128;
 
-pub struct HashHeapTable<T: MemPool> {
+pub struct HashHeapTable<T: MemPool + 'static> {
     c_key: ContainerKey,
     mem_pool: Arc<T>,
 
@@ -36,7 +36,7 @@ pub struct HashHeapTable<T: MemPool> {
     // tx_status: HashMap<TxId, TxInfo>, // Neet to written down to disk later...
 }
 
-impl<T: MemPool> HashHeapTable<T> {
+impl<T: MemPool + 'static> HashHeapTable<T> {
     /// Creates a new hash join table with the default number of buckets.
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEAFAULT_FIRST_BUCKET_NUM)
@@ -173,5 +173,117 @@ impl<T: MemPool> HashHeapTable<T> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.bucket_count
+    }
+}
+
+impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
+    type Error = AccessMethodError;
+    type Key = Vec<u8>;
+    type PKey = Vec<u8>;
+    type Value = Vec<u8>;
+    fn insert(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: Timestamp,
+        tx_id: TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
+        let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
+        self.insert(&entry)
+    }
+    fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        let entry = self.get(key, pkey, &ts)?;
+        Ok(Some(entry.value))
+    }
+
+    fn update(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: Timestamp,
+        tx_id: TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
+        let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
+        self.update(&entry.key(), &entry.pkey(), &entry)
+    }
+
+    fn delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        tx_id: TxId,
+    ) -> Result<(), Self::Error> {
+        let entry =
+            MvccEntry::new_with_tx_id(key.to_vec(), pkey.to_vec(), vec![], ts, u64::MAX, tx_id);
+        self.insert(&entry)
+    }
+
+    fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let iter = bucket.scan(ts)?;
+            result.extend(iter);
+        }
+        Ok(Box::new(
+            result.into_iter().map(|e| (e.key, e.pkey, e.value)),
+        ))
+    }
+
+    fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let iter = bucket.scan_all()?;
+            result.extend(iter);
+        }
+        Ok(Box::new(result.into_iter()))
+    }
+
+    fn delta_scan(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    > {
+        todo!("Implement delta_scan for HashHeapTable")
+    }
+    fn get_key(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        todo!("Implement get_key for HashHeapTable")
+    }
+    fn scan_key(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
+        todo!("Implement scan_key for HashHeapTable")
+    }
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
+        todo!("Implement garbage_collect for HashHeapTable")
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
+        Ok(Self::new(c_key, mem_pool))
     }
 }

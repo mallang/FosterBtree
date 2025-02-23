@@ -25,12 +25,12 @@ for ops_path in ops_files:
 
     # We'll produce workload-specific output files
     # For after txs
-    recent_data_after_txs_file = os.path.join(csv_dir, f'{workload_name}_recent_data_after_txs.csv')
-    history_data_after_txs_file = os.path.join(csv_dir, f'{workload_name}_history_data_after_txs.csv')
+    recent_data_after_txs_file = os.path.join(csv_dir, f'{workload_name}_recent_data_txs_after.csv')
+    history_data_after_txs_file = os.path.join(csv_dir, f'{workload_name}_history_data_txs_after.csv')
 
     # For after ops
-    recent_data_after_ops_file = os.path.join(csv_dir, f'{workload_name}_recent_data_after_ops.csv')
-    history_data_after_ops_file = os.path.join(csv_dir, f'{workload_name}_history_data_after_ops.csv')
+    recent_data_after_ops_file = os.path.join(csv_dir, f'{workload_name}_recent_data_ops_after.csv')
+    history_data_after_ops_file = os.path.join(csv_dir, f'{workload_name}_history_data_ops_after.csv')
 
     # Run gen_data_after_txs.py
     cmd = [

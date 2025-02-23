@@ -1,18 +1,21 @@
 import os
 import yaml
 import subprocess
+import csv
+import argparse
+import random
+import string
 
-def main():
+def main(output_dir):
     # workload_dir = '../workload' # directory for CSV files
     # gen_txs_script = 'gen_txs.py'  # Path to gen_txs.py
     # csv_dir = '../csv'  # directory for CSV files
     workload_dir = 'workload' # directory for CSV files
     gen_txs_script = './gen_py/gen_get_multiversion_txs.py'  # Path to gen_txs.py
-    csv_dir = 'csv'  # directory for CSV files
+    csv_dir = output_dir  # directory for CSV files
 
     for config_file in os.listdir(workload_dir):
         if config_file.endswith('.yaml') or config_file.endswith('.yml'):
-            
             config_path = os.path.join(workload_dir, config_file)
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -40,4 +43,16 @@ def main():
                 subprocess.run(args, check=True, cwd='.')
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(
+        description='Generate get workloads for hash join table.',
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument(
+        '-od', '--output_dir',
+        default='./csv',
+        help='Output csv dir. (default: ./csv)'
+    )
+    
+    args = parser.parse_args()
+    print(f"generating get workloads... output dir {args.output_dir}")
+    main(args.output_dir)

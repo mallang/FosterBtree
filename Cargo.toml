@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["256k_page", "unsorted_page"]
+default = ["256k_page"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -44,8 +44,6 @@ async_write = ["io-uring", "libc"]
 # Async IO with prefetching
 new_async_write = ["io-uring", "libc"]
 
-# entries in page are no-order
-unsorted_page = []
 
 [dependencies]
 tempfile = "3.8"

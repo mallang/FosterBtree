@@ -393,10 +393,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     type PKey = Vec<u8>;
     type Value = Vec<u8>;
     type Error = AccessMethodError;
-    type Iter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>;
-    type DeltaIter = Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>;
-    type ScanKeyIter = Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>;
-    type ScanAllIter = Box<dyn Iterator<Item = MvccEntry> + Send>;
 
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
     where
@@ -461,7 +457,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         ChainedHashTable::delete(self, key.as_ref(), pkey.as_ref(), &ts)
     }
 
-    fn scan(&self, ts: Timestamp) -> Result<Self::Iter, Self::Error> {
+    fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
         let chained_scanner = ChainedHashTable::scan(&Arc::new(self.clone()), ts)?; // This returns `ChainedHashTableScanner`, which yields MvccEntry
         let iter = chained_scanner.map(|entry| {
             (
@@ -472,7 +472,12 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         });
         Ok(Box::new(iter))
     }
-    fn scan_key(&self, key: &Self::Key, ts: Timestamp) -> Result<Self::ScanKeyIter, Self::Error> {
+
+    fn scan_key(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         self.scan_key(key, ts)
     }
 
@@ -480,7 +485,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         &self,
         from_ts: Timestamp,
         to_ts: Timestamp,
-    ) -> Result<Self::DeltaIter, Self::Error> {
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    > {
         self.delta_scan(from_ts, to_ts)
     }
 
@@ -488,7 +496,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         self.garbage_collect(&safe_ts)
     }
 
-    fn scan_all(&self) -> Result<Self::ScanAllIter, AccessMethodError> {
+    fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
         Ok(Box::new(ChainedHashTableScanner::new_full_scan(&Arc::new(
             self.clone(),
         ))))
