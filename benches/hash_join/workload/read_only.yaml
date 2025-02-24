@@ -1,7 +1,7 @@
-num_transactions: 2000
+num_transactions: 1000
 
-min_cmds_per_tx: 50
-max_cmds_per_tx: 50
+min_cmds_per_tx: 10
+max_cmds_per_tx: 10
 
 read_only_ratio: 1.0
 
