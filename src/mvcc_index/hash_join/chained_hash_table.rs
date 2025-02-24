@@ -229,7 +229,7 @@ impl<T: MemPool> ChainedHashTable<T> {
     ///  - Average page usage (in %) per page,
     ///  - And average number of key–value pairs per page.
     pub fn stat(&self) -> String {
-        let total_first_buckets = self.bucket_entries.len();
+        let mut total_first_buckets = self.bucket_entries.len();
         let mut unused_first_buckets = 0;
         let mut total_second_buckets = 0;
 
@@ -246,7 +246,6 @@ impl<T: MemPool> ChainedHashTable<T> {
         for first_bucket in &self.bucket_entries {
             // Each first bucket is itself a hashmap of second buckets.
             let second_buckets = first_bucket.bucket_count();
-            total_second_buckets += second_buckets;
 
             // Local accumulators for this first bucket.
             let mut bucket_recent_pages = 0;
@@ -277,9 +276,12 @@ impl<T: MemPool> ChainedHashTable<T> {
             }
 
             // If this first bucket has no pages in both chains, mark it as unused.
-            if bucket_recent_pages == 0 && bucket_history_pages == 0 {
+            if bucket_recent_kv_count == 0 && bucket_history_kv_count == 0 {
                 unused_first_buckets += 1;
+                continue;
             }
+
+            total_second_buckets += second_buckets;
 
             total_recent_pages += bucket_recent_pages;
             total_recent_kv_count += bucket_recent_kv_count;
@@ -289,6 +291,8 @@ impl<T: MemPool> ChainedHashTable<T> {
             total_history_kv_count += bucket_history_kv_count;
             total_history_usage += bucket_history_usage;
         }
+
+        total_first_buckets -= unused_first_buckets;
 
         // Compute average number of second buckets per first bucket.
         let avg_second_buckets_per_first = if total_first_buckets > 0 {
