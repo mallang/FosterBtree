@@ -1,13 +1,10 @@
 use std::{
     sync::{
-        atomic::{self, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
-    vec::IntoIter,
 };
-
-use dashmap::mapref::entry;
 
 use crate::{
     access_method::AccessMethodError,
@@ -170,7 +167,6 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
     pub fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let mut current_page = self.first_page();
         loop {
-            // increase TOTAL_PAGE_READ_COUNT
             HCHAIN_PAGE_READ_COUNT.fetch_add(1, Ordering::Relaxed);
             // let slot_count = current_page.slot_count();
             // if <Page as HashJoinPage>::slot(&current_page, slot_count - 1).end_ts() <= *ts {
@@ -340,29 +336,12 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
         first_page
     }
 
-    // pub fn scan(
-    //     &self,
-    //     ts: Timestamp,
-    // ) -> Result<MvccHashJoinHistoryChainScanner<T>, AccessMethodError> {
-    //     Ok(MvccHashJoinHistoryChainScanner::new(
-    //         Arc::new(self.clone()),
-    //         ts,
-    //     ))
-    // }
-
     pub fn scan(
         self: &Arc<Self>,
         ts: Timestamp,
     ) -> Result<ChainedHashHistoryChainScanner<T>, AccessMethodError> {
         Ok(ChainedHashHistoryChainScanner::new(self, ts))
     }
-
-    // pub fn scan_all(&self) -> Result<MvccHashJoinHistoryChainScanner<T>, AccessMethodError> {
-    //     // Create a scanner with ts = u64::MAX and no timestamp filtering
-    //     Ok(MvccHashJoinHistoryChainScanner::new_full_scan(Arc::new(
-    //         self.clone(),
-    //     )))
-    // }
 
     pub fn scan_all(
         self: &Arc<Self>,

@@ -6,6 +6,7 @@ use crate::{
 // use std::result::Result::Ok;
 pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
 pub static HISTORY_SLOT_CMP_CNT: AtomicU64 = AtomicU64::new(0);
+
 mod header {
     use crate::page::{PageId, AVAILABLE_PAGE_SIZE};
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
@@ -396,8 +397,6 @@ pub mod slot {
 use slot::*;
 
 pub mod record {
-    use super::slot::SLOT_KEY_PREFIX_SIZE;
-
     #[derive(Debug)]
     pub struct Record {
         key: Vec<u8>,  // hash key
@@ -597,6 +596,9 @@ pub trait HashJoinPage {
 
     fn record(&self, slot_id: usize) -> Record {
         let slot = self.slot(slot_id);
+        self.record_from_slot(&slot)
+    }
+    fn record_from_slot(&self, slot: &Slot) -> Record {
         Record::from_bytes(
             self.read_bytes(slot.offset(), slot.rec_size()),
             slot.key_size(),
@@ -619,6 +621,16 @@ pub trait HashJoinPage {
     fn delete_slot_at_id(&mut self, slot_id: usize);
 
     fn insert_rec_at_offset(&mut self, rec: &Record, offset: usize);
+
+    /// Returns `Some(Record)` if the slot's pkey exactly matches `pkey`.
+    /// Otherwise returns `None`.
+    fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<Record>;
+
+    /// Compare the slot’s pkey at slot_id with `search_key`.
+    /// Returns Ordering::Less if slot’s pkey < search_key,
+    ///         Ordering::Equal if slot’s pkey == search_key,
+    ///         Ordering::Greater if slot’s pkey > search_key.
+    fn slot_cmp_key(&self, slot_id: usize, search_key: &[u8]) -> std::cmp::Ordering;
 
     /// Returns a human-readable status string for this page.
     /// - `kv count`: number of key–value pairs (i.e. the slot count)
@@ -690,47 +702,114 @@ impl HashJoinPage for Page {
         self.insert_at_slot_id(entry, self.slot_count())
     }
 
+    // fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError> {
+    //     let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
+    //     if SLOT_SIZE + new_rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
+    //         return Err(AccessMethodError::RecordTooLarge);
+    //     } else if SLOT_SIZE + new_rec.size() > HashJoinPage::free_space_before_compaction(&*self) {
+    //         if SLOT_SIZE + new_rec.size() > HashJoinPage::free_space_after_compaction(&*self) {
+    //             return Err(AccessMethodError::OutOfSpace);
+    //         }
+    //         // TODO: Need to compact the page
+    //         return Err(AccessMethodError::OutOfSpace);
+    //     }
+
+    //     let start_idx = self.binary_search_by_end_ts(entry.start_ts());
+    //     for idx in start_idx..self.slot_count() {
+    //         // TODO: (JUN) use prefix to aviod scan rec.
+    //         let rec = self.record(idx);
+    //         if rec.pkey() == entry.pkey() {
+    //             let mut slot = self.slot(idx);
+    //             if slot.start_ts() <= entry.start_ts() {
+    //                 slot.set_end_ts(entry.start_ts());
+    //                 self.delete_slot_at_id(idx);
+    //                 self.insert_slot_at_id(&slot, start_idx);
+    //             } else {
+    //                 entry.set_end_ts(&slot.start_ts());
+    //             }
+    //         }
+    //     }
+    //     if self.slot_end_offset() + SLOT_SIZE + new_rec.size() > self.rec_start_offset() {
+    //         return Err(AccessMethodError::OutOfSpace);
+    //     }
+    //     let new_rec_offset = self.rec_start_offset() - new_rec.size();
+    //     let mut new_slot = Slot::new(
+    //         entry.key(),
+    //         entry.pkey(),
+    //         0, // tx_id not used now
+    //         entry.start_ts(),
+    //         entry.end_ts(),
+    //         entry.value(),
+    //         0, // for temporary use
+    //     );
+
+    //     let new_slot_idx = self.binary_search_by_end_ts(new_slot.end_ts());
+    //     new_slot.set_offset(new_rec_offset);
+
+    //     self.insert_slot_at_id(&new_slot, new_slot_idx);
+    //     self.insert_rec_at_offset(&new_rec, new_rec_offset);
+
+    //     Ok(())
+    // }
+
     fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError> {
+        // 1) Check record size constraints
         let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
-        if SLOT_SIZE + new_rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
+        let needed_space = SLOT_SIZE + new_rec.size();
+        if needed_space > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
-        } else if SLOT_SIZE + new_rec.size() > HashJoinPage::free_space_before_compaction(&*self) {
-            if SLOT_SIZE + new_rec.size() > HashJoinPage::free_space_after_compaction(&*self) {
+        } else if needed_space > self.free_space_before_compaction() {
+            if needed_space > self.free_space_after_compaction() {
                 return Err(AccessMethodError::OutOfSpace);
             }
             // TODO: Need to compact the page
             return Err(AccessMethodError::OutOfSpace);
         }
 
+        // 2) For any existing slot whose end_ts() > entry.start_ts() (found via binary_search_by_end_ts),
+        //    if that slot’s pkey matches, adjust end_ts either on the old version or the new version.
         let start_idx = self.binary_search_by_end_ts(entry.start_ts());
         for idx in start_idx..self.slot_count() {
-            // TODO: (JUN) use prefix to aviod scan rec.
-            let rec = self.record(idx);
-            if rec.pkey() == entry.pkey() {
-                let mut slot = self.slot(idx);
-                if slot.start_ts() <= entry.start_ts() {
-                    slot.set_end_ts(entry.start_ts());
+            let slot = self.slot(idx);
+            // If slot.start_ts() <= new entry’s start_ts,
+            // we fix the old version’s end_ts to the new entry’s start_ts.
+            // Else the new version’s end_ts is set to the old slot’s start_ts.
+            if slot.start_ts() <= entry.start_ts() {
+                // Use slot_pkey_matches to skip reading record unless prefix is promising.
+                if let Some(_existing_rec) = self.slot_pkey_matches(&slot, entry.pkey()) {
+                    // The slot’s pkey matches => fix up its end_ts
+                    let mut updated_slot = slot;
+                    updated_slot.set_end_ts(entry.start_ts());
+                    // Remove the slot from idx, then insert it at start_idx to keep it sorted by end_ts
                     self.delete_slot_at_id(idx);
-                    self.insert_slot_at_id(&slot, start_idx);
-                } else {
+                    self.insert_slot_at_id(&updated_slot, start_idx);
+                }
+            } else {
+                // slot.start_ts() > entry.start_ts() => new version’s end_ts = slot.start_ts()
+                if let Some(_existing_rec) = self.slot_pkey_matches(&slot, entry.pkey()) {
                     entry.set_end_ts(&slot.start_ts());
                 }
             }
         }
-        if self.slot_end_offset() + SLOT_SIZE + new_rec.size() > self.rec_start_offset() {
+
+        // 3) Now insert the new record into the page.
+        if self.slot_end_offset() + needed_space > self.rec_start_offset() {
             return Err(AccessMethodError::OutOfSpace);
         }
         let new_rec_offset = self.rec_start_offset() - new_rec.size();
+
+        // Build the slot for the new version
         let mut new_slot = Slot::new(
             entry.key(),
             entry.pkey(),
-            0, // tx_id not used now
+            0, // tx_id not used
             entry.start_ts(),
             entry.end_ts(),
             entry.value(),
-            0, // for temporary use
+            0, // offset => updated below
         );
 
+        // Insert in sorted order by end_ts
         let new_slot_idx = self.binary_search_by_end_ts(new_slot.end_ts());
         new_slot.set_offset(new_rec_offset);
 
@@ -754,12 +833,10 @@ impl HashJoinPage for Page {
     fn get_history(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let start_idx = self.binary_search_by_end_ts(*ts);
         for idx in start_idx..self.slot_count() {
-            // increase HISTORY_SLOT_CMP_CNT
             HISTORY_SLOT_CMP_CNT.fetch_add(1, Ordering::Relaxed);
             let slot = self.slot(idx);
             if slot.start_ts() <= *ts {
-                let rec = self.record(idx);
-                if rec.pkey() == pkey {
+                if let Some(rec) = self.slot_pkey_matches(&slot, pkey) {
                     return Ok(MvccEntry::new(
                         rec.key().to_vec(),
                         rec.pkey().to_vec(),
@@ -999,44 +1076,73 @@ impl HashJoinPage for Page {
         Ok(())
     }
 
-    fn binary_search(&self, sort_key: &[u8]) -> (bool, usize) {
-        let mut high = self.slot_count();
-        if high == 0 {
-            return (false, 0);
-        }
-        high -= 1;
+    // fn binary_search(&self, sort_key: &[u8]) -> (bool, usize) {
+    //     let mut high = self.slot_count();
+    //     if high == 0 {
+    //         return (false, 0);
+    //     }
+    //     high -= 1;
 
-        let high_rec = HashJoinPage::record(&*self, high);
-        let high_sort_key = high_rec.sort_key();
-        if sort_key > high_sort_key {
-            return (false, self.slot_count());
-        } else if sort_key == high_sort_key {
-            return (true, high);
-        } else if self.slot_count() == 1 {
-            return (false, 0);
-        }
+    //     let high_rec = HashJoinPage::record(&*self, high);
+    //     let high_sort_key = high_rec.sort_key();
+    //     if sort_key > high_sort_key {
+    //         return (false, self.slot_count());
+    //     } else if sort_key == high_sort_key {
+    //         return (true, high);
+    //     } else if self.slot_count() == 1 {
+    //         return (false, 0);
+    //     }
+
+    //     let mut low = 0;
+    //     let low_rec = HashJoinPage::record(&*self, low);
+    //     let low_sort_key = low_rec.sort_key();
+    //     if sort_key < low_sort_key {
+    //         return (false, 0);
+    //     } else if sort_key == low_sort_key {
+    //         return (true, low);
+    //     }
+
+    //     while low < high {
+    //         let mid = low + (high - low) / 2;
+    //         let mid_rec = HashJoinPage::record(&*self, mid);
+    //         let mid_sort_key = mid_rec.sort_key();
+    //         if mid_sort_key == sort_key {
+    //             return (true, mid);
+    //         } else if mid_sort_key < sort_key {
+    //             low = mid + 1;
+    //         } else {
+    //             high = mid;
+    //         }
+    //     }
+    //     (false, low)
+    // }
+
+    fn binary_search(&self, search_key: &[u8]) -> (bool, usize) {
+        use std::cmp::Ordering;
 
         let mut low = 0;
-        let low_rec = HashJoinPage::record(&*self, low);
-        let low_sort_key = low_rec.sort_key();
-        if sort_key < low_sort_key {
-            return (false, 0);
-        } else if sort_key == low_sort_key {
-            return (true, low);
-        }
+        let mut high = self.slot_count();
 
         while low < high {
-            let mid = low + (high - low) / 2;
-            let mid_rec = HashJoinPage::record(&*self, mid);
-            let mid_sort_key = mid_rec.sort_key();
-            if mid_sort_key == sort_key {
-                return (true, mid);
-            } else if mid_sort_key < sort_key {
-                low = mid + 1;
-            } else {
-                high = mid;
+            let mid = (low + high) / 2;
+
+            match self.slot_cmp_key(mid, search_key) {
+                Ordering::Less => {
+                    // slot pkey < search_key => search the upper half
+                    low = mid + 1;
+                }
+                Ordering::Equal => {
+                    // Found exact match
+                    return (true, mid);
+                }
+                Ordering::Greater => {
+                    // slot pkey > search_key => search lower half
+                    high = mid;
+                }
             }
         }
+        // If we exit the loop, no exact match was found.
+        // 'low' is where 'search_key' could be inserted to keep order.
         (false, low)
     }
 
@@ -1121,6 +1227,94 @@ impl HashJoinPage for Page {
         if offset < self.rec_start_offset() {
             self.set_rec_start_offset(offset);
         }
+    }
+
+    /// Returns `Some(Record)` if the slot's pkey exactly matches `pkey`.
+    /// Otherwise returns `None`.
+    fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<Record> {
+        // 1) Check pkey length first
+        if pkey.len() != slot.pkey_size() {
+            return None;
+        }
+
+        // 2) Compare prefix
+        let prefix_len = std::cmp::min(SLOT_PKEY_PREFIX_SIZE, pkey.len());
+        let slot_prefix = &slot.pkey_prefix()[..prefix_len];
+        let input_prefix = &pkey[..prefix_len];
+        if slot_prefix != input_prefix {
+            return None;
+        }
+
+        // If the entire pkey fits within the prefix, we've already confirmed equality:
+        if pkey.len() <= SLOT_PKEY_PREFIX_SIZE {
+            // same length, same prefix => match
+            // But we still need to read the record to return it.
+            let rec_bytes = self.read_bytes(slot.offset(), slot.rec_size());
+            let rec = Record::from_bytes(
+                rec_bytes,
+                slot.key_size(),
+                slot.pkey_size(),
+                slot.val_size(),
+            );
+            return Some(rec);
+        }
+
+        // 3) pkey is longer than the prefix => compare the remainder.
+        let rec = self.record_from_slot(slot);
+        if rec.pkey() == pkey {
+            Some(rec)
+        } else {
+            None
+        }
+    }
+
+    /// Compare the slot’s pkey at slot_id with `search_key`.
+    /// Returns Ordering::Less if slot’s pkey < search_key,
+    ///         Ordering::Equal if slot’s pkey == search_key,
+    ///         Ordering::Greater if slot’s pkey > search_key.
+    fn slot_cmp_key(&self, slot_id: usize, search_key: &[u8]) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        let slot = self.slot(slot_id);
+
+        // 1) First compare lengths
+        let slot_len = slot.pkey_size();
+        let input_len = search_key.len();
+        // If they differ, use length to decide “less” or “greater” or keep going.
+        // But if your key ordering truly depends on lexical order, you might want
+        // to compare length only after comparing prefixes.  Usually, for lexical order:
+        //
+        //   "abc" < "abcd" because at the first difference we notice "abc" ended.
+        //
+        // But if you store your keys such that shorter < longer in all cases, you can do:
+        if slot_len != input_len {
+            // If your desired ordering is purely lexical, you'd do something
+            // like comparing the shorter prefix first. For simplicity, let's do:
+            return slot_len.cmp(&input_len);
+        }
+
+        // 2) Compare the prefix (up to 8 bytes).
+        let prefix_len = std::cmp::min(SLOT_PKEY_PREFIX_SIZE, input_len);
+        let slot_prefix = &slot.pkey_prefix()[..prefix_len];
+        let input_prefix = &search_key[..prefix_len];
+        match slot_prefix.cmp(input_prefix) {
+            Ordering::Less => return Ordering::Less,
+            Ordering::Greater => return Ordering::Greater,
+            Ordering::Equal => {
+                // If the entire key fits within the 8-byte prefix, we’re done.
+                // The lengths are equal, and the prefix is the same => full match.
+                if input_len <= SLOT_PKEY_PREFIX_SIZE {
+                    return Ordering::Equal;
+                }
+                // Otherwise, the keys are longer than 8 bytes => compare remainder
+            }
+        }
+
+        // 3) We must read the entire pkey from the record area, then compare it to `search_key`.
+        let rec = self.record_from_slot(&slot);
+        let slot_pkey = rec.pkey();
+
+        slot_pkey.cmp(search_key)
     }
 
     /// Returns a human-readable status string for this page.
