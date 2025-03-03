@@ -272,7 +272,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
-        todo!("Implement scan_key for HashHeapTable")
+        let idx = self.get_bucket_index(key);
+        let bucket = &self.bucket_entries[idx];
+        let iter = bucket.scan(ts)?;
+        Ok(Box::new(iter.map(|e| (e.pkey, e.value))))
     }
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
         todo!("Implement garbage_collect for HashHeapTable")

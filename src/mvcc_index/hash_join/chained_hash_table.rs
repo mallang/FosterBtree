@@ -220,6 +220,14 @@ impl<T: MemPool> ChainedHashTable<T> {
         Ok(ChainedHashTableScanner::new_full_scan(self))
     }
 
+    pub fn scan_key(
+        self: &Arc<Self>,
+        key: &[u8],
+        ts: Timestamp,
+    ) -> Result<ChainedHashTableScanner<T>, AccessMethodError> {
+        Ok(ChainedHashTableScanner::new_scan_key(self, key, ts))
+    }
+
     /// Returns a human‑readable status string for the ChainedHashTable.
     ///
     /// This aggregates statistics across:
@@ -482,7 +490,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
-        self.scan_key(key, ts)
+        let chained_scanner = ChainedHashTable::scan_key(&Arc::new(self.clone()), key, ts)?;
+        let iter = chained_scanner.map(|entry| (entry.pkey().to_vec(), entry.value().to_vec()));
+        Ok(Box::new(iter))
     }
 
     fn delta_scan(
@@ -515,6 +525,7 @@ pub struct ChainedHashTableScanner<T: MemPool> {
     table: Arc<ChainedHashTable<T>>,
     ts: Timestamp,
     filter_by_ts: bool,
+    filter_by_key: Option<Vec<u8>>,
 
     // Current index into the top-level (first) buckets
     current_first_bucket_idx: usize,
@@ -538,6 +549,7 @@ impl<T: MemPool> ChainedHashTableScanner<T> {
             table: table.clone(),
             ts,
             filter_by_ts: true,
+            filter_by_key: None,
             current_first_bucket_idx: 0,
             current_second_bucket_idx: 0,
             scanning_recent: true,
@@ -551,12 +563,32 @@ impl<T: MemPool> ChainedHashTableScanner<T> {
             table: table.clone(),
             ts: 0,
             filter_by_ts: false,
+            filter_by_key: None,
             current_first_bucket_idx: 0,
             current_second_bucket_idx: 0,
             scanning_recent: true,
             recent_scanner: None,
             history_scanner: None,
         }
+    }
+
+    pub fn new_scan_key(table: &Arc<ChainedHashTable<T>>, key: &[u8], ts: Timestamp) -> Self {
+        let mut scanner = ChainedHashTableScanner {
+            table: table.clone(),
+            ts,
+            filter_by_ts: true,
+            filter_by_key: Some(key.to_vec()),
+            current_first_bucket_idx: 0,
+            current_second_bucket_idx: 0,
+            scanning_recent: true,
+            recent_scanner: None,
+            history_scanner: None,
+        };
+
+        let idx = scanner.table.get_bucket_index(key);
+        scanner.current_first_bucket_idx = idx;
+
+        scanner
     }
 
     /// Move to the next bucket pair (recent + history).
@@ -567,6 +599,11 @@ impl<T: MemPool> ChainedHashTableScanner<T> {
 
         let current_first_bucket = &self.table.bucket_entries(self.current_first_bucket_idx);
         if self.current_second_bucket_idx >= current_first_bucket.bucket_count() {
+            // If we are scanning for a single key, do NOT advance to the next first bucket.
+            if self.filter_by_key.is_some() {
+                // That means we are done scanning, because there's only one bucket for that key.
+                return false;
+            }
             // Move to the next first-level bucket
             self.current_first_bucket_idx += 1;
             self.current_second_bucket_idx = 0;

@@ -172,6 +172,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
         key: &Self::Key,
         ts: crate::prelude::Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
-        todo!()
+        let table = self.table.read().unwrap();
+        let result: Vec<(Vec<u8>, Vec<u8>)> = table
+            .get(key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(move |e| e.start_ts <= ts && e.end_ts > ts)
+                    .map(|e| (e.pkey.clone(), e.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Box::new(result.into_iter()))
     }
 }

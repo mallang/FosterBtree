@@ -8,20 +8,21 @@ use fbtree::prelude::*;
 use regex::Regex;
 use std::env;
 use std::error::Error;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead};
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// A single row from table_0.csv
+// -----------------------------------------------------------------------------
+// 1) Data Structures
+// -----------------------------------------------------------------------------
 struct TableRow {
     pkey: Vec<u8>,
     join_key: Vec<u8>,
     value: Vec<u8>,
 }
 
-/// A single transaction op from txs_table_0.csv
 struct TxOperation {
     tx_id: u64,
     ts: u64,
@@ -31,9 +32,10 @@ struct TxOperation {
     value: Vec<u8>,
 }
 
-/// If `value_str` is in the format "BASESTRING(TOTAL_LENGTH)",
-/// expand it to a repeated byte vector of length `TOTAL_LENGTH`.
-/// Otherwise, just return the raw bytes of `value_str`.
+// -----------------------------------------------------------------------------
+// 2) Utility: decode_base_value + read_table_0_and_insert + read_txs_and_apply
+// -----------------------------------------------------------------------------
+
 fn decode_base_value(value_str: &str) -> Vec<u8> {
     lazy_static::lazy_static! {
         static ref BASE_VALUE_RE: Regex = Regex::new(r"^(.*)\((\d+)\)$").unwrap();
@@ -46,14 +48,11 @@ fn decode_base_value(value_str: &str) -> Vec<u8> {
             let base_bytes = base_str.as_bytes();
             let base_len = base_bytes.len();
             if base_len == 0 {
-                // If base is empty, just produce zero bytes
                 return vec![0u8; total_len];
             }
-
             let repeat_count = total_len / base_len;
             let remainder = total_len % base_len;
             let mut result = Vec::with_capacity(total_len);
-
             for _ in 0..repeat_count {
                 result.extend_from_slice(base_bytes);
             }
@@ -63,11 +62,11 @@ fn decode_base_value(value_str: &str) -> Vec<u8> {
             return result;
         }
     }
-    // Fallback: treat as raw
+    // fallback
     value_str.as_bytes().to_vec()
 }
 
-/// Read table_0.csv into memory and do `hash_join_table.insert(...)`.
+/// Insert all rows from table_0.csv
 fn read_table_0_and_insert(
     filepath: &PathBuf,
     hash_join_table: &mut BoxMvccIndexMemPool,
@@ -93,7 +92,7 @@ fn read_table_0_and_insert(
     Ok(())
 }
 
-/// Read txs_table_0.csv and apply each op
+/// Apply normal ops + scans from a CSV file (4-col or 6-col lines).
 fn read_txs_and_apply(
     filepath: &PathBuf,
     hash_join_table: &mut BoxMvccIndexMemPool,
@@ -131,7 +130,7 @@ fn read_txs_and_apply(
                 // no-op
             }
             "scan_with_join_key" => {
-                // possible scan if we want to implement
+                let _ = hash_join_table.scan_key(&op.join_key, op.ts)?;
             }
             other => {
                 eprintln!("Unknown operation: {}", other);
@@ -149,7 +148,7 @@ fn read_txs_and_apply(
     Ok(())
 }
 
-/// Actually read table_0.csv: "pkey,join_key,value"
+/// Read table_0.csv => (pkey, join_key, value)
 fn read_table_0_csv(filepath: &PathBuf) -> io::Result<Vec<TableRow>> {
     let file = File::open(filepath)?;
     let mut rows = Vec::new();
@@ -181,7 +180,7 @@ fn read_table_0_csv(filepath: &PathBuf) -> io::Result<Vec<TableRow>> {
     Ok(rows)
 }
 
-/// Actually read txs_table_0.csv: "tx_id,ts,op,pkey,join_key,value"
+/// This reads a CSV that might have 4 columns (scan row) or 6 columns (normal).
 fn read_txs_csv(filepath: &PathBuf) -> io::Result<Vec<TxOperation>> {
     let file = File::open(filepath)?;
     let mut ops = Vec::new();
@@ -192,69 +191,88 @@ fn read_txs_csv(filepath: &PathBuf) -> io::Result<Vec<TxOperation>> {
 
     for result in rdr.records() {
         let record = result?;
-        if record.len() < 6 {
-            eprintln!("Invalid record in txs_table_0.csv: {:?}", record);
+        let num_cols = record.len();
+        if num_cols == 4 {
+            // Format: tx_id, ts, op, join_key
+            let tx_id = record[0].parse::<u64>().unwrap_or(0);
+            let ts = record[1].parse::<u64>().unwrap_or(0);
+            let op = record[2].to_string();
+            let join_key_str = &record[3];
+            let join_key = join_key_str.as_bytes().to_vec();
+
+            let pkey = Vec::new();
+            let value = Vec::new();
+
+            ops.push(TxOperation {
+                tx_id,
+                ts,
+                op,
+                pkey,
+                join_key,
+                value,
+            });
+        } else if num_cols == 6 {
+            // Format: tx_id, ts, op, pkey, join_key, value
+            let tx_id = record[0].parse::<u64>().unwrap_or(0);
+            let ts = record[1].parse::<u64>().unwrap_or(0);
+            let op = record[2].to_string();
+            let pkey_str = &record[3];
+            let join_key_str = &record[4];
+            let value_str = &record[5];
+
+            let pkey = pkey_str.as_bytes().to_vec();
+            let join_key = join_key_str.as_bytes().to_vec();
+            let expanded_value = decode_base_value(value_str);
+
+            ops.push(TxOperation {
+                tx_id,
+                ts,
+                op,
+                pkey,
+                join_key,
+                value: expanded_value,
+            });
+        } else {
+            eprintln!(
+                "Invalid record with {} columns in {}: {:?}",
+                num_cols,
+                filepath.display(),
+                record
+            );
             continue;
         }
-        let tx_id = record[0].parse::<u64>().unwrap_or(0);
-        let ts = record[1].parse::<u64>().unwrap_or(0);
-        let op = record[2].to_string();
-
-        let pkey_str = &record[3];
-        let join_key_str = &record[4];
-        let value_str = &record[5];
-
-        let pkey = pkey_str.as_bytes().to_vec();
-        let join_key = join_key_str.as_bytes().to_vec();
-        let expanded_value = decode_base_value(value_str);
-
-        ops.push(TxOperation {
-            tx_id,
-            ts,
-            op,
-            pkey,
-            join_key,
-            value: expanded_value,
-        });
     }
     Ok(ops)
 }
 
-/// Attempt to resolve a path like ../../benches/hash_join/join_simulation/csv
-/// relative to the directory of the current executable.
-/// This function tries to handle things so you can run the binary from anywhere.
+/// Finds the default CSV dir relative to the binary
 fn default_csv_path_relative_to_bin() -> PathBuf {
-    // Suppose we want to go from the binary's directory to ../../benches/hash_join/join_simulation/csv
-    // We'll find the binary's dir, then pop/push the relative path.
     if let Ok(exe_path) = env::current_exe() {
         let mut exe_dir = exe_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        // We want 2 "pops" to go up 2 directories, then push "benches/hash_join/join_simulation/csv"
-        // But we can just do the relative approach:
-        exe_dir.push(".."); // pop once
-        exe_dir.push(".."); // pop twice
+        exe_dir.push("..");
+        exe_dir.push("..");
         exe_dir.push("benches");
         exe_dir.push("hash_join");
         exe_dir.push("join_simulation");
         exe_dir.push("csv");
         return exe_dir;
     }
-    // fallback if that fails
     PathBuf::from("../../benches/hash_join/join_simulation/csv")
 }
 
-/// Main program for testing all 4 hash table types.
-/// Usage:
-///   cargo run --bin hash_join_test -- [--csv-dir <path>] [--table0 <file>] [--txs0 <file>] -t <chain|open_address|heap|rust>
+// -----------------------------------------------------------------------------
+// 3) Main
+// -----------------------------------------------------------------------------
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
 
-    // We'll default to the auto-computed path from the bin location
+    // CLI defaults
     let mut csv_dir = default_csv_path_relative_to_bin();
     let mut table0_name = String::from("table_0.csv");
-    let mut txs0_name = String::from("txs_table_0.csv");
+    let mut txs0_name = String::from("txs_u0.1_t0.csv");
     let mut hash_table_t = HashTableType::HeapTable; // default
 
     let mut i = 1;
@@ -312,7 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // 1) Make sure csv_dir exists
+    // 1) ensure csv_dir
     if !csv_dir.exists() {
         eprintln!("CSV directory does not exist: {:?}", csv_dir);
         return Ok(());
@@ -328,8 +346,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("Hash Table Type: {:?}", hash_table_t);
 
-    // 2) Create the hash table via fbtree
-    let mem_pool = get_in_mem_pool(); // from fbtree
+    // 2) Create the hash join table
+    let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
 
     let mut hash_join_table = match hash_table_t {
@@ -347,13 +365,55 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // 3) Read table_0.csv => Insert data
+    // 3) Insert table_0
     println!("\n=== Inserting from table_0 ===");
     read_table_0_and_insert(&table0_path, &mut hash_join_table)?;
 
-    // 4) Read txs_table_0.csv => Apply ops
+    // 4) Apply txs0
     println!("\n=== Applying TXS from txs_table_0 ===");
     read_txs_and_apply(&txs0_path, &mut hash_join_table)?;
+
+    // 5) Discover and apply all txs_join_ts(\d+)_t(\d+).csv
+    //    We can measure them individually
+    println!("\n=== Discovering join logs => apply them ===");
+
+    let pattern = Regex::new(r"^txs_join_ts(\d+)_t(\d+)\.csv$").unwrap();
+    let mut discovered = Vec::new();
+    // read the directory listing
+    for entry in fs::read_dir(&csv_dir)? {
+        let entry = entry?;
+        let fname = entry.file_name();
+        let fname_str = fname.to_string_lossy();
+        if let Some(capt) = pattern.captures(&fname_str) {
+            let ts_val_str = &capt[1];
+            let table_idx_str = &capt[2];
+            if let (Ok(ts_val), Ok(tbl_idx)) =
+                (ts_val_str.parse::<u64>(), table_idx_str.parse::<u64>())
+            {
+                discovered.push((fname_str.into_owned(), ts_val, tbl_idx));
+            }
+        }
+    }
+    // Sort by (tbl_idx, ts_val)
+    discovered.sort_by_key(|(_, tsval, tblidx)| (*tblidx, *tsval));
+
+    if discovered.is_empty() {
+        println!("No files matching txs_join_ts(\\d+)_t(\\d+) found. Done.");
+    } else {
+        println!("Discovered {} join logs:", discovered.len());
+        for (fname, tsval, tblidx) in &discovered {
+            println!("  file={}, table_idx={}, ts={}", fname, tblidx, tsval);
+        }
+
+        for (fname, tsval, tblidx) in discovered {
+            let join_path = csv_dir.join(&fname);
+            println!(
+                "\nApplying join ops => {}, table_idx={}, ts={}",
+                fname, tblidx, tsval
+            );
+            read_txs_and_apply(&join_path, &mut hash_join_table)?;
+        }
+    }
 
     println!("\nAll done!");
     Ok(())
