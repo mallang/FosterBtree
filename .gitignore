@@ -2,4 +2,5 @@
 log*
 .DS_Store
 benches/hash_join/csv
+benches/hash_join/join_simulation/csv
 output/
