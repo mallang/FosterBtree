@@ -182,8 +182,8 @@ def main():
         "--num_tx"
     ]
     # Add the join TX counts
-    # cmd_join.extend([str(x) for x in args.txs_join_tables])
-    cmd_join.extend(["1"])
+    cmd_join.extend([str(x) for x in args.txs_join_tables])
+    # cmd_join.extend(["1"])
     # Add the ts-values argument
     cmd_join.extend(["--ts-values"])
     cmd_join.extend([str(x) for x in args.ts_values])

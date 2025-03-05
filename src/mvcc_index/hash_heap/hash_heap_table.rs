@@ -226,30 +226,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
         self.insert(&entry)
     }
 
-    fn scan(
-        &self,
-        ts: Timestamp,
-    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
-    {
-        let mut result = vec![];
-        for bucket in &self.bucket_entries {
-            let iter = bucket.scan(ts)?;
-            result.extend(iter);
-        }
-        Ok(Box::new(
-            result.into_iter().map(|e| (e.key, e.pkey, e.value)),
-        ))
-    }
-
-    fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
-        let mut result = vec![];
-        for bucket in &self.bucket_entries {
-            let iter = bucket.scan_all()?;
-            result.extend(iter);
-        }
-        Ok(Box::new(result.into_iter()))
-    }
-
     fn delta_scan(
         &self,
         from_ts: Timestamp,
@@ -267,16 +243,47 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         todo!("Implement get_key for HashHeapTable")
     }
+
+    fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let iter = bucket.scan(ts)?;
+            result.extend(iter);
+        }
+        Ok(Box::new(
+            result.into_iter().map(|e| (e.key, e.pkey, e.value)),
+        ))
+    }
+
     fn scan_key(
         &self,
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
+        // Clone the key so the closure can own it.
+        let key_owned = key.clone();
         let idx = self.get_bucket_index(key);
         let bucket = &self.bucket_entries[idx];
-        let iter = bucket.scan(ts)?;
-        Ok(Box::new(iter.map(|e| (e.pkey, e.value))))
+        let entries = bucket.scan_unique(ts)?;
+        let filtered = entries
+            .into_iter()
+            .filter(move |entry| entry.key == key_owned);
+        Ok(Box::new(filtered.map(|entry| (entry.pkey, entry.value))))
     }
+
+    fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let iter = bucket.scan_all()?;
+            result.extend(iter);
+        }
+        Ok(Box::new(result.into_iter()))
+    }
+
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
         todo!("Implement garbage_collect for HashHeapTable")
     }

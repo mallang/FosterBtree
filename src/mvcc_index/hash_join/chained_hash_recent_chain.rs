@@ -27,6 +27,9 @@ pub struct ChainedHashRecentChain<T: MemPool> {
 
     first_page_id: PageId,
     first_frame_id: AtomicU32,
+
+    last_page_id: AtomicU32,
+    last_frame_id: AtomicU32,
 }
 
 impl<T: MemPool> ChainedHashRecentChain<T> {
@@ -43,6 +46,8 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
             c_key,
             first_page_id,
             first_frame_id: AtomicU32::new(first_frame_id),
+            last_page_id: AtomicU32::new(first_page_id),
+            last_frame_id: AtomicU32::new(first_frame_id),
         }
     }
 
@@ -52,10 +57,133 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
             c_key,
             first_page_id,
             first_frame_id: AtomicU32::new(u32::MAX),
+            last_page_id: AtomicU32::new(u32::MAX),
+            last_frame_id: AtomicU32::new(u32::MAX),
         }
     }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+        let space_need = <Page as HashJoinPage>::require_space(&entry);
+        if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
+            return Err(AccessMethodError::RecordTooLarge);
+        }
+        let last_page_id = self.last_page_id.load(atomic::Ordering::Acquire);
+        let last_frame_id = self.last_frame_id.load(atomic::Ordering::Acquire);
+        let last_page_frame_key =
+            PageFrameKey::new_with_frame_id(self.c_key, last_page_id, last_frame_id);
+        let mut last_page = self.traverse_until_endofchain_for_write(last_page_frame_key)?;
+        log_trace!("Acquired write lock for page {}", last_page.get_id());
+
+        match last_page.insert(entry) {
+            Ok(_) => {
+                if self.last_page_id.load(atomic::Ordering::Acquire) != last_page.get_id() {
+                    self.last_page_id
+                        .store(last_page.get_id(), atomic::Ordering::Release);
+                    self.last_frame_id
+                        .store(last_page.frame_id(), atomic::Ordering::Release);
+                } else if self.last_frame_id.load(atomic::Ordering::Acquire) != last_page.frame_id()
+                {
+                    log_debug!(
+                        "Frame of the last page has been changed. Trying to fix the frame id"
+                    );
+                    self.last_frame_id
+                        .store(last_page.frame_id(), atomic::Ordering::Release);
+                }
+                Ok(())
+            }
+            Err(AccessMethodError::OutOfSpace) => {
+                log_debug!(
+                    "Not enough space in page {}. Creating a new page.",
+                    last_page.get_id()
+                );
+                let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
+                new_page.init();
+                last_page.set_next_page(new_page.get_id(), new_page.frame_id());
+                log_trace!(
+                    "Linked last page {} -> new page {}",
+                    last_page.get_id(),
+                    new_page.get_id()
+                );
+                self.last_page_id
+                    .store(new_page.get_id(), atomic::Ordering::Release);
+                self.last_frame_id
+                    .store(new_page.frame_id(), atomic::Ordering::Release);
+                match new_page.insert(entry) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn traverse_until_endofchain_for_write(
+        &self,
+        page_key: PageFrameKey,
+    ) -> Result<FrameWriteGuard, AccessMethodError> {
+        let base = 2;
+        let mut attempts = 0;
+        loop {
+            let last_page = self.try_traverse_until_endofchain_for_write(page_key);
+            match last_page {
+                Ok(last_page) => {
+                    return Ok(last_page);
+                }
+                Err(AccessMethodError::PageWriteLatchFailed) => {
+                    attempts += 1;
+                    log_trace!(
+                        "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
+                        attempts,
+                        u64::pow(base, attempts)
+                    );
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                }
+                Err(e) => {
+                    panic!("Unexpected error: {:?}", e);
+                }
+            }
+        }
+    }
+
+    fn try_traverse_until_endofchain_for_write(
+        &self,
+        page_key: PageFrameKey,
+    ) -> Result<FrameWriteGuard, AccessMethodError> {
+        let mut current_page = self.read_page(page_key);
+        loop {
+            if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key,
+                    next_page_id,
+                    next_frame_id,
+                ));
+                if next_page.frame_id() != next_frame_id {
+                    log_debug!(
+                        "Frame of the next page has been changed. Trying to fix the frame id"
+                    );
+                    let new_frame_key = PageFrameKey::new_with_frame_id(
+                        self.c_key,
+                        next_page_id,
+                        next_page.frame_id(),
+                    );
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                match current_page.try_upgrade(true) {
+                    Ok(upgraded_page) => {
+                        return Ok(upgraded_page);
+                    }
+                    Err(_) => {
+                        log_debug!("Failed to upgrade the page. Will retry");
+                        return Err(AccessMethodError::PageWriteLatchFailed);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn insert_with_check(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let space_need = <Page as HashJoinPage>::require_space(&entry);
         if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
             return Err(AccessMethodError::RecordTooLarge);
@@ -129,6 +257,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                 if current_page.binary_search(entry.search_key()).0 {
                     return Err(AccessMethodError::KeyDuplicate);
                 }
+
                 // TODO: check free space may can insert here later.
                 let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key,
@@ -607,6 +736,13 @@ impl<T: MemPool> Clone for ChainedHashRecentChain<T> {
             first_page_id: self.first_page_id,
             first_frame_id: AtomicU32::new(
                 self.first_frame_id
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
+            last_page_id: AtomicU32::new(
+                self.last_page_id.load(std::sync::atomic::Ordering::Acquire),
+            ),
+            last_frame_id: AtomicU32::new(
+                self.last_frame_id
                     .load(std::sync::atomic::Ordering::Acquire),
             ),
         }

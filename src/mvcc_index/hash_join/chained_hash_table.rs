@@ -687,6 +687,12 @@ impl<T: MemPool> Iterator for ChainedHashTableScanner<T> {
                 // Attempt to fetch next from the recent chain.
                 if let Some(ref mut scanner) = self.recent_scanner {
                     if let Some(entry) = scanner.next() {
+                        // if we are filtering by key, check if the key matches
+                        if let Some(ref key) = self.filter_by_key {
+                            if entry.key() != key {
+                                continue;
+                            }
+                        }
                         return Some(entry);
                     }
                 }
@@ -701,6 +707,12 @@ impl<T: MemPool> Iterator for ChainedHashTableScanner<T> {
                 }
                 if let Some(ref mut scanner) = self.history_scanner {
                     if let Some(entry) = scanner.next() {
+                        // if we are filtering by key, check if the key matches
+                        if let Some(ref key) = self.filter_by_key {
+                            if entry.key() != key {
+                                continue;
+                            }
+                        }
                         return Some(entry);
                     }
                 }
@@ -1678,4 +1690,67 @@ mod tests {
     //         assert_eq!(entry.start_ts, ts_update2);
     //         assert_eq!(entry.end_ts, u64::MAX);
     //     }
+    #[test]
+    fn test_scan_key_functionality() -> Result<(), AccessMethodError> {
+        // Create a mem_pool and a container key.
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(1, 1);
+        let num_buckets = 8;
+        // Wrap the table in an Arc since scan_key requires &Arc<Self>
+        let table = Arc::new(ChainedHashTable::new_with_bucket_num(
+            c_key,
+            mem_pool,
+            num_buckets,
+        ));
+
+        let tx_id = 1;
+
+        // Insert entries:
+        // Two entries with key "test_key" and one with a different key.
+        let entry1 = MvccEntry::new_with_tx_id(
+            b"test_key".to_vec(),
+            b"pkey1".to_vec(),
+            b"value1".to_vec(),
+            100,      // timestamp
+            u64::MAX, // end_ts
+            tx_id,
+        );
+        let entry2 = MvccEntry::new_with_tx_id(
+            b"test_key".to_vec(),
+            b"pkey2".to_vec(),
+            b"value2".to_vec(),
+            200, // later timestamp
+            u64::MAX,
+            tx_id,
+        );
+        let entry3 = MvccEntry::new_with_tx_id(
+            b"other_key".to_vec(),
+            b"pkey3".to_vec(),
+            b"value3".to_vec(),
+            150,
+            u64::MAX,
+            tx_id,
+        );
+
+        table.insert(&entry1)?;
+        table.insert(&entry2)?;
+        table.insert(&entry3)?;
+
+        // Now scan for entries with key "test_key" at timestamp 250.
+        let scanner = table.scan_key(b"test_key", 250)?;
+        let results: Vec<MvccEntry> = scanner.collect();
+
+        // We expect only the entries for "test_key" to be returned.
+        assert_eq!(results.len(), 2, "Expected two entries for 'test_key'");
+        for entry in results.iter() {
+            assert_eq!(entry.key(), b"test_key");
+        }
+
+        // Optionally, verify the order (if your implementation preserves insertion order)
+        // Here we expect pkey1 (ts=100) to appear before pkey2 (ts=200)
+        assert_eq!(results[0].pkey(), b"pkey1");
+        assert_eq!(results[1].pkey(), b"pkey2");
+
+        Ok(())
+    }
 }
