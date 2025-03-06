@@ -825,6 +825,32 @@ mod test_ops {
     }
 
     #[test]
+    fn test_insert_and_get_keys() {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(OpenAddrHashTable::new_with_bucket_num(c_key, mem_pool, 16));
+
+        // 1..100 inserts
+        for i in (0..100).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
+        }
+        for i in (0..100).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let a = hash_join_table.scan_key(&key, 2);
+            let t = a.unwrap().collect::<Vec<_>>();
+    
+            for m in t {
+                log_warn!("{:?} {:?}", String::from_utf8(m.0),  String::from_utf8(m.1));
+            }
+        }
+        
+       
+    }
+
+    #[test]
     fn test_double_update() {
         // Initialize the hash join table using the MvccIndex trait
         let mem_pool = get_in_mem_pool(); // You need to implement or import this function

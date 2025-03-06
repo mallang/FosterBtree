@@ -62,10 +62,10 @@ mod iterators {
     use crate::{
         bp::{MemPool, PageFrameKey},
         mvcc_index::{
-            hashtable_mu::simple_open_address_hash_table::{
+            hashtable_mu::{attached_container_page::attached_container_page::slot::get_slot_hash, simple_open_address_hash_table::{
                 simple_hash_common::{read_page, SUBTABLE_HASHER_SEED},
                 simple_hash_slot_page::TableSlotsPage,
-            },
+            }},
             Delta, DeltaEntry, MvccEntry, MvccIndex, Timestamp,
         },
         page::Page,
@@ -99,7 +99,7 @@ mod iterators {
             let bucket = table.buckets_rwlock.read().unwrap();
             let bucket_num = bucket.len() as u32;
             let initial_bucket_idxes = {
-                vec![(farmhash::hash32_with_seed(&option.1, SUBTABLE_HASHER_SEED) % (bucket_num))]
+                vec![(get_slot_hash(&option.1[..])) % (bucket_num)]
             };
             Self {
                 table: table.clone(),
