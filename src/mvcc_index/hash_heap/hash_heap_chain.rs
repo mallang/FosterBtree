@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::{
         atomic::{self, AtomicU32, Ordering},
         Arc,
@@ -24,6 +25,9 @@ pub struct ChainedHashHeapChain<T: MemPool> {
 
     first_page_id: AtomicU32,
     first_frame_id: AtomicU32,
+
+    last_page_id: AtomicU32,
+    last_frame_id: AtomicU32,
 }
 
 impl<T: MemPool> ChainedHashHeapChain<T> {
@@ -41,6 +45,8 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
             c_key,
             first_page_id: AtomicU32::new(first_page_id),
             first_frame_id: AtomicU32::new(first_frame_id),
+            last_page_id: AtomicU32::new(first_page_id),
+            last_frame_id: AtomicU32::new(first_frame_id),
         }
     }
 
@@ -50,6 +56,8 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
             c_key,
             first_page_id: AtomicU32::new(pid),
             first_frame_id: AtomicU32::new(u32::MAX),
+            last_page_id: AtomicU32::new(pid),
+            last_frame_id: AtomicU32::new(u32::MAX),
         }
     }
 
@@ -59,10 +67,25 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
         if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
             return Err(AccessMethodError::RecordTooLarge);
         }
-        let mut last_page = self.traverse_until_endofchain_for_insert(self.first_key(), entry)?;
+        let last_page_id = self.last_page_id.load(Ordering::Acquire);
+        let last_frame_id = self.last_frame_id.load(Ordering::Acquire);
+        let last_page_frame_key =
+            PageFrameKey::new_with_frame_id(self.c_key, last_page_id, last_frame_id);
+        let mut last_page = self.traverse_until_endofchain_for_insert(last_page_frame_key)?;
         log_trace!("Acquired write lock for page {}", last_page.get_id());
         match last_page.heap_insert(entry) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                if self.last_page_id.load(Ordering::Acquire) != last_page.get_id() {
+                    self.last_page_id
+                        .store(last_page.get_id(), Ordering::Release);
+                    self.last_frame_id
+                        .store(last_page.frame_id(), Ordering::Release);
+                } else if self.last_frame_id.load(Ordering::Acquire) != last_page.frame_id() {
+                    self.last_frame_id
+                        .store(last_page.frame_id(), Ordering::Release);
+                }
+                Ok(())
+            }
             Err(AccessMethodError::OutOfSpace) => {
                 log_debug!(
                     "Not enough space in page {}. Creating a new page.",
@@ -76,6 +99,10 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
                     last_page.get_id(),
                     new_page.get_id()
                 );
+                self.last_page_id
+                    .store(new_page.get_id(), Ordering::Release);
+                self.last_frame_id
+                    .store(new_page.frame_id(), Ordering::Release);
                 match new_page.upsert_history(entry) {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e),
@@ -88,12 +115,11 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
     fn traverse_until_endofchain_for_insert(
         &self,
         page_key: PageFrameKey,
-        entry: &MvccEntry,
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
-            let last_page = self.try_traverse_until_endofchain_for_insert(page_key, entry);
+            let last_page = self.try_traverse_until_endofchain_for_insert(page_key);
             match last_page {
                 Ok(last_page) => {
                     return Ok(last_page);
@@ -107,9 +133,6 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
                     );
                     std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                 }
-                Err(AccessMethodError::KeyDuplicate) => {
-                    return Err(AccessMethodError::KeyDuplicate);
-                }
                 Err(e) => {
                     panic!("Unexpected error: {:?}", e);
                 }
@@ -120,15 +143,10 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
     fn try_traverse_until_endofchain_for_insert(
         &self,
         page_key: PageFrameKey,
-        entry: &MvccEntry,
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         loop {
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                // if current_page.binary_search(entry.search_key()).0 {
-                //     return Err(AccessMethodError::KeyDuplicate);
-                // }
-                // TODO: check free space may can insert here later.
                 let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key,
                     next_page_id,
@@ -147,7 +165,6 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
                 }
                 current_page = next_page;
             } else {
-                // TODO: check key to avoid write lock in case of duplicate key
                 match current_page.try_upgrade(true) {
                     Ok(upgraded_page) => {
                         return Ok(upgraded_page);
@@ -205,123 +222,6 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
 
     pub fn update(&self, pkey: &[u8], entry: &MvccEntry) -> Result<(), AccessMethodError> {
         self.insert(entry)
-        // match self.traverse_to_endofchain_for_update(self.first_key(), pkey, entry) {
-        //     Ok(old_entry) => {
-        //         return Ok(old_entry);
-        //     }
-        //     Err(AccessMethodError::KeyNotFound) => {
-        //         return Err(AccessMethodError::KeyNotFound);
-        //     }
-        //     Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry)) => {
-        //         self.insert(entry).expect("Insert should succeed");
-        //         return Ok(old_entry);
-        //     }
-        //     Err(e) => {
-        //         return Err(e);
-        //     }
-        // }
-    }
-
-    fn traverse_to_endofchain_for_update(
-        &self,
-        page_key: PageFrameKey,
-        pkey: &[u8],
-        entry: &MvccEntry,
-    ) -> Result<MvccEntry, AccessMethodError> {
-        let base = 2;
-        let mut attempts = 0;
-        loop {
-            let find_page = self.try_traverse_to_endofchain_for_update(page_key, pkey, entry);
-            match find_page {
-                Ok(old_entry) => {
-                    return Ok(old_entry);
-                }
-                Err(AccessMethodError::PageWriteLatchFailed) => {
-                    attempts += 1;
-                    log_info!(
-                        "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
-                        attempts,
-                        u64::pow(base, attempts)
-                    );
-                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
-                }
-                Err(AccessMethodError::OutOfSpaceForUpdate(old_val)) => {
-                    log_debug!(
-                        "Should not happen in YCSB workload. key({}) old_value({})",
-                        pkey,
-                        old_val
-                    );
-                    return Err(AccessMethodError::OutOfSpaceForUpdate(old_val));
-                }
-                Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry)) => {
-                    return Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry));
-                }
-                Err(e) => {
-                    log_debug!("Error while traverse for upadate: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-    }
-
-    fn try_traverse_to_endofchain_for_update(
-        &self,
-        page_key: PageFrameKey,
-        pkey: &[u8],
-        entry: &MvccEntry,
-    ) -> Result<MvccEntry, AccessMethodError> {
-        let mut current_page = self.read_page(page_key);
-        loop {
-            let (found, slot_id) = current_page.search_slot(pkey);
-            if found {
-                match current_page.try_upgrade(true) {
-                    Ok(mut upgraded_page) => {
-                        match upgraded_page.update_at_slot_id(entry, slot_id) {
-                            Ok(old_entry) => {
-                                return Ok(old_entry);
-                            }
-                            Err(AccessMethodError::OutOfSpaceForUpdate(old_val)) => {
-                                log_debug!("Not enough space in page {}. Delete the key({}) and old_value({}), then insert updated key to next page", upgraded_page.get_id(), pkey, old_val);
-                                return Err(AccessMethodError::OutOfSpaceForUpdate(old_val));
-                            }
-                            Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry)) => {
-                                log_debug!("Not enough space in page {}. Delete the old entry({}) in the page, then insert updated new entry({}) to next page", upgraded_page.get_id(), old_entry, entry);
-                                return Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry));
-                            }
-                            Err(e) => {
-                                return Err(e);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        log_debug!("Failed to upgrade the page. Will retry");
-                        return Err(AccessMethodError::PageWriteLatchFailed);
-                    }
-                }
-            }
-            if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
-                if next_page.frame_id() != next_frame_id {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
-                }
-                current_page = next_page;
-            } else {
-                log_debug!("Key({}) not found for update.", pkey);
-                return Err(AccessMethodError::KeyNotFound);
-            }
-        }
     }
 
     pub fn delete(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
@@ -492,12 +392,20 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
         self.first_page_id.load(Ordering::Acquire)
     }
 
+    pub fn last_page_id(&self) -> PageId {
+        self.last_page_id.load(Ordering::Acquire)
+    }
+
     pub fn set_first_page_id(&self, pid: PageId) {
         self.first_page_id.store(pid, Ordering::Release);
     }
 
     pub fn first_frame_id(&self) -> u32 {
         self.first_frame_id.load(Ordering::Acquire)
+    }
+
+    pub fn last_frame_id(&self) -> u32 {
+        self.last_frame_id.load(Ordering::Acquire)
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
@@ -558,6 +466,34 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
 
     pub fn scan_all(self: &Arc<Self>) -> Result<ChainedHashHeapChainScanner<T>, AccessMethodError> {
         Ok(ChainedHashHeapChainScanner::new_full_scan(self))
+    }
+
+    /// Scan for all entries visible at `ts` and return only the best candidate
+    /// per primary key. The “best” is defined here as the entry with the highest
+    /// start timestamp that is visible at `ts`.
+    pub fn scan_unique(
+        self: &Arc<Self>,
+        ts: Timestamp,
+    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
+        // Get the full scanner (which iterates over all entries that pass the ts filter)
+        let scanner = self.scan(ts)?;
+        let mut best_candidates: HashMap<Vec<u8>, MvccEntry> = HashMap::new();
+
+        // Iterate over all entries from the chain.
+        for entry in scanner {
+            let key = entry.pkey().to_vec();
+            best_candidates
+                .entry(key)
+                .and_modify(|existing| {
+                    // Replace with this candidate if it has a higher start_ts.
+                    if entry.start_ts() > existing.start_ts() {
+                        *existing = entry.clone();
+                    }
+                })
+                .or_insert(entry);
+        }
+        // Return the best candidate for each key. If order matters you might want to sort them.
+        Ok(best_candidates.into_values().collect())
     }
 
     /// Traverse the chain and return a human‑readable status string.
@@ -652,6 +588,8 @@ impl<T: MemPool> Clone for ChainedHashHeapChain<T> {
             c_key: self.c_key,
             first_page_id: AtomicU32::new(self.first_page_id()),
             first_frame_id: AtomicU32::new(self.first_frame_id()),
+            last_page_id: AtomicU32::new(self.last_page_id()),
+            last_frame_id: AtomicU32::new(self.last_frame_id()),
         }
     }
 }
@@ -667,6 +605,7 @@ pub struct ChainedHashHeapChainScanner<T: MemPool> {
     initialized: bool,
     finished: bool,
 }
+
 impl<T: MemPool> ChainedHashHeapChainScanner<T> {
     pub fn new(chain: &Arc<ChainedHashHeapChain<T>>, ts: Timestamp) -> Self {
         Self {

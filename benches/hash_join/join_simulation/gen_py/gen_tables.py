@@ -9,10 +9,10 @@ import sys
 # 1) Default Constants
 # =============================================================================
 
-DEFAULT_NUM_TABLES = 5
-DEFAULT_NUM_ROWS = 100
+DEFAULT_NUM_TABLES = 2
+DEFAULT_NUM_ROWS = 10
 DEFAULT_PRIMARY_KEY_SIZE = 8        # Length of table primary key
-DEFAULT_JOIN_KEY_POOL_SIZE = 10    # Number of distinct keys in the pool
+DEFAULT_JOIN_KEY_POOL_SIZE = 2    # Number of distinct keys in the pool
 DEFAULT_JOIN_KEY_SIZE = 8           # Length of each key in the pool
 
 FIXED_VALUE_BASE_SIZE = 16          # Fixed base string length for value column
