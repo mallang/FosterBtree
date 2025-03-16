@@ -6,7 +6,7 @@ use std::{
 
 use crate::bp::{ContainerKey, MemPool};
 
-use super::{hashtable_mu::mvcc_hash_join_table::OpenAddrHashTable, Delta, MvccIndex, Timestamp};
+use super::{hybrid_hash::mvcc_hash_join_table::OpenAddrHashTable, Delta, MvccIndex, Timestamp};
 
 mod watermark {
     use std::collections::BTreeMap;

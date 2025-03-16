@@ -17,7 +17,7 @@
 
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HashHeapTable;
 use fbtree::mvcc_index::hash_join::chained_hash_table::ChainedHashTable;
-use fbtree::mvcc_index::hashtable_mu::mvcc_hash_join_table::OpenAddrHashTable;
+use fbtree::mvcc_index::hybrid_hash::mvcc_hash_join_table::OpenAddrHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
 use fbtree::prelude::*;
