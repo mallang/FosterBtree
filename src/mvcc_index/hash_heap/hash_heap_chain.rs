@@ -14,7 +14,7 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
-    mvcc_index::{hash_join::chained_hash_page::HashJoinPage, MvccEntry},
+    mvcc_index::{hash_join_page::HashJoinPage, MvccEntry},
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
     prelude::Timestamp,
 };

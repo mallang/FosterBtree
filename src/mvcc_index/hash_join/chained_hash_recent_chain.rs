@@ -15,11 +15,11 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
-    mvcc_index::{MvccEntry, TxId},
+    mvcc_index::{MvccEntry, TxId, hash_join_page::HashJoinPage},
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::{chained_hash_page::HashJoinPage, Timestamp};
+use super::Timestamp;
 
 pub struct ChainedHashRecentChain<T: MemPool> {
     mem_pool: Arc<T>,

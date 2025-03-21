@@ -2,7 +2,7 @@ use dashmap::mapref::entry;
 
 use super::{
     chained_hash_bucket_second::SecondBucket, chained_hash_history_chain::ChainedHashHistoryChain,
-    chained_hash_page::ChainedHashMetaPage, chained_hash_recent_chain::ChainedHashRecentChain,
+    chained_hash_recent_chain::ChainedHashRecentChain,
     Timestamp,
 };
 
@@ -12,6 +12,7 @@ use crate::{
     mvcc_index::{MvccEntry, TxId},
     page::PageId,
     prelude::AccessMethodError,
+    mvcc_index::hash_join_page::ChainedHashMetaPage,
 };
 
 use std::{

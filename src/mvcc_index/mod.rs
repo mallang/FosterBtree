@@ -2,6 +2,8 @@ pub mod hash_heap;
 pub mod hash_join;
 pub mod hybrid_hash;
 pub mod rust_hash_map;
+pub mod linear_hash;
+pub mod hash_join_page;
 pub mod txn_handle;
 pub type TxId = u64; // Transaction ID
 

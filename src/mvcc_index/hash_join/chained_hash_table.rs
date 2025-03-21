@@ -4,6 +4,7 @@ use crate::{
     mvcc_index::{Delta, MvccEntry, MvccIndex},
     page::{Page, PageId},
     prelude::AccessMethodError,
+    mvcc_index::hash_join_page::ChainedHashMetaPage,
 };
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
@@ -18,7 +19,6 @@ use std::{
 use super::{
     chained_hash_bucket_first::FirstBucket,
     chained_hash_history_chain::{ChainedHashHistoryChain, ChainedHashHistoryChainScanner},
-    chained_hash_page::ChainedHashMetaPage,
     chained_hash_recent_chain::{ChainedHashRecentChain, ChainedHashRecentChainScanner},
     Timestamp, TxId, TxInfo,
 };

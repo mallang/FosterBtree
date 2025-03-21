@@ -12,12 +12,10 @@ use crate::{
     log_debug, log_trace, log_warn,
     mvcc_index::MvccEntry,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+    mvcc_index::hash_join_page::HashJoinPage,
 };
 
-use super::{
-    chained_hash_page::{slot, HashJoinPage},
-    Timestamp,
-};
+use super::Timestamp;
 
 pub static HCHAIN_PAGE_READ_COUNT: AtomicU64 = AtomicU64::new(0);
 
