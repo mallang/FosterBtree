@@ -734,4 +734,34 @@ mod test_ops {
         }
         assert_eq!(item_count, 0);
     }
+
+    #[test]
+    fn test_scan_key() {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
+
+        // 1..100 inserts
+        for i in (0..1000).into_iter() {
+            for j in (0..10).into_iter() {
+                let key = format!("key{}", i).into_bytes();
+                let pkey = format!("pkey{}", i * 100 + j).into_bytes();
+                let value = format!("value{}", i * 100 + j).into_bytes();
+                hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
+            }
+        }
+
+        for i in (0..1000).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let a = hash_join_table.scan_key(&key, 2);
+            let t = a.unwrap().collect::<Vec<_>>();
+
+            for m in t {
+                // log_warn!("{:?} {:?}", String::from_utf8(m.0), String::from_utf8(m.1));
+                assert!(m.0[4..].starts_with(format!("{}", i).as_bytes()) || i == 0, "{:?}, i:{i}", m.0);
+                assert_eq!(m.1[5..], m.0[4..]);
+            }
+            // log_warn!("{:?} ends -----------------", key);
+        }
+    }
 }
