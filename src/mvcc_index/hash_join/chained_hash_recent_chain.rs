@@ -15,7 +15,7 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
-    mvcc_index::{MvccEntry, TxId, hash_join_page::HashJoinPage},
+    mvcc_index::{hash_join_page::HashJoinPage, MvccEntry, TxId},
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -831,11 +831,9 @@ impl<T: MemPool> Iterator for ChainedHashRecentChainScanner<T> {
                     }
                 }
             } else if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page: FrameReadGuard<'_> = self.chain.read_page(PageFrameKey::new_with_frame_id(
-                    self.chain.c_key,
-                    next_pid,
-                    next_fid,
-                ));
+                let next_page: FrameReadGuard<'_> = self.chain.read_page(
+                    PageFrameKey::new_with_frame_id(self.chain.c_key, next_pid, next_fid),
+                );
                 let next_page = unsafe {
                     std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
                 };

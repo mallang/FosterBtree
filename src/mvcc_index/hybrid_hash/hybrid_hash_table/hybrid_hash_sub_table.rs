@@ -15,7 +15,11 @@ use crate::{
     // lockmanager::{LockManager, Permissions, TransactionId, ValueId},
     log_warn,
     mvcc_index::{
-        hash_common::{get_hashed_bucket_index, read_page, try_read_page, try_write_page, write_page, BucketEntry}, hybrid_hash::{
+        hash_common::{
+            get_hashed_bucket_index, read_page, try_read_page, try_write_page, write_page,
+            BucketEntry,
+        },
+        hybrid_hash::{
             attached_container_page::attached_container_page::{
                 slot::{
                     get_remain_key, get_remain_pkey, get_slot_hash, InterPageLoc, Slot, SlotMeta,
@@ -24,8 +28,8 @@ use crate::{
                 AttachedPage,
             },
             hash_join_table_common::HashTableAccessMethodError,
-            
-        }, DeltaEntry, MvccEntry, MvccIndex, Timestamp
+        },
+        DeltaEntry, MvccEntry, MvccIndex, Timestamp,
     },
     page::{Page, PageId},
     prelude::AccessMethodError,
@@ -55,7 +59,12 @@ mod iterators {
     use crate::{
         bp::{MemPool, PageFrameKey},
         mvcc_index::{
-            hash_common::read_page, hybrid_hash::{attached_container_page::attached_container_page::slot::get_slot_hash, hybrid_hash_table::hybrid_hash_slot_page::TableSlotsPage}, Delta, DeltaEntry, MvccEntry, MvccIndex, Timestamp
+            hash_common::read_page,
+            hybrid_hash::{
+                attached_container_page::attached_container_page::slot::get_slot_hash,
+                hybrid_hash_table::hybrid_hash_slot_page::TableSlotsPage,
+            },
+            Delta, DeltaEntry, MvccEntry, MvccIndex, Timestamp,
         },
         page::Page,
     };
@@ -87,9 +96,7 @@ mod iterators {
         pub fn new(table: &Arc<DHashSubTable<T>>, option: (Timestamp, Vec<u8>)) -> Self {
             let bucket = table.buckets_rwlock.read().unwrap();
             let bucket_num = bucket.len() as u32;
-            let initial_bucket_idxes = {
-                vec![(get_slot_hash(&option.1[..])) % (bucket_num)]
-            };
+            let initial_bucket_idxes = { vec![(get_slot_hash(&option.1[..])) % (bucket_num)] };
             Self {
                 table: table.clone(),
                 creteria: option,

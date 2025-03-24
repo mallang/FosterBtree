@@ -1,7 +1,12 @@
 use core::panic;
 use std::sync::Arc;
 
-use crate::{bp::{ContainerKey, MemPool}, log_warn, mvcc_index::{hash_common::DEFAULT_BUCKET_NUM, MvccEntry, MvccIndex}, prelude::AccessMethodError};
+use crate::{
+    bp::{ContainerKey, MemPool},
+    log_warn,
+    mvcc_index::{hash_common::DEFAULT_BUCKET_NUM, MvccEntry, MvccIndex},
+    prelude::AccessMethodError,
+};
 
 use super::{iterators::LinearSubTableScanner, linear_sub_table::LinearSubTable};
 
@@ -15,8 +20,10 @@ pub struct LinearHashTable<T: MemPool> {
 
 impl<T: MemPool + 'static> LinearHashTable<T> {
     pub fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, bucket_num: usize) -> Self {
-        let recent = LinearSubTable::new_with_bucket_num(mem_pool.clone(), c_key.clone(), bucket_num);
-        let history = LinearSubTable::new_with_bucket_num(mem_pool.clone(), c_key.clone(), bucket_num);
+        let recent =
+            LinearSubTable::new_with_bucket_num(mem_pool.clone(), c_key.clone(), bucket_num);
+        let history =
+            LinearSubTable::new_with_bucket_num(mem_pool.clone(), c_key.clone(), bucket_num);
         Self {
             mem_pool,
             c_key,
@@ -33,25 +40,30 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     type Error = AccessMethodError;
 
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
-        where
-            Self: Sized {
-        Ok(Self::new_with_bucket_num(c_key, mem_pool, DEFAULT_BUCKET_NUM))
+    where
+        Self: Sized,
+    {
+        Ok(Self::new_with_bucket_num(
+            c_key,
+            mem_pool,
+            DEFAULT_BUCKET_NUM,
+        ))
     }
 
     fn insert(
-            &self,
-            key: Self::Key,
-            pkey: Self::PKey,
-            ts: crate::prelude::Timestamp,
-            tx_id: crate::mvcc_index::TxId,
-            value: Self::Value,
-        ) -> Result<(), Self::Error> {
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: crate::prelude::Timestamp,
+        tx_id: crate::mvcc_index::TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         match self.recent.insert(&entry) {
             Ok(_) => Ok(()),
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
-            },
+            }
         }
     }
 
@@ -77,7 +89,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
                 panic!("unexpected error: {:?}", e);
             }
         };
-        
+
         match get_entry_res {
             Ok(entry) => Ok(Some(entry.value)),
             Err(AccessMethodError::KeyNotFound) => Ok(None),
@@ -99,13 +111,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
                 old_res.set_end_ts(&ts);
                 self.history.insert_history(&mut old_res).unwrap();
                 return Ok(());
-            },
+            }
             Err(AccessMethodError::KeyNotFound) => {
                 return Err(AccessMethodError::KeyNotFound);
-            },
+            }
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
-            },
+            }
         }
     }
 
@@ -120,22 +132,26 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
             Ok(mut old_entry) => {
                 old_entry.set_end_ts(&ts);
                 self.history.insert_history(&mut old_entry).unwrap();
-                return Ok(())
-            },
-            Err(AccessMethodError::KeyFoundButInvalidTimestamp | AccessMethodError::KeyNotFound) => {
-                return Ok(())
+                return Ok(());
             }
+            Err(
+                AccessMethodError::KeyFoundButInvalidTimestamp | AccessMethodError::KeyNotFound,
+            ) => return Ok(()),
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
-            },
+            }
         }
     }
 
     fn scan(
-            &self,
-            ts: crate::prelude::Timestamp,
-        ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error> {
-        todo!()
+        &self,
+        ts: crate::prelude::Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        let recent_iter = LinearSubTableScanner::new(self.recent.clone(), Some(ts));
+        Ok(Box::new(
+            recent_iter.into_iter().map(|e| (e.key, e.pkey, e.value)),
+        ))
     }
 
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
@@ -146,10 +162,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     }
 
     fn scan_key(
-            &self,
-            key: &Self::Key,
-            ts: crate::prelude::Timestamp,
-        ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
+        &self,
+        key: &Self::Key,
+        ts: crate::prelude::Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         todo!()
     }
 
@@ -158,13 +174,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         from_ts: crate::prelude::Timestamp,
         to_ts: crate::prelude::Timestamp,
     ) -> Result<
-        Box<dyn Iterator<Item = (Self::Key, Self::PKey, crate::mvcc_index::Delta<Self::Value>)> + Send>,
+        Box<
+            dyn Iterator<Item = (Self::Key, Self::PKey, crate::mvcc_index::Delta<Self::Value>)>
+                + Send,
+        >,
         Self::Error,
     > {
         todo!()
     }
-
-
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -183,11 +200,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     }
 }
 
-
 mod tests {
     use std::sync::Arc;
 
-    use crate::{bp::{ContainerKey, InMemPool}, mvcc_index::MvccIndex};
+    use crate::{
+        bp::{ContainerKey, InMemPool},
+        mvcc_index::MvccIndex,
+    };
 
     use super::LinearHashTable;
 
@@ -238,34 +257,34 @@ mod tests {
         // 4) Delete an entry
         index.delete(b"key2", b"pkey2", 100, 2)?;
 
-        // // 5) Now scan at ts=200
-        // let mut scan_iter = index.scan(200)?;
-        // let mut scanned = Vec::new();
-        // while let Some((key, pkey, value)) = scan_iter.next() {
-        //     println!("Scanned: key={:?}, pkey={:?}, value={:?}", key, pkey, value);
-        //     scanned.push((key, pkey, value));
-        // }
+        // 5) Now scan at ts=200
+        let mut scan_iter = index.scan(200)?;
+        let mut scanned = Vec::new();
+        while let Some((key, pkey, value)) = scan_iter.next() {
+            // println!("Scanned: key={:?}, pkey={:?}, value={:?}", key, pkey, value);
+            scanned.push((key, pkey, value));
+        }
 
-        // // 6) Verify we see "value1" for key1/pkey1, "value3_updated" for key1/pkey3,
-        // //    and do *not* see key2/pkey2.
-        // assert!(
-        //     scanned
-        //         .iter()
-        //         .any(|(k, pk, v)| k == b"key1" && pk == b"pkey1" && v == b"value1"),
-        //     "Should still have key1/pkey1/value1"
-        // );
-        // assert!(
-        //     scanned
-        //         .iter()
-        //         .any(|(k, pk, v)| k == b"key1" && pk == b"pkey3" && v == b"value3_updated"),
-        //     "Should see updated value3 for key1/pkey3"
-        // );
-        // assert!(
-        //     !scanned
-        //         .iter()
-        //         .any(|(k, pk, _)| k == b"key2" && pk == b"pkey2"),
-        //     "Deleted key2/pkey2 should not appear at ts=200"
-        // );
+        // 6) Verify we see "value1" for key1/pkey1, "value3_updated" for key1/pkey3,
+        //    and do *not* see key2/pkey2.
+        assert!(
+            scanned
+                .iter()
+                .any(|(k, pk, v)| k == b"key1" && pk == b"pkey1" && v == b"value1"),
+            "Should still have key1/pkey1/value1"
+        );
+        assert!(
+            scanned
+                .iter()
+                .any(|(k, pk, v)| k == b"key1" && pk == b"pkey3" && v == b"value3_updated"),
+            "Should see updated value3 for key1/pkey3"
+        );
+        assert!(
+            !scanned
+                .iter()
+                .any(|(k, pk, _)| k == b"key2" && pk == b"pkey2"),
+            "Deleted key2/pkey2 should not appear at ts=200"
+        );
 
         // Done
         Ok(())
@@ -277,8 +296,4 @@ mod tests {
         let index = LinearHashTable::create(ContainerKey::new(1, 1), pool).unwrap();
         test_basic_index_ops(&index).unwrap();
     }
-
-
-
 }
-    

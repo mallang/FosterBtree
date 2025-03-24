@@ -1,11 +1,11 @@
+pub mod hash_common;
 pub mod hash_heap;
 pub mod hash_join;
-pub mod hybrid_hash;
-pub mod rust_hash_map;
-pub mod linear_hash;
 pub mod hash_join_page;
+pub mod hybrid_hash;
+pub mod linear_hash;
+pub mod rust_hash_map;
 pub mod txn_handle;
-pub mod hash_common;
 
 mod hash_join_unittest;
 
@@ -36,7 +36,7 @@ pub struct TxInfo {
     pub status: TxStatus,
 }
 
-#[derive( Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MvccEntry {
     pub key: Vec<u8>,
     pub pkey: Vec<u8>,
@@ -287,4 +287,5 @@ pub enum HashTableType {
     OpenAddressing,
     HeapTable,
     RustHashMap,
+    LinearHashTable,
 }

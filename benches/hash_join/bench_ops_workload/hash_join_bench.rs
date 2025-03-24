@@ -1,6 +1,7 @@
 use dashmap::mapref::entry;
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HashHeapTable;
 use fbtree::mvcc_index::hybrid_hash::mvcc_hash_join_table::OpenAddrHashTable;
+use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
 use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
@@ -88,29 +89,28 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "-t" => {
                 if i + 1 < args.len() {
-                    if let Ok(type_name) = args[i + 1].parse::<String>() {
-                        match type_name.as_str() {
-                            "open_address" => {
-                                hash_table_t = HashTableType::OpenAddressing;
-                            }
-                            "chain" => {
-                                hash_table_t = HashTableType::Chained;
-                            }
-                            "heap" => {
-                                hash_table_t = HashTableType::HeapTable;
-                            }
-                            "rust" => {
-                                hash_table_t = HashTableType::RustHashMap;
-                            }
-                            _ => {
-                                eprintln!("Warning: Invalid hash table type, ignoring...");
-                            }
+                    let Ok(type_name) = args[i + 1].parse::<String>();
+                    match type_name.as_str() {
+                        "open_address" => {
+                            hash_table_t = HashTableType::OpenAddressing;
                         }
-                        i += 2;
-                    } else {
-                        eprintln!("Warning: Invalid number after -t, ignoring...");
-                        i += 2;
+                        "chain" => {
+                            hash_table_t = HashTableType::Chained;
+                        }
+                        "heap" => {
+                            hash_table_t = HashTableType::HeapTable;
+                        }
+                        "rust" => {
+                            hash_table_t = HashTableType::RustHashMap;
+                        }
+                        "linear" => {
+                            hash_table_t = HashTableType::LinearHashTable;
+                        }
+                        _ => {
+                            eprintln!("Warning: Invalid hash table type, ignoring...");
+                        }
                     }
+                    i += 2;
                 } else {
                     eprintln!("Warning: -n specified without a following number, ignoring...");
                     i += 1;
@@ -131,7 +131,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // || scan_ops_file.is_none()
     {
         eprintln!("Usage:");
-        eprintln!("  {} -df <data_file> -of <ops_file> -rdf <recent_data_file> -hdf <history_data_file> -sof <scan_ops_file> -t <open_address/chain/heap> [-n <num_ops>] ", args[0]);
+        eprintln!("  {} -df <data_file> -of <ops_file> -rdf <recent_data_file> -hdf <history_data_file> -sof <scan_ops_file> -t <open_address/chain/heap/linear> [-n <num_ops>] ", args[0]);
         return Ok(());
     }
 
@@ -179,6 +179,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         HashTableType::RustHashMap => {
             Box::new(MvccRustHashMap::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
+        }
+        HashTableType::LinearHashTable => {
+            Box::new(LinearHashTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
         }
     };
 

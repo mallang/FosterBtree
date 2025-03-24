@@ -6,12 +6,14 @@ use fbtree::mvcc_index::hash_join::chained_hash_bucket_second::{
 use fbtree::mvcc_index::hash_join::chained_hash_history_chain::HCHAIN_PAGE_READ_COUNT;
 use fbtree::mvcc_index::hash_join_page::HISTORY_SLOT_CMP_CNT;
 use fbtree::mvcc_index::hybrid_hash::mvcc_hash_join_table::OpenAddrHashTable;
+use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
 use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
+use std::hash::Hash;
 use std::str::from_utf8;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -81,6 +83,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             "rust" => {
                                 hash_table_t = HashTableType::RustHashMap;
+                            }
+                            "linear" => {
+                                hash_table_t = HashTableType::LinearHashTable;
                             }
                             _ => {
                                 eprintln!("Warning: Invalid hash table type, ignoring...");
@@ -159,6 +164,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         HashTableType::RustHashMap => {
             Box::new(MvccRustHashMap::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+        }
+        HashTableType::LinearHashTable => {
+            Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
     };
 

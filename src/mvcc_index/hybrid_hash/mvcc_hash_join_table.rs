@@ -841,13 +841,11 @@ mod test_ops {
             let key = format!("key{}", i).into_bytes();
             let a = hash_join_table.scan_key(&key, 2);
             let t = a.unwrap().collect::<Vec<_>>();
-    
+
             for m in t {
-                log_warn!("{:?} {:?}", String::from_utf8(m.0),  String::from_utf8(m.1));
+                log_warn!("{:?} {:?}", String::from_utf8(m.0), String::from_utf8(m.1));
             }
         }
-        
-       
     }
 
     #[test]

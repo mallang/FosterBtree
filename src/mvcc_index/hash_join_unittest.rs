@@ -1,4 +1,3 @@
-
 #[cfg(test)]
 mod test_ops {
     use crate::bp::{get_in_mem_pool, ContainerKey, InMemPool};
@@ -18,10 +17,10 @@ mod test_ops {
     // where
     //     I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>
     //     {}
-    
+
     // fn test_simple_insert<I>(index: &I)
     // where
-    //     I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>> 
+    //     I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>
     // {
     //     index.insert(vec![1], vec![1], 1, 1, vec![1])
     //         .unwrap();
@@ -34,7 +33,7 @@ mod test_ops {
     //     let get_result = index.get(&[1], &[1], 2);
     //     assert_eq!(get_result.unwrap().unwrap(), &[1]);
     // }
-    
+
     #[test]
     fn simple_insert() {
         let mem_pool = get_in_mem_pool();
@@ -440,8 +439,7 @@ mod test_ops {
         for i in 0..1000 {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
-            let get_result =
-                hash_join_table.get(&key, &pkey, 2);
+            let get_result = hash_join_table.get(&key, &pkey, 2);
             assert_eq!(get_result.unwrap(), None);
         }
 
@@ -525,7 +523,6 @@ mod test_ops {
         assert_eq!(cnt, 2000);
     }
 
-
     #[test]
     fn test_insert_and_scan() {
         let mem_pool = get_in_mem_pool();
@@ -569,13 +566,11 @@ mod test_ops {
             let key = format!("key{}", i).into_bytes();
             let a = hash_join_table.scan_key(&key, 2);
             let t = a.unwrap().collect::<Vec<_>>();
-    
+
             for m in t {
-                log_warn!("{:?} {:?}", String::from_utf8(m.0),  String::from_utf8(m.1));
+                log_warn!("{:?} {:?}", String::from_utf8(m.0), String::from_utf8(m.1));
             }
         }
-        
-       
     }
 
     #[test]

@@ -10,9 +10,9 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_trace, log_warn,
+    mvcc_index::hash_join_page::HashJoinPage,
     mvcc_index::MvccEntry,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
-    mvcc_index::hash_join_page::HashJoinPage,
 };
 
 use super::Timestamp;

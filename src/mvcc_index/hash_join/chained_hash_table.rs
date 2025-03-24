@@ -1,10 +1,10 @@
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
+    mvcc_index::hash_join_page::ChainedHashMetaPage,
     mvcc_index::{Delta, MvccEntry, MvccIndex},
     page::{Page, PageId},
     prelude::AccessMethodError,
-    mvcc_index::hash_join_page::ChainedHashMetaPage,
 };
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},

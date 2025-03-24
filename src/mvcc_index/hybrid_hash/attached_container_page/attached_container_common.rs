@@ -2,14 +2,16 @@ use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hash_common::{read_page, write_page}, hybrid_hash::{
+        hash_common::{read_page, write_page},
+        hybrid_hash::{
             attached_container_page::attached_container_page::{
                 slot::{InterPageLoc, Slot},
                 CommittedRecord, WritePageLocAgent,
             },
             hash_join_table_common::HashTableAccessMethodError,
             hybrid_hash_table::hybrid_hash_slot_page::TableSlotsPage,
-        }, Delta, MvccEntry
+        },
+        Delta, MvccEntry,
     },
 };
 

@@ -95,7 +95,7 @@ harness = false
 
 [[bin]]
 name = "hash_join_bench"
-path = "benches/hash_join/hash_join_bench.rs"
+path = "benches/hash_join/bench_ops_workload/hash_join_bench.rs"
 
 [[bin]]
 name = "hash_join_bench_mixed_get"

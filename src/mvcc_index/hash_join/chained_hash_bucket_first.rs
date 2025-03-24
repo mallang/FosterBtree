@@ -2,17 +2,16 @@ use dashmap::mapref::entry;
 
 use super::{
     chained_hash_bucket_second::SecondBucket, chained_hash_history_chain::ChainedHashHistoryChain,
-    chained_hash_recent_chain::ChainedHashRecentChain,
-    Timestamp,
+    chained_hash_recent_chain::ChainedHashRecentChain, Timestamp,
 };
 
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
+    mvcc_index::hash_join_page::ChainedHashMetaPage,
     mvcc_index::{MvccEntry, TxId},
     page::PageId,
     prelude::AccessMethodError,
-    mvcc_index::hash_join_page::ChainedHashMetaPage,
 };
 
 use std::{

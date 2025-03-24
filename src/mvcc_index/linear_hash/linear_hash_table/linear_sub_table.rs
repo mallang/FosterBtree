@@ -1,10 +1,20 @@
 use core::panic;
-use std::{sync::{atomic::AtomicU32, Arc}};
-
+use std::sync::{atomic::AtomicU32, Arc};
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 
-use crate::{bp::{ContainerKey, MemPool, PageFrameKey}, mvcc_index::{hash_common::{get_hashed_bucket_index, read_page, write_page, BucketEntry, DEFAULT_BUCKET_NUM}, hash_join_page::{self, HashJoinPage}, MvccEntry, MvccIndex}, page::{self, Page, PageId}, prelude::{AccessMethodError, Timestamp}};
+use crate::{
+    bp::{ContainerKey, MemPool, PageFrameKey},
+    mvcc_index::{
+        hash_common::{
+            get_hashed_bucket_index, read_page, write_page, BucketEntry, DEFAULT_BUCKET_NUM,
+        },
+        hash_join_page::{self, HashJoinPage},
+        MvccEntry, MvccIndex,
+    },
+    page::{self, Page, PageId},
+    prelude::{AccessMethodError, Timestamp},
+};
 
 pub struct LinearSubTable<T: MemPool> {
     pub(super) mem_pool: Arc<T>,
@@ -12,7 +22,6 @@ pub struct LinearSubTable<T: MemPool> {
 
     pub(super) buckets: RwLock<Vec<BucketEntry>>,
 }
-
 
 impl<T: MemPool + 'static> LinearSubTable<T> {
     pub fn new(mem_pool: Arc<T>, c_key: ContainerKey) -> Self {
@@ -47,7 +56,8 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             return;
         }
 
-        let new_table = Self::new_with_bucket_num(self.mem_pool.clone(), self.c_key, new_size as usize);
+        let new_table =
+            Self::new_with_bucket_num(self.mem_pool.clone(), self.c_key, new_size as usize);
         for bucket in guard.iter() {
             let pid = bucket.page_id();
             let fid = bucket.frame_id();
@@ -61,24 +71,28 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
                         } else {
                             new_table.insert_history(&mut e).unwrap();
                         }
-                    },
+                    }
                     Err(e) => {
                         panic!("unexpected error: {:?}", e);
-                    },
+                    }
                 }
             }
         }
 
         guard.clear();
 
-        for bucket in  new_table.buckets.into_inner() {
+        for bucket in new_table.buckets.into_inner() {
             guard.push(bucket);
         }
 
         assert_eq!(guard.len(), new_size as usize);
     }
 
-    fn _insert_with_guard(&self, entry: &MvccEntry, guard: &Vec<BucketEntry>) -> Result<(), AccessMethodError>{
+    fn _insert_with_guard(
+        &self,
+        entry: &MvccEntry,
+        guard: &Vec<BucketEntry>,
+    ) -> Result<(), AccessMethodError> {
         let readguard = guard;
         let bucket_idx = Self::get_bucket_index(&readguard, &entry.key);
         let threadold = Self::get_ite_threshold(&readguard);
@@ -114,7 +128,11 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
         return Err(AccessMethodError::Rehash(buckets_num as u32 * 2));
     }
 
-    fn _upsert_history_with_guard(&self, entry: &mut MvccEntry, guard: &Vec<BucketEntry>) -> Result<(), AccessMethodError> {
+    fn _upsert_history_with_guard(
+        &self,
+        entry: &mut MvccEntry,
+        guard: &Vec<BucketEntry>,
+    ) -> Result<(), AccessMethodError> {
         let readguard = guard;
         let start_bucket_idx = Self::get_bucket_index(&readguard, &entry.key);
         let threadold = Self::get_ite_threshold(&readguard);
@@ -162,7 +180,7 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             }
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
-            },
+            }
         }
     }
 
@@ -173,16 +191,22 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             Err(AccessMethodError::Rehash(new_size)) => {
                 let mut write_guard = RwLockUpgradableReadGuard::upgrade(readguard);
                 self._rehash(new_size, &mut *write_guard, false);
-                self._upsert_history_with_guard(entry, &*write_guard).unwrap();
+                self._upsert_history_with_guard(entry, &*write_guard)
+                    .unwrap();
                 Ok(())
             }
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
-            },
+            }
         }
     }
 
-    pub fn get(&self, key: &[u8], pkey: &[u8], ts: crate::prelude::Timestamp) -> Result<MvccEntry, AccessMethodError> {
+    pub fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: crate::prelude::Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
         let readguard = self.buckets.read();
         let bucket_idx = Self::get_bucket_index(&readguard, key);
         // let threadold = Self::get_ite_threshold(&readguard);
@@ -220,7 +244,12 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
         Err(AccessMethodError::KeyNotFound)
     }
 
-    pub fn get_history(&self, key: &[u8], pkey: &[u8], ts: crate::prelude::Timestamp) -> Result<MvccEntry, AccessMethodError> {
+    pub fn get_history(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: crate::prelude::Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
         let readguard = self.buckets.read();
         let start_bucket_idx = Self::get_bucket_index(&readguard, key);
         // let threadold = Self::get_ite_threshold(&readguard);
@@ -272,10 +301,14 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             let search_result = <Page as HashJoinPage>::search_slot(&mut *write_page, pkey);
             if search_result.0 {
                 // find the updated entry
-                match <Page as HashJoinPage>::update_at_slot_id(&mut write_page, entry, search_result.1) {
+                match <Page as HashJoinPage>::update_at_slot_id(
+                    &mut write_page,
+                    entry,
+                    search_result.1,
+                ) {
                     Ok(old_entry) => return Ok(old_entry),
                     Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry)) => {
-                        // has deleted old, 
+                        // has deleted old,
                         // insert new and return old
                         drop(write_page);
 
@@ -289,7 +322,7 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
                             }
                             Err(e) => {
                                 panic!("unexpected error: {:?}", e);
-                            },
+                            }
                         }
                     }
                     Err(AccessMethodError::KeyNotFound) => {
@@ -317,11 +350,16 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             }
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
-            },
+            }
         }
     }
 
-    fn _delete(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<MvccEntry, AccessMethodError> {
+    fn _delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
         let readguard = self.buckets.read();
         let bucket_idx = Self::get_bucket_index(&readguard, key);
         let buckets = &readguard;
@@ -335,7 +373,11 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             let search_result = <Page as HashJoinPage>::search_slot(&mut *write_page, pkey);
             if search_result.0 {
                 // find the updated entry
-                match <Page as HashJoinPage>::delete_at_slot_id(&mut write_page, &ts, search_result.1) {
+                match <Page as HashJoinPage>::delete_at_slot_id(
+                    &mut write_page,
+                    &ts,
+                    search_result.1,
+                ) {
                     Ok(old_entry) => return Ok(old_entry),
                     Err(AccessMethodError::KeyFoundButInvalidTimestamp) => {
                         return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
@@ -354,7 +396,12 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
         return Err(AccessMethodError::KeyNotFound);
     }
 
-    pub fn delete(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Result<MvccEntry, AccessMethodError> {
+    pub fn delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
         match self._delete(key, pkey, ts) {
             Ok(old_entry) => Ok(old_entry),
             Err(AccessMethodError::KeyFoundButInvalidTimestamp) => {
@@ -365,9 +412,7 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             }
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
-            },
+            }
         }
     }
-
 }
-

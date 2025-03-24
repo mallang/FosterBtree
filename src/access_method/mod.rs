@@ -22,7 +22,7 @@ pub enum AccessMethodError {
     OutOfSpaceForMvccUpdate(MvccEntry),
     NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
     InvalidTimestamp,               // For MVCC
-    Rehash(u32), // new bucket num
+    Rehash(u32),                    // new bucket num
     Other(String),
 }
 
