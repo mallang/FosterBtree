@@ -831,7 +831,7 @@ impl<T: MemPool> Iterator for ChainedHashRecentChainScanner<T> {
                     }
                 }
             } else if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = self.chain.read_page(PageFrameKey::new_with_frame_id(
+                let next_page: FrameReadGuard<'_> = self.chain.read_page(PageFrameKey::new_with_frame_id(
                     self.chain.c_key,
                     next_pid,
                     next_fid,

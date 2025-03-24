@@ -126,23 +126,6 @@ impl<T: MemPool> ChainedHashTable<T> {
         let second_table = &self.bucket_entries[index];
 
         second_table.get(pkey, ts)
-
-        // let (recent_chain, history_chain) = &self.bucket_entries[index];
-
-        // let recent_val = recent_chain.get(key, pkey, ts);
-        // match recent_val {
-        //     Ok(val) => Ok(val),
-        //     Err(AccessMethodError::KeyNotFound) => Err(AccessMethodError::KeyNotFound),
-        //     Err(AccessMethodError::KeyFoundButInvalidTimestamp) => {
-        //         let history_val = history_chain.get(key, pkey, ts);
-        //         match history_val {
-        //             Ok(val) => Ok(val),
-        //             Err(AccessMethodError::KeyNotFound) => Err(AccessMethodError::KeyNotFound),
-        //             Err(e) => Err(e),
-        //         }
-        //     }
-        //     Err(e) => Err(e),
-        // }
     }
 
     /// Updates an existing key-value pair in the hash join table.

@@ -22,6 +22,7 @@ pub enum AccessMethodError {
     OutOfSpaceForMvccUpdate(MvccEntry),
     NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
     InvalidTimestamp,               // For MVCC
+    Rehash(u32), // new bucket num
     Other(String),
 }
 
@@ -112,6 +113,9 @@ impl fmt::Display for AccessMethodError {
             AccessMethodError::InvalidTimestamp => write!(f, "Invalid timestamp"),
             AccessMethodError::Other(msg) => write!(f, "{}", msg),
             AccessMethodError::NotEnoughMemory => write!(f, "Not enough memory"),
+            AccessMethodError::Rehash(new_bucket_num) => {
+                write!(f, "Rehash to new bucket num: {}", new_bucket_num)
+            }
         }
     }
 }

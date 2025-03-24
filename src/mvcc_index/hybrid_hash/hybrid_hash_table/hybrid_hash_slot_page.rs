@@ -126,15 +126,13 @@ use crate::{
     bp::{ContainerKey, MemPool, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hybrid_hash::{
+        hash_common::read_page, hybrid_hash::{
             attached_container_page::{
                 attached_container_common::{get_all_versions, get_delta, get_le_ts_version},
                 attached_container_page::AttachedPage,
             },
             hash_join_table_common::HashTableAccessMethodError,
-            hybrid_hash_table::hybrid_hash_common::read_page,
-        },
-        Delta, DeltaEntry, MvccEntry, Timestamp,
+        }, Delta, DeltaEntry, MvccEntry, Timestamp
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };

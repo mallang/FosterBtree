@@ -15,7 +15,7 @@ use crate::{
     // lockmanager::{LockManager, Permissions, TransactionId, ValueId},
     log_warn,
     mvcc_index::{
-        hybrid_hash::{
+        hash_common::{get_hashed_bucket_index, read_page, try_read_page, try_write_page, write_page, BucketEntry}, hybrid_hash::{
             attached_container_page::attached_container_page::{
                 slot::{
                     get_remain_key, get_remain_pkey, get_slot_hash, InterPageLoc, Slot, SlotMeta,
@@ -24,21 +24,14 @@ use crate::{
                 AttachedPage,
             },
             hash_join_table_common::HashTableAccessMethodError,
-            hybrid_hash_table::hybrid_hash_common::read_page,
-        },
-        DeltaEntry, MvccEntry, MvccIndex, Timestamp,
+            
+        }, DeltaEntry, MvccEntry, MvccIndex, Timestamp
     },
     page::{Page, PageId},
     prelude::AccessMethodError,
 };
 
-use super::{
-    hybrid_hash_common::{
-        get_hashed_bucket_index, try_read_page, try_write_page, write_page, BucketEntry,
-        SUBTABLE_HASHER_SEED,
-    },
-    hybrid_hash_slot_page::{TableDataPageBase, TableSlotsPage},
-};
+use super::hybrid_hash_slot_page::{TableDataPageBase, TableSlotsPage};
 
 /// responsible for update meta page of HashJoinTable<T>
 pub struct DHashSubTable<T: MemPool + 'static> {
@@ -62,11 +55,7 @@ mod iterators {
     use crate::{
         bp::{MemPool, PageFrameKey},
         mvcc_index::{
-            hybrid_hash::{attached_container_page::attached_container_page::slot::get_slot_hash, hybrid_hash_table::{
-                hybrid_hash_common::{read_page, SUBTABLE_HASHER_SEED},
-                hybrid_hash_slot_page::TableSlotsPage,
-            }},
-            Delta, DeltaEntry, MvccEntry, MvccIndex, Timestamp,
+            hash_common::read_page, hybrid_hash::{attached_container_page::attached_container_page::slot::get_slot_hash, hybrid_hash_table::hybrid_hash_slot_page::TableSlotsPage}, Delta, DeltaEntry, MvccEntry, MvccIndex, Timestamp
         },
         page::Page,
     };

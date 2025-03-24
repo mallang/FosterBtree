@@ -118,7 +118,7 @@ use header::*;
 pub mod slot {
     use std::u32;
 
-    use crate::log_warn;
+    use crate::{log_warn, mvcc_index::hash_common::SUBTABLE_HASHER_SEED};
 
     pub const DELETE_MARKER_IN_VAL_SIZE: u32 = u32::MAX;
     pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
@@ -277,9 +277,8 @@ pub mod slot {
         }
     }
 
-    const SLOT_HASH_SEED: u32 = 23333;
     pub fn get_slot_hash(bytes: &[u8]) -> u32 {
-        farmhash::hash32_with_seed(bytes, SLOT_HASH_SEED)
+        farmhash::hash32_with_seed(bytes, SUBTABLE_HASHER_SEED)
     }
 
     pub fn get_remain_key(key: &[u8]) -> &[u8] {

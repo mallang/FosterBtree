@@ -20,6 +20,7 @@ mod header {
         total_bytes_used: u32, // (PAGE_HEADER_SIZE + slots + records)
         slot_count: u32,
         rec_start_offset: u32,
+        is_full: u8,
     }
 
     impl Header {
@@ -54,6 +55,12 @@ mod header {
                     .try_into()
                     .unwrap(),
             );
+            current_pos += std::mem::size_of::<u32>();
+            let is_full = u8::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
+                    .try_into()
+                    .unwrap(),
+            );
 
             Header {
                 next_page_id,
@@ -61,6 +68,7 @@ mod header {
                 total_bytes_used,
                 slot_count,
                 rec_start_offset,
+                is_full,
             }
         }
 
@@ -81,6 +89,9 @@ mod header {
             current_pos += std::mem::size_of::<u32>();
             bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
                 .copy_from_slice(&self.rec_start_offset.to_be_bytes());
+            current_pos += std::mem::size_of::<u32>();
+            bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
+                .copy_from_slice(&self.is_full.to_be_bytes());
             bytes
         }
 
@@ -91,6 +102,7 @@ mod header {
                 total_bytes_used: PAGE_HEADER_SIZE as u32,
                 slot_count: 0,
                 rec_start_offset: AVAILABLE_PAGE_SIZE as u32,
+                is_full: 0,
             }
         }
 
@@ -113,6 +125,14 @@ mod header {
             } else {
                 Some(self.next_page_id)
             }
+        }
+
+        pub fn is_full(&self) -> bool {
+            self.is_full != 0
+        }
+
+        pub fn set_full(&mut self) {
+            self.is_full = 1;
         }
 
         pub fn set_next_page_id(&mut self, next_page_id: PageId) {
@@ -646,19 +666,21 @@ impl HashJoinPage for Page {
     }
 
     fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let rec = Record::new(entry.key(), entry.pkey(), entry.value());
-        if SLOT_SIZE + rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
+        let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
+        let needed_space = SLOT_SIZE + new_rec.size();
+        if needed_space > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
-        } else if SLOT_SIZE + rec.size() > HashJoinPage::free_space_before_compaction(&*self) {
-            if SLOT_SIZE + rec.size() > HashJoinPage::free_space_after_compaction(&*self) {
+        } else if needed_space > self.free_space_before_compaction() {
+            if needed_space > self.free_space_after_compaction() {
                 return Err(AccessMethodError::OutOfSpace);
             }
             // TODO: Need to compact the page
             return Err(AccessMethodError::OutOfSpace);
         }
 
-        let (found, slot_id) = self.search_slot(rec.sort_key());
+        let (found, slot_id) = self.search_slot(new_rec.sort_key());
         if found {
+            // unreachable!("no duplicate keys should be inserted");
             return Err(AccessMethodError::KeyDuplicate);
         }
         HashJoinPage::insert_at_slot_id(&mut *self, entry, slot_id)

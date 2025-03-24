@@ -5,6 +5,10 @@ pub mod rust_hash_map;
 pub mod linear_hash;
 pub mod hash_join_page;
 pub mod txn_handle;
+pub mod hash_common;
+
+mod hash_join_unittest;
+
 pub type TxId = u64; // Transaction ID
 
 use crate::{
@@ -32,7 +36,7 @@ pub struct TxInfo {
     pub status: TxStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive( Clone, Serialize, Deserialize)]
 pub struct MvccEntry {
     pub key: Vec<u8>,
     pub pkey: Vec<u8>,
@@ -43,6 +47,19 @@ pub struct MvccEntry {
     pub end_ts: Timestamp,
     // pub page_id: PageId,
     // pub slot_id: SlotId,
+}
+
+impl Debug for MvccEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MvccEntry")
+            .field("key", &String::from_utf8(self.key.clone()).unwrap())
+            .field("pkey", &String::from_utf8(self.pkey.clone()).unwrap())
+            .field("value", &String::from_utf8(self.value.clone()).unwrap())
+            .field("tx_id", &self.tx_id)
+            .field("start_ts", &self.start_ts)
+            .field("end_ts", &self.end_ts)
+            .finish()
+    }
 }
 
 impl MvccEntry {
