@@ -393,7 +393,18 @@ fn read_txs_and_apply(
             "tx_begin" | "tx_commit" => { /* no-op */ }
             "scan_with_join_key" => {
                 // For scan operations, we call scan_key but suppress printing
-                let _ = hash_join_table.scan_key(&op.join_key, op.ts)?;
+
+                // if hash_table_type == HashTableType::Chained {
+                //     let scanner = hash_join_table.scan_key(&op.join_key, op.ts)?;
+                //     // iterate over the scanner to force the scan
+                //     let _ = scanner.collect::<Vec<_>>();
+                // } else {
+                //     let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
+                // }
+
+                // let scanner = hash_join_table.scan_key(&op.join_key, op.ts)?;
+                // let _ = scanner.collect::<Vec<_>>(); // force the scan
+                let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
                 op_count += 1;
             }
             other => {
@@ -710,6 +721,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut table0_name = String::from("table_0.csv");
     let mut txs0_name = String::from("txs_u0.1_t0.csv"); // update TX log file
     let mut hash_table_t = HashTableType::HeapTable; // default
+    let mut do_consistency_check = true; // <--- NEW
 
     let mut i = 1;
     while i < args.len() {
@@ -757,6 +769,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     eprintln!("Error: -t requires a type name");
                     return Ok(());
                 }
+            }
+            "--skip-check" => {
+                do_consistency_check = false;
+                i += 1;
             }
             unknown => {
                 eprintln!("Unknown arg: {}", unknown);
@@ -834,19 +850,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     read_txs_and_apply(&txs0_path, &mut hash_join_table)?;
 
     // 4) Check update consistency.
-
-    // println!("\n=== Checking full consistency for updated table_0 ===");
-    // full_check_update_consistency(&hash_join_table, &expected_recent, &expected_history)?;
-
-    // println!("\n=== Partial random consistency check ===");
-    // random_partial_update_consistency(
-    //     &hash_join_table,
-    //     &expected_recent,
-    //     &expected_history,
-    //     &csv_dir.join("key_pool.csv"),
-    //     10,     // e.g. pick 10 random ts
-    //     0.1     // e.g. check 10% of keys each time
-    // )?;
+    if do_consistency_check {
+        // println!("\n=== Checking full consistency for updated table_0 ===");
+        // full_check_update_consistency(&hash_join_table, &expected_recent, &expected_history)?;
+        println!("\n=== Partial random consistency check ===");
+        random_partial_update_consistency(
+            &hash_join_table,
+            &expected_recent,
+            &expected_history,
+            &csv_dir.join("key_pool.csv"),
+            10,  // e.g. pick 10 random ts
+            0.1, // e.g. check 10% of keys each time
+        )?;
+    } else {
+        println!("\n[INFO] Skipping update consistency check. (--skip-check)");
+    }
 
     // 5) Discover join TX logs: files matching "txs_join_ts(\d+)_t(\d+).csv"
     println!("\n=== Discovering join TX logs ===");
@@ -878,30 +896,53 @@ fn main() -> Result<(), Box<dyn Error>> {
                 fname, table_idx, ts_val
             );
             read_txs_and_apply(&join_log_path, &mut hash_join_table)?;
-            // Construct expected join result file name:
-            // Remove "_t0" from update label and add _ts{ts}_t{table_idx} suffix.
 
-            // let expected_join = res_dir.join(format!("res_join_{}_ts{}_t{}.csv", update_label, ts_val, table_idx));
-            // if !expected_join.exists() {
-            //     println!("[WARN] Expected join result file {} not found; skipping check.", expected_join.display());
-            //     continue;
-            // }
-            // println!("Checking join consistency using expected file {}", expected_join.display());
-            // let expected_map = parse_expected_join_file(&expected_join)?;
-            // // For each join key block in expected file, perform check.
-            // let mut all_passed = true;
-            // for (exp_join_key, (exp_ts, expected_rows)) in expected_map {
-            //     let pass = check_full_join_consistency(&hash_join_table, &exp_join_key, exp_ts, &expected_rows)?;
-            //     if !pass {
-            //         all_passed = false;
-            //         // Note: We do *not* break here in case you want to see *all* failures.
-            //     }
-            // }
+            // Consistency check using expected join result files.
+            if do_consistency_check {
+                // Construct expected join result file name:
+                // Remove "_t0" from update label and add _ts{ts}_t{table_idx} suffix.
 
-            // if all_passed {
-            //     // If you want no output on success, remove the next line entirely.
-            //     println!("All join checks in file '{}' passed with no mismatches.", expected_join.display());
-            // }
+                let expected_join = res_dir.join(format!(
+                    "res_join_{}_ts{}_t{}.csv",
+                    update_label, ts_val, table_idx
+                ));
+                if !expected_join.exists() {
+                    println!(
+                        "[WARN] Expected join result file {} not found; skipping check.",
+                        expected_join.display()
+                    );
+                    continue;
+                }
+                println!(
+                    "Checking join consistency using expected file {}",
+                    expected_join.display()
+                );
+                let expected_map = parse_expected_join_file(&expected_join)?;
+                // For each join key block in expected file, perform check.
+                let mut all_passed = true;
+                for (exp_join_key, (exp_ts, expected_rows)) in expected_map {
+                    let pass = check_full_join_consistency(
+                        &hash_join_table,
+                        &exp_join_key,
+                        exp_ts,
+                        &expected_rows,
+                    )?;
+                    if !pass {
+                        all_passed = false;
+                        // Note: We do *not* break here in case you want to see *all* failures.
+                    }
+                }
+
+                if all_passed {
+                    // If you want no output on success, remove the next line entirely.
+                    println!(
+                        "All join checks in file '{}' passed with no mismatches.",
+                        expected_join.display()
+                    );
+                }
+            } else {
+                println!("\n[INFO] Skipping join consistency check. (--skip-check)");
+            }
         }
     }
 

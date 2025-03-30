@@ -8,7 +8,10 @@ use crate::{
     prelude::AccessMethodError,
 };
 
-use super::{iterators::{LinearSubTableKeyScanner, LinearSubTableScanner}, linear_sub_table::LinearSubTable};
+use super::{
+    iterators::{LinearSubTableKeyScanner, LinearSubTableScanner},
+    linear_sub_table::LinearSubTable,
+};
 
 pub struct LinearHashTable<T: MemPool> {
     mem_pool: Arc<T>,
@@ -167,13 +170,18 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         ts: crate::prelude::Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         let recent_iter = LinearSubTableKeyScanner::new(self.recent.clone(), Some(ts), key.clone());
-        let history_iter = LinearSubTableKeyScanner::new(self.history.clone(), Some(ts), key.clone());
-        let iter = Box::new(
-            recent_iter
-                .chain(history_iter)
-                .map(|e| (e.pkey, e.value)),
-        );
+        let history_iter =
+            LinearSubTableKeyScanner::new(self.history.clone(), Some(ts), key.clone());
+        let iter = Box::new(recent_iter.chain(history_iter).map(|e| (e.pkey, e.value)));
         Ok(iter)
+    }
+
+    fn scan_key_vec(
+        &self,
+        key: &Self::Key,
+        ts: crate::prelude::Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        todo!()
     }
 
     fn delta_scan(

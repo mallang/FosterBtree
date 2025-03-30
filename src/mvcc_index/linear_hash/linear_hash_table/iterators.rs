@@ -109,8 +109,6 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableScanner<T> {
     }
 }
 
-
-
 pub struct LinearSubTableKeyScanner<T: MemPool + 'static> {
     subtable: Arc<LinearSubTable<T>>,
     guard_buckets: Option<RwLockReadGuard<'static, Vec<BucketEntry>>>,
@@ -153,7 +151,10 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableKeyScanner<T> {
                 >(guard)
             };
             self.guard_buckets = Some(new_guard);
-            self.cur_bucket_idx = get_hashed_bucket_index(&self.key, self.guard_buckets.as_ref().unwrap().len() as u32);
+            self.cur_bucket_idx = get_hashed_bucket_index(
+                &self.key,
+                self.guard_buckets.as_ref().unwrap().len() as u32,
+            );
         }
 
         loop {
@@ -178,8 +179,6 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableKeyScanner<T> {
 
                 self.cur_slot_idx = 0;
             }
-
-
 
             if self.cur_slot_idx < self.current_page.as_ref().unwrap().slot_count() {
                 let entry = match <Page as HashJoinPage>::get_entry_at_slot_id(
@@ -213,9 +212,7 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableKeyScanner<T> {
                     return None;
                 }
                 self.current_page = None;
-                
             }
         }
     }
 }
-

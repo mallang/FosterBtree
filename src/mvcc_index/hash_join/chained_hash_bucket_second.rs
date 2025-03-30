@@ -123,6 +123,11 @@ impl<T: MemPool> SecondBucket<T> {
             recent_stat, history_stat
         )
     }
+
+    pub fn scan_key_into(&self, search_key: &[u8], ts: &Timestamp, results: &mut Vec<MvccEntry>) {
+        self.recent_chain.scan_key_into(search_key, ts, results);
+        self.history_chain.scan_key_into(search_key, ts, results);
+    }
 }
 
 // test code

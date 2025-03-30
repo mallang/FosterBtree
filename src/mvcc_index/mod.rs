@@ -9,6 +9,7 @@ pub mod txn_handle;
 
 mod hash_join_unittest;
 
+pub mod ts_partitioned;
 pub type TxId = u64; // Transaction ID
 
 use crate::{
@@ -224,6 +225,14 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error>;
+
+    /// Scans all entries with the given key at the specified timestamp.
+    /// Returns a vec over primary key and value pairs.
+    fn scan_key_vec(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error>;
 
     /// Delta scan between two timestamps.
     /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.

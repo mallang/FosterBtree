@@ -496,6 +496,68 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
         Ok(best_candidates.into_values().collect())
     }
 
+    pub fn scan_key(&self, search_key: &[u8], ts: &Timestamp) -> Vec<MvccEntry> {
+        use std::collections::HashMap;
+
+        let mut best_map: HashMap<Vec<u8>, (Timestamp, MvccEntry)> = HashMap::new();
+
+        let mut current_page = self.first_page();
+        loop {
+            current_page.scan_key_heap_into_best(search_key, ts, &mut best_map);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
+                    log_debug!(
+                        "Frame of the next page has been changed. Trying to fix the frame id"
+                    );
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+
+        best_map.into_values().map(|(_st, entry)| entry).collect()
+    }
+
+    pub fn scan_key_vec(&self, search_key: &[u8], ts: &Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+        use std::collections::HashMap;
+
+        let mut best_map: HashMap<Vec<u8>, (Timestamp, MvccEntry)> = HashMap::new();
+
+        let mut current_page = self.first_page();
+        loop {
+            current_page.scan_key_heap_into_best(search_key, ts, &mut best_map);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
+                    log_debug!(
+                        "Frame of the next page has been changed. Trying to fix the frame id"
+                    );
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+
+        // return pkey, val from entry
+        best_map
+            .into_values()
+            .map(|(_st, entry)| (entry.pkey().to_vec(), entry.value().to_vec()))
+            .collect::<Vec<(Vec<u8>, Vec<u8>)>>()
+    }
+
     /// Traverse the chain and return a human‑readable status string.
     ///
     /// The report includes, for each page:

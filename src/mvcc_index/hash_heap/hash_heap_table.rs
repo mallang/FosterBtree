@@ -174,6 +174,12 @@ impl<T: MemPool + 'static> HashHeapTable<T> {
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.bucket_count
     }
+
+    pub fn scan_key(&self, key: &[u8], ts: Timestamp) -> Vec<MvccEntry> {
+        let index = self.get_bucket_index(key);
+        let bucket = &self.bucket_entries[index];
+        bucket.scan_key(key, &ts)
+    }
 }
 
 impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
@@ -264,15 +270,29 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
-        // Clone the key so the closure can own it.
-        let key_owned = key.clone();
         let idx = self.get_bucket_index(key);
-        let bucket = &self.bucket_entries[idx];
-        let entries = bucket.scan_unique(ts)?;
-        let filtered = entries
+        let chain = &self.bucket_entries[idx];
+
+        let mvccs: Vec<MvccEntry> = chain.scan_key(key, &ts);
+
+        let mapped = mvccs
             .into_iter()
-            .filter(move |entry| entry.key == key_owned);
-        Ok(Box::new(filtered.map(|entry| (entry.pkey, entry.value))))
+            .map(|entry| (entry.pkey().to_vec(), entry.value().to_vec()));
+
+        Ok(Box::new(mapped))
+    }
+
+    fn scan_key_vec(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let idx = self.get_bucket_index(key);
+        let chain = &self.bucket_entries[idx];
+
+        let mvccs = chain.scan_key_vec(key, &ts);
+
+        Ok(mvccs)
     }
 
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {

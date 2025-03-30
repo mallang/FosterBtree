@@ -758,7 +758,11 @@ mod test_ops {
 
             for m in t {
                 // log_warn!("{:?} {:?}", String::from_utf8(m.0), String::from_utf8(m.1));
-                assert!(m.0[4..].starts_with(format!("{}", i).as_bytes()) || i == 0, "{:?}, i:{i}", m.0);
+                assert!(
+                    m.0[4..].starts_with(format!("{}", i).as_bytes()) || i == 0,
+                    "{:?}, i:{i}",
+                    m.0
+                );
                 assert_eq!(m.1[5..], m.0[4..]);
             }
             // log_warn!("{:?} ends -----------------", key);

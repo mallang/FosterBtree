@@ -266,6 +266,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
         Ok(ret)
     }
 
+    fn scan_key_vec(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        todo!()
+    }
+
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
         self.hash_table.garbage_collect(safe_ts)?;
         Ok(())

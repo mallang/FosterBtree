@@ -126,6 +126,12 @@ impl<T: MemPool> FirstBucket<T> {
         self.bucket_entries[idx].history_chain()
     }
 
+    pub fn scan_key_into(&self, search_key: &[u8], ts: &Timestamp, results: &mut Vec<MvccEntry>) {
+        for bucket in &self.bucket_entries {
+            bucket.scan_key_into(search_key, ts, results);
+        }
+    }
+
     /// Returns a human‑readable status string for the FirstBucket.
     /// It prints the stat() for each SecondBucket and then a summary for both the recent and history chains.
     pub fn stat(&self) -> String {

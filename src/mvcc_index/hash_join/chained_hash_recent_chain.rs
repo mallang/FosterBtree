@@ -643,6 +643,32 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         ChainedHashRecentChainScanner::new_full_scan(self)
     }
 
+    /// Scan the entire chain for MvccEntries whose logical key == `search_key`
+    /// that are visible at time `ts`.
+    /// We call each page’s `scan_key_recent` method to do the local scan,
+    /// gather the results, and move on to the next page.
+    pub fn scan_key_into(&self, search_key: &[u8], ts: &Timestamp, results: &mut Vec<MvccEntry>) {
+        let mut results = Vec::new();
+        let mut current_page = self.first_page();
+
+        loop {
+            let page_matches = current_page.scan_key_recent_into(search_key, ts, &mut results);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Traverse the chain and return a human‑readable status string.
     ///
     /// The report includes, for each page:

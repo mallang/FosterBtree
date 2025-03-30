@@ -185,4 +185,22 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
             .unwrap_or_default();
         Ok(Box::new(result.into_iter()))
     }
+    fn scan_key_vec(
+        &self,
+        key: &Self::Key,
+        ts: crate::prelude::Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let table = self.table.read().unwrap();
+        let result: Vec<(Vec<u8>, Vec<u8>)> = table
+            .get(key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(move |e| e.start_ts <= ts && e.end_ts > ts)
+                    .map(|e| (e.pkey.clone(), e.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(result)
+    }
 }

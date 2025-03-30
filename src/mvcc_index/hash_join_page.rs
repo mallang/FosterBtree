@@ -11,7 +11,10 @@ pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket
 pub static HISTORY_SLOT_CMP_CNT: AtomicU64 = AtomicU64::new(0);
 
 mod header {
-    use crate::page::{PageId, AVAILABLE_PAGE_SIZE};
+    use crate::{
+        page::{PageId, AVAILABLE_PAGE_SIZE},
+        prelude::Timestamp,
+    };
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
 
     pub struct Header {
@@ -20,6 +23,9 @@ mod header {
         total_bytes_used: u32, // (PAGE_HEADER_SIZE + slots + records)
         slot_count: u32,
         rec_start_offset: u32,
+        //
+        min_ts: Timestamp,
+        max_ts: Timestamp,
         is_full: u8,
     }
 
@@ -56,11 +62,24 @@ mod header {
                     .unwrap(),
             );
             current_pos += std::mem::size_of::<u32>();
+            let min_ts = Timestamp::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
+                    .try_into()
+                    .unwrap(),
+            );
+            current_pos += std::mem::size_of::<Timestamp>();
+            let max_ts = Timestamp::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
+                    .try_into()
+                    .unwrap(),
+            );
+            current_pos += std::mem::size_of::<Timestamp>();
             let is_full = u8::from_be_bytes(
                 bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
                     .try_into()
                     .unwrap(),
             );
+            current_pos += std::mem::size_of::<u8>();
 
             Header {
                 next_page_id,
@@ -68,6 +87,8 @@ mod header {
                 total_bytes_used,
                 slot_count,
                 rec_start_offset,
+                min_ts,
+                max_ts,
                 is_full,
             }
         }
@@ -90,8 +111,15 @@ mod header {
             bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
                 .copy_from_slice(&self.rec_start_offset.to_be_bytes());
             current_pos += std::mem::size_of::<u32>();
+            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
+                .copy_from_slice(&self.min_ts.to_be_bytes());
+            current_pos += std::mem::size_of::<Timestamp>();
+            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
+                .copy_from_slice(&self.max_ts.to_be_bytes());
+            current_pos += std::mem::size_of::<Timestamp>();
             bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
                 .copy_from_slice(&self.is_full.to_be_bytes());
+            current_pos += std::mem::size_of::<u8>();
             bytes
         }
 
@@ -102,6 +130,8 @@ mod header {
                 total_bytes_used: PAGE_HEADER_SIZE as u32,
                 slot_count: 0,
                 rec_start_offset: AVAILABLE_PAGE_SIZE as u32,
+                min_ts: Timestamp::MAX,
+                max_ts: Timestamp::MIN,
                 is_full: 0,
             }
         }
@@ -185,6 +215,22 @@ mod header {
 
         pub fn set_rec_start_offset(&mut self, rec_start_offset: usize) {
             self.rec_start_offset = rec_start_offset as u32;
+        }
+
+        pub fn min_ts(&self) -> Timestamp {
+            self.min_ts
+        }
+
+        pub fn set_min_ts(&mut self, min_ts: Timestamp) {
+            self.min_ts = min_ts;
+        }
+
+        pub fn max_ts(&self) -> Timestamp {
+            self.max_ts
+        }
+
+        pub fn set_max_ts(&mut self, max_ts: Timestamp) {
+            self.max_ts = max_ts;
         }
     }
 }
@@ -657,6 +703,33 @@ pub trait HashJoinPage {
     /// - `free_space_without_compaction`: free space computed via `free_space_before_compaction`
     /// - `free_space_after_compaction`: free space computed via `free_space_after_compaction`
     fn stat(&self) -> String;
+
+    // scan_key for heap, recent, and history
+
+    /// For “heap” pages, we do a linear scan.  But *instead* of returning a Vec,
+    /// we pass in a &mut HashMap so we can update the "best version" logic
+    /// directly without creating an intermediate Vec.
+    fn scan_key_heap_into_best(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        best_map: &mut std::collections::HashMap<Vec<u8>, (Timestamp, MvccEntry)>,
+    );
+
+    /// Returns one MvccEntry per pkey for `search_key` visible at `ts`,
+    /// using a page sorted by end_ts. O(logN + K) time, skipping old versions.
+    fn scan_key_history_into(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    );
+    fn scan_key_recent_into(
+        &self,
+        search_pkey: &[u8],
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    );
 }
 
 impl HashJoinPage for Page {
@@ -1320,6 +1393,166 @@ impl HashJoinPage for Page {
             AVAILABLE_PAGE_SIZE,
             free_before,
         )
+    }
+
+    /// For “heap” pages, we do a linear scan.  But *instead* of returning a Vec,
+    /// we pass in a &mut HashMap so we can update the "best version" logic
+    /// directly without creating an intermediate Vec.
+    fn scan_key_heap_into_best(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        best_map: &mut std::collections::HashMap<Vec<u8>, (Timestamp, MvccEntry)>,
+    ) {
+        let ts = *ts;
+        // For each slot:
+        for slot_idx in 0..self.slot_count() {
+            let slot = self.slot(slot_idx);
+
+            // 1) Compare prefix, etc. (same as your existing logic)
+            let slot_key_len = slot.key_size();
+            if slot_key_len != search_key.len() {
+                continue;
+            }
+            let prefix_len = std::cmp::min(SLOT_KEY_PREFIX_SIZE, slot_key_len);
+            let slot_prefix = &slot.key_prefix()[..prefix_len];
+            let input_prefix = &search_key[..prefix_len];
+            if slot_prefix != input_prefix {
+                continue;
+            }
+
+            // 2) If prefix matches, load the record
+            let rec = self.record_from_slot(&slot);
+            if rec.key() == search_key {
+                let st = slot.start_ts();
+                let et = slot.end_ts();
+                if st <= ts {
+                    let pkey = rec.pkey();
+                    match best_map.get_mut(pkey) {
+                        Some((old_st, old_e)) => {
+                            if st > *old_st {
+                                *old_st = st;
+                                let new_entry = MvccEntry::new(
+                                    rec.key().to_vec(),
+                                    rec.pkey().to_vec(),
+                                    rec.val().to_vec(),
+                                    st,
+                                    et,
+                                );
+                                *old_e = new_entry;
+                            }
+                        }
+                        None => {
+                            let new_entry = MvccEntry::new(
+                                rec.key().to_vec(),
+                                rec.pkey().to_vec(),
+                                rec.val().to_vec(),
+                                st,
+                                et,
+                            );
+                            best_map.insert(pkey.to_vec(), (st, new_entry));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn scan_key_recent_into(
+        &self,
+        search_pkey: &[u8],
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) {
+        let ts = *ts;
+        let slot_count = self.slot_count();
+
+        for i in 0..slot_count {
+            let slot = self.slot(i);
+
+            // 1) Check if this version is visible at time `ts`.
+            let st = slot.start_ts();
+            let et = slot.end_ts();
+            // if !(st <= ts && (et == u64::MAX || ts < et)) {
+            if ts < st {
+                continue;
+            }
+
+            // 2) Compare pkey prefix to avoid reading the full record if mismatch.
+            //    (We assume your slot stores the prefix in e.g. `slot.pkey_prefix()`.)
+            let slot_key_len = slot.key_size();
+            if slot_key_len != search_pkey.len() {
+                // If lengths differ, definitely not a match.
+                continue;
+            }
+
+            // Compare up to 8 bytes (or whatever your prefix size is).
+            let prefix_len = std::cmp::min(SLOT_KEY_PREFIX_SIZE, slot_key_len);
+            let slot_prefix = &slot.key_prefix()[..prefix_len];
+            let input_prefix = &search_pkey[..prefix_len];
+            if slot_prefix != input_prefix {
+                continue;
+            }
+
+            // 3) If the prefix matches, read the entire record to confirm pkey equality.
+            let rec = self.record_from_slot(&slot);
+            if rec.key() == search_pkey {
+                // 4) Finally, build an MvccEntry
+                let entry = MvccEntry::new(
+                    rec.key().to_vec(),
+                    rec.pkey().to_vec(),
+                    rec.val().to_vec(),
+                    st,
+                    et,
+                );
+                results.push(entry);
+            }
+        }
+    }
+
+    /// Returns one MvccEntry per pkey for `search_key` visible at `ts`,
+    /// using a page sorted by end_ts. O(logN + K) time, skipping old versions.
+    fn scan_key_history_into(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) {
+        let ts = *ts;
+
+        // 1) skip older slots
+        let start_idx = self.binary_search_by_end_ts(ts);
+
+        for slot_idx in start_idx..self.slot_count() {
+            let slot = self.slot(slot_idx);
+
+            // Check if st <= ts
+            let st = slot.start_ts();
+            let et = slot.end_ts();
+            if st <= ts {
+                // 2) prefix check
+                let slot_key_len = slot.key_size();
+                if slot_key_len != search_key.len() {
+                    continue;
+                }
+                let prefix_len = std::cmp::min(SLOT_KEY_PREFIX_SIZE, slot_key_len);
+                let slot_prefix = &slot.key_prefix()[..prefix_len];
+                let input_prefix = &search_key[..prefix_len];
+                if slot_prefix == input_prefix {
+                    // read the entire record
+                    let rec = self.record_from_slot(&slot);
+                    if rec.key() == search_key {
+                        results.push(MvccEntry::new(
+                            rec.key().to_vec(),
+                            rec.pkey().to_vec(),
+                            rec.val().to_vec(),
+                            st,
+                            et,
+                        ));
+                    }
+                }
+            }
+        }
     }
 }
 

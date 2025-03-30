@@ -4,13 +4,17 @@ use std::sync::{atomic::AtomicU32, Arc};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 
 use crate::{
-    bp::{ContainerKey, MemPool, PageFrameKey}, log_warn, mvcc_index::{
+    bp::{ContainerKey, MemPool, PageFrameKey},
+    log_warn,
+    mvcc_index::{
         hash_common::{
             get_hashed_bucket_index, read_page, write_page, BucketEntry, DEFAULT_BUCKET_NUM,
         },
         hash_join_page::{self, HashJoinPage},
         MvccEntry, MvccIndex,
-    }, page::{self, Page, PageId}, prelude::{AccessMethodError, Timestamp}
+    },
+    page::{self, Page, PageId},
+    prelude::{AccessMethodError, Timestamp},
 };
 
 pub struct LinearSubTable<T: MemPool> {
