@@ -2,7 +2,8 @@ pub mod hash_common;
 pub mod hash_heap;
 pub mod hash_join;
 pub mod hash_join_page;
-pub mod hybrid_hash;
+// pub mod hybrid_hash;
+pub mod hash_join_heap_chain;
 pub mod linear_hash;
 pub mod rust_hash_map;
 pub mod txn_handle;
@@ -184,14 +185,6 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error>;
 
-    /// Retrieves all values associated with the key at the given timestamp.
-    /// Useful when multiple rows share the same key.
-    fn get_key(
-        &self,
-        key: &Self::Key,
-        ts: Timestamp,
-    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error>;
-
     /// Updates the value associated with the key and primary key at the given timestamp.
     /// Returns an error if the key-primary key combination does not exist.
     fn update(
@@ -293,7 +286,6 @@ pub type BoxMvccIndexMemPool = Box<
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashTableType {
     Chained,
-    OpenAddressing,
     HeapTable,
     RustHashMap,
     LinearHashTable,

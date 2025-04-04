@@ -13,7 +13,7 @@ use crate::{
 
 pub(crate) const SUBTABLE_HASHER_SEED: u32 = 233;
 
-pub(crate) const DEFAULT_BUCKET_NUM: usize = 256;
+pub(crate) const DEFAULT_BUCKET_NUM: usize = 128;
 pub fn get_hashed_bucket_index(key: &[u8], total_size: u32) -> usize {
     (farmhash::hash32_with_seed(key, SUBTABLE_HASHER_SEED) % total_size) as usize
 }

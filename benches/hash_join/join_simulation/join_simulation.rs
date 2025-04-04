@@ -15,9 +15,8 @@
 // followed by CSV rows with columns: start_ts, end_ts, pkey, join_key, value.
 // The expected "value" field is decoded (i.e. without the "(16)" suffix) for comparison.
 
-use fbtree::mvcc_index::hash_heap::hash_heap_table::HashHeapTable;
+use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::hash_join::chained_hash_table::ChainedHashTable;
-use fbtree::mvcc_index::hybrid_hash::mvcc_hash_join_table::OpenAddrHashTable;
 use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
@@ -539,59 +538,59 @@ fn check_full_join_consistency(
     }
 }
 
-/// Reads two CSV files (expected recent & expected history) and does a
-/// detailed row‑by‑row comparison against a full `scan_all()` of the index.
-/// Prints missing/extra rows if there's a mismatch.
-fn full_check_update_consistency(
-    hash_join_table: &BoxMvccIndexMemPool,
-    expected_recent: &Path,
-    expected_history: &Path,
-) -> Result<(), Box<dyn Error>> {
-    // 1) Full scan of the index
-    let scan_iter = hash_join_table.scan_all()?;
-    // Convert the scanned MvccEntry items to our ExpectedUpdateRow form
-    let actual_rows: Vec<ExpectedUpdateRow> = scan_iter
-        .map(|mvcc_e| mvcc_entry_to_expected_row(&mvcc_e))
-        .collect();
+// /// Reads two CSV files (expected recent & expected history) and does a
+// /// detailed row‑by‑row comparison against a full `scan_all()` of the index.
+// /// Prints missing/extra rows if there's a mismatch.
+// fn full_check_update_consistency(
+//     hash_join_table: &BoxMvccIndexMemPool,
+//     expected_recent: &Path,
+//     expected_history: &Path,
+// ) -> Result<(), Box<dyn Error>> {
+//     // 1) Full scan of the index
+//     let scan_iter = hash_join_table.scan_all()?;
+//     // Convert the scanned MvccEntry items to our ExpectedUpdateRow form
+//     let actual_rows: Vec<ExpectedUpdateRow> = scan_iter
+//         .map(|mvcc_e| mvcc_entry_to_expected_row(&mvcc_e))
+//         .collect();
 
-    // Turn them into a set for easier diff
-    let actual_set: HashSet<ExpectedUpdateRow> = actual_rows.into_iter().collect();
+//     // Turn them into a set for easier diff
+//     let actual_set: HashSet<ExpectedUpdateRow> = actual_rows.into_iter().collect();
 
-    // 2) Read the “expected” rows from the two CSVs
-    let expected_r = read_expected_update_csv(expected_recent).unwrap_or_default();
-    let expected_h = read_expected_update_csv(expected_history).unwrap_or_default();
+//     // 2) Read the “expected” rows from the two CSVs
+//     let expected_r = read_expected_update_csv(expected_recent).unwrap_or_default();
+//     let expected_h = read_expected_update_csv(expected_history).unwrap_or_default();
 
-    // Combine them into one
-    let mut all_expected = Vec::with_capacity(expected_r.len() + expected_h.len());
-    all_expected.extend(expected_r);
-    all_expected.extend(expected_h);
+//     // Combine them into one
+//     let mut all_expected = Vec::with_capacity(expected_r.len() + expected_h.len());
+//     all_expected.extend(expected_r);
+//     all_expected.extend(expected_h);
 
-    let expected_set: HashSet<ExpectedUpdateRow> = all_expected.into_iter().collect();
+//     let expected_set: HashSet<ExpectedUpdateRow> = all_expected.into_iter().collect();
 
-    // 3) Compare sets
-    let missing_in_actual = expected_set.difference(&actual_set).collect::<Vec<_>>();
-    let extra_in_actual = actual_set.difference(&expected_set).collect::<Vec<_>>();
+//     // 3) Compare sets
+//     let missing_in_actual = expected_set.difference(&actual_set).collect::<Vec<_>>();
+//     let extra_in_actual = actual_set.difference(&expected_set).collect::<Vec<_>>();
 
-    if missing_in_actual.is_empty() && extra_in_actual.is_empty() {
-        // Perfect match
-        println!("Update consistency check PASSED: actual rows match expected rows exactly.");
-    } else {
-        println!("[ERROR] Update consistency check FAILED: mismatch in actual vs. expected rows.");
-        if !missing_in_actual.is_empty() {
-            println!("  Missing from actual (in expected, but not found in scan):");
-            for row in &missing_in_actual {
-                println!("    {:?}", row);
-            }
-        }
-        if !extra_in_actual.is_empty() {
-            println!("  Extra in actual (found in scan, but not in expected):");
-            for row in &extra_in_actual {
-                println!("    {:?}", row);
-            }
-        }
-    }
-    Ok(())
-}
+//     if missing_in_actual.is_empty() && extra_in_actual.is_empty() {
+//         // Perfect match
+//         println!("Update consistency check PASSED: actual rows match expected rows exactly.");
+//     } else {
+//         println!("[ERROR] Update consistency check FAILED: mismatch in actual vs. expected rows.");
+//         if !missing_in_actual.is_empty() {
+//             println!("  Missing from actual (in expected, but not found in scan):");
+//             for row in &missing_in_actual {
+//                 println!("    {:?}", row);
+//             }
+//         }
+//         if !extra_in_actual.is_empty() {
+//             println!("  Extra in actual (found in scan, but not in expected):");
+//             for row in &extra_in_actual {
+//                 println!("    {:?}", row);
+//             }
+//         }
+//     }
+//     Ok(())
+// }
 
 fn random_partial_update_consistency(
     hash_join_table: &BoxMvccIndexMemPool,
@@ -757,7 +756,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if i + 1 < args.len() {
                     let type_name = &args[i + 1];
                     match type_name.as_str() {
-                        "open_address" => hash_table_t = HashTableType::OpenAddressing,
                         "chain" => hash_table_t = HashTableType::Chained,
                         "heap" => hash_table_t = HashTableType::HeapTable,
                         "rust" => hash_table_t = HashTableType::RustHashMap,
@@ -827,11 +825,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         HashTableType::Chained => {
             Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
-        HashTableType::OpenAddressing => {
-            Box::new(OpenAddrHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
-        }
         HashTableType::HeapTable => {
-            Box::new(HashHeapTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+            Box::new(HeapHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::RustHashMap => {
             Box::new(MvccRustHashMap::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool

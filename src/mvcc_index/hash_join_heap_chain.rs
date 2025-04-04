@@ -19,7 +19,7 @@ use crate::{
     prelude::Timestamp,
 };
 
-pub struct ChainedHashHeapChain<T: MemPool> {
+pub struct HeapHashChain<T: MemPool> {
     mem_pool: Arc<T>,
     c_key: ContainerKey,
 
@@ -30,7 +30,7 @@ pub struct ChainedHashHeapChain<T: MemPool> {
     last_frame_id: AtomicU32,
 }
 
-impl<T: MemPool> ChainedHashHeapChain<T> {
+impl<T: MemPool> HeapHashChain<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         let mut page = mem_pool.create_new_page_for_write(c_key).unwrap();
         let first_page_id = page.get_id();
@@ -50,16 +50,16 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, pid: PageId) -> Self {
-        Self {
-            mem_pool,
-            c_key,
-            first_page_id: AtomicU32::new(pid),
-            first_frame_id: AtomicU32::new(u32::MAX),
-            last_page_id: AtomicU32::new(pid),
-            last_frame_id: AtomicU32::new(u32::MAX),
-        }
-    }
+    // pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, pid: PageId) -> Self {
+    //     Self {
+    //         mem_pool,
+    //         c_key,
+    //         first_page_id: AtomicU32::new(pid),
+    //         first_frame_id: AtomicU32::new(u32::MAX),
+    //         last_page_id: AtomicU32::new(pid),
+    //         last_frame_id: AtomicU32::new(u32::MAX),
+    //     }
+    // }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let entry = &mut entry.clone();
@@ -220,7 +220,7 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
         }
     }
 
-    pub fn update(&self, pkey: &[u8], entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    pub fn update(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         self.insert(entry)
     }
 
@@ -457,15 +457,14 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
         first_page
     }
 
-    pub fn scan(
-        self: &Arc<Self>,
-        ts: Timestamp,
-    ) -> Result<ChainedHashHeapChainScanner<T>, AccessMethodError> {
-        Ok(ChainedHashHeapChainScanner::new(self, ts))
+    pub fn scan(self: &Arc<Self>, ts: Timestamp) -> Result<HeapChainScanner<T>, AccessMethodError> {
+        Ok(HeapChainScanner::new(self, ts))
     }
 
-    pub fn scan_all(self: &Arc<Self>) -> Result<ChainedHashHeapChainScanner<T>, AccessMethodError> {
-        Ok(ChainedHashHeapChainScanner::new_full_scan(self))
+    pub fn scan_all(self: &Arc<Self>) -> Result<HeapChainScanner<T>, AccessMethodError> {
+        // TODO: result is incorrect
+        // (end ts of mvccentry is incorrect)
+        Ok(HeapChainScanner::new_full_scan(self))
     }
 
     /// Scan for all entries visible at `ts` and return only the best candidate
@@ -496,34 +495,34 @@ impl<T: MemPool> ChainedHashHeapChain<T> {
         Ok(best_candidates.into_values().collect())
     }
 
-    pub fn scan_key(&self, search_key: &[u8], ts: &Timestamp) -> Vec<MvccEntry> {
-        use std::collections::HashMap;
+    // pub fn scan_key(&self, search_key: &[u8], ts: &Timestamp) -> Vec<MvccEntry> {
+    //     use std::collections::HashMap;
 
-        let mut best_map: HashMap<Vec<u8>, (Timestamp, MvccEntry)> = HashMap::new();
+    //     let mut best_map: HashMap<Vec<u8>, (Timestamp, MvccEntry)> = HashMap::new();
 
-        let mut current_page = self.first_page();
-        loop {
-            current_page.scan_key_heap_into_best(search_key, ts, &mut best_map);
-            if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
-                if next_page.frame_id() != next_fid {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
-                    let _ = fix_frame_id(current_page, &new_frame_key);
-                }
-                current_page = next_page;
-            } else {
-                break;
-            }
-        }
+    //     let mut current_page = self.first_page();
+    //     loop {
+    //         current_page.scan_key_heap_into_best(search_key, ts, &mut best_map);
+    //         if let Some((next_pid, next_fid)) = current_page.next_page() {
+    //             let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+    //                 self.c_key, next_pid, next_fid,
+    //             ));
+    //             if next_page.frame_id() != next_fid {
+    //                 log_debug!(
+    //                     "Frame of the next page has been changed. Trying to fix the frame id"
+    //                 );
+    //                 let new_frame_key =
+    //                     PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+    //                 let _ = fix_frame_id(current_page, &new_frame_key);
+    //             }
+    //             current_page = next_page;
+    //         } else {
+    //             break;
+    //         }
+    //     }
 
-        best_map.into_values().map(|(_st, entry)| entry).collect()
-    }
+    //     best_map.into_values().map(|(_st, entry)| entry).collect()
+    // }
 
     pub fn scan_key_vec(&self, search_key: &[u8], ts: &Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
         use std::collections::HashMap;
@@ -643,7 +642,7 @@ fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> F
 }
 
 // Implement Clone for MvccHashJoinHistoryChain to allow cloning
-impl<T: MemPool> Clone for ChainedHashHeapChain<T> {
+impl<T: MemPool> Clone for HeapHashChain<T> {
     fn clone(&self) -> Self {
         Self {
             mem_pool: Arc::clone(&self.mem_pool),
@@ -656,8 +655,8 @@ impl<T: MemPool> Clone for ChainedHashHeapChain<T> {
     }
 }
 
-pub struct ChainedHashHeapChainScanner<T: MemPool> {
-    chain: Arc<ChainedHashHeapChain<T>>,
+pub struct HeapChainScanner<T: MemPool> {
+    chain: Arc<HeapHashChain<T>>,
     ts: Timestamp,
     filter_by_ts: bool,
 
@@ -668,8 +667,8 @@ pub struct ChainedHashHeapChainScanner<T: MemPool> {
     finished: bool,
 }
 
-impl<T: MemPool> ChainedHashHeapChainScanner<T> {
-    pub fn new(chain: &Arc<ChainedHashHeapChain<T>>, ts: Timestamp) -> Self {
+impl<T: MemPool> HeapChainScanner<T> {
+    pub fn new(chain: &Arc<HeapHashChain<T>>, ts: Timestamp) -> Self {
         Self {
             chain: chain.clone(),
             ts,
@@ -681,7 +680,7 @@ impl<T: MemPool> ChainedHashHeapChainScanner<T> {
         }
     }
 
-    pub fn new_full_scan(chain: &Arc<ChainedHashHeapChain<T>>) -> Self {
+    pub fn new_full_scan(chain: &Arc<HeapHashChain<T>>) -> Self {
         Self {
             chain: chain.clone(),
             ts: u64::MAX, // ts is irrelevant in full scan
@@ -708,7 +707,7 @@ impl<T: MemPool> ChainedHashHeapChainScanner<T> {
     }
 }
 
-impl<T: MemPool> Iterator for ChainedHashHeapChainScanner<T> {
+impl<T: MemPool> Iterator for HeapChainScanner<T> {
     type Item = MvccEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -772,6 +771,7 @@ mod tests {
     use crate::bp::get_in_mem_pool;
     use crate::mvcc_index::AccessMethodError;
     use crate::mvcc_index::MvccEntry;
+    use crate::mvcc_index::MvccIndex;
     use crate::prelude::ContainerKey;
     use rand::Rng;
     use std::collections::{HashMap, VecDeque};
@@ -787,7 +787,7 @@ mod tests {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
         // Create a HeapChain instance.
-        let heap_chain = ChainedHashHeapChain::new(c_key, mem_pool);
+        let heap_chain = HeapHashChain::new(c_key, mem_pool);
         let key = b"key-001".to_vec();
         let pkey = b"pkey-001".to_vec();
 
@@ -822,9 +822,7 @@ mod tests {
             200,
             u64::MAX,
         );
-        heap_chain
-            .update(&pkey, &update_entry)
-            .expect("Update failed");
+        heap_chain.update(&update_entry).expect("Update failed");
 
         // For a query at ts = 120 the chain should return the old version, now with end_ts set to 200.
         let fetched_history = heap_chain
@@ -862,7 +860,7 @@ mod tests {
     fn test_heap_chain_insert_update_delete_get() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let heap_chain = ChainedHashHeapChain::new(c_key, mem_pool);
+        let heap_chain = HeapHashChain::new(c_key, mem_pool);
         let key = b"key-001".to_vec();
         let pkey = b"pkey-001".to_vec();
 
@@ -896,9 +894,7 @@ mod tests {
             200,
             u64::MAX,
         );
-        heap_chain
-            .update(&pkey, &update_entry)
-            .expect("Update failed");
+        heap_chain.update(&update_entry).expect("Update failed");
 
         // The historical version should now have end_ts = 200.
         let history_version = heap_chain
@@ -950,7 +946,9 @@ mod tests {
         assert_eq!(
             fetched_deleted.value(),
             updated_value.as_slice(),
-            "Deleted version value mismatch"
+            "Deleted version value mismatch, fetch: {:?}, updated: {:?}",
+            String::from_utf8(fetched_deleted.value().to_vec()),
+            String::from_utf8(updated_value.clone())
         );
         assert_eq!(fetched_deleted.start_ts(), 200);
         // assert_eq!(fetched_deleted.end_ts(), deletion_ts);
@@ -968,7 +966,7 @@ mod tests {
     fn test_heap_chain_random_mixed_ops_half_open_with_logs() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let heap_chain = ChainedHashHeapChain::new(c_key, mem_pool);
+        let heap_chain = HeapHashChain::new(c_key, mem_pool);
 
         // Shared reference state: pkey -> Vec<MvccEntry> (the versions for that key).
         let mut ref_state: HashMap<Vec<u8>, Vec<MvccEntry>> = HashMap::new();
@@ -1077,9 +1075,7 @@ mod tests {
                                 new_start,
                                 u64::MAX,
                             );
-                            heap_chain
-                                .update(pkey, &update_entry)
-                                .expect("Update failed");
+                            heap_chain.update(&update_entry).expect("Update failed");
                             let mut old = versions.pop().unwrap();
                             old.set_end_ts(&new_start);
                             versions.push(old);
@@ -1223,7 +1219,7 @@ mod tests {
     fn test_heap_chain_precreated_insert_and_update() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let heap_chain = ChainedHashHeapChain::new(c_key, mem_pool);
+        let heap_chain = HeapHashChain::new(c_key, mem_pool);
 
         let num_keys = 1000;
         let num_updates_per_key = 5;
@@ -1302,7 +1298,7 @@ mod tests {
 
         // Apply all updates.
         for (pkey, old_start_ts, new_entry) in &update_entries {
-            heap_chain.update(pkey, new_entry).expect("Update failed");
+            heap_chain.update(new_entry).expect("Update failed");
             let versions = ref_state.get_mut(pkey).expect("Missing ref_state entry");
             let idx = versions
                 .iter()
@@ -1385,7 +1381,7 @@ mod tests {
     fn test_heap_chain_multi_thread_precreated() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let heap_chain = Arc::new(Mutex::new(ChainedHashHeapChain::new(c_key, mem_pool)));
+        let heap_chain = Arc::new(Mutex::new(HeapHashChain::new(c_key, mem_pool)));
 
         let num_keys = 500;
         let num_updates_per_key = 5;
@@ -1497,12 +1493,7 @@ mod tests {
             let updates_slice = update_entries[start_idx..end_idx].to_vec();
             let handle = thread::spawn(move || {
                 for (pkey, old_start_ts, new_entry) in updates_slice {
-                    if heap_chain_clone
-                        .lock()
-                        .unwrap()
-                        .update(&pkey, &new_entry)
-                        .is_ok()
-                    {
+                    if heap_chain_clone.lock().unwrap().update(&new_entry).is_ok() {
                         let mut guard = ref_state_clone.lock().unwrap();
                         let versions = guard.get_mut(&pkey).unwrap();
                         let idx = versions
@@ -1587,5 +1578,39 @@ mod tests {
         }
 
         println!("Multi-thread precreated test completed successfully on ChainedHashHeapChain.");
+    }
+
+    #[test]
+    fn test_scan_all() {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let heap_chain = Arc::new(HeapHashChain::new(c_key, mem_pool));
+
+        let i = 0;
+        let key = format!("key-{:03}", i).into_bytes();
+        let pkey = format!("pkey-{:03}", i).into_bytes();
+        let value = format!("value-{:03}", i).into_bytes();
+        let entry = MvccEntry::new(key.clone(), pkey.clone(), value, 0 as u64, u64::MAX);
+        heap_chain.insert(&entry).expect("Insert failed");
+
+        let entry = MvccEntry::new(
+            key.clone(),
+            pkey.clone(),
+            format!("value-{:03}", i + 1).into_bytes(),
+            1 as u64,
+            u64::MAX,
+        );
+        heap_chain.update(&entry).expect("Update failed");
+
+        // Scan all entries.
+        let all_entries = heap_chain
+            .scan_all()
+            .expect("Scan failed")
+            .collect::<Vec<_>>();
+        assert_eq!(all_entries.len(), 2, "Expected 2 entries");
+
+        for entry in all_entries {
+            log_warn!("Entry: {:?}", entry);
+        }
     }
 }

@@ -3,36 +3,59 @@ mod test_ops {
     use crate::bp::{get_in_mem_pool, ContainerKey, InMemPool};
 
     use crate::log_warn;
+    use crate::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
+    use crate::mvcc_index::hash_join::chained_hash_table::ChainedHashTable;
     use crate::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
+    use crate::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
     use crate::mvcc_index::MvccIndex;
     use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
     use core::str;
+    use std::marker::PhantomData;
     use std::sync::Arc;
 
     fn space_need(key: &[u8], pkey: &[u8], val: &[u8]) -> u32 {
         (16 + val.len()) as u32
     }
 
-    // fn test_basic_index_ops<I>(index: &I)
-    // where
-    //     I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>
-    //     {}
+    #[test]
+    fn test_hash_tables() {
+        test_basic_index_ops::<LinearHashTable<_>>();
+        test_basic_index_ops::<ChainedHashTable<_>>();
+        test_basic_index_ops::<TsPartitionedTable<_>>();
+        test_basic_index_ops::<HeapHashTable<_>>();
+    }
 
-    // fn test_simple_insert<I>(index: &I)
-    // where
-    //     I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>
-    // {
-    //     index.insert(vec![1], vec![1], 1, 1, vec![1])
-    //         .unwrap();
-    //     let get_result = index.get(&[2], &[1], 1);
-    //     assert_eq!(get_result.unwrap(), None);
+    fn test_basic_index_ops<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        test_simple_insert::<I>();
+        test_many_inserts_until_rehash::<I>();
+        test_many_inserts_and_reads::<I>();
+        test_concurrent_inserts_and_reads::<I>();
+        test_simple_update_different_timestamp::<I>();
+        test_simple_delete_different_timestamp::<I>();
+    }
 
-    //     let get_result = index.get(&[1], &[1], 0);
-    //     assert_eq!(get_result.unwrap(), None);
+    fn test_simple_insert<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = I::create(c_key, mem_pool).unwrap();
+        hash_join_table
+            .insert(vec![1], vec![1], 1, 1, vec![1])
+            .unwrap();
+        let get_result = hash_join_table.get(&[2], &[1], 1);
+        assert_eq!(get_result.unwrap(), None);
 
-    //     let get_result = index.get(&[1], &[1], 2);
-    //     assert_eq!(get_result.unwrap().unwrap(), &[1]);
-    // }
+        let get_result = hash_join_table.get(&[1], &[1], 0);
+        assert_eq!(get_result.unwrap(), None);
+
+        let get_result = hash_join_table.get(&[1], &[1], 2);
+        assert_eq!(get_result.unwrap().unwrap(), &[1]);
+    }
 
     #[test]
     fn simple_insert() {
@@ -50,6 +73,45 @@ mod test_ops {
 
         let get_result = hash_join_table.get(&[1], &[1], 2);
         assert_eq!(get_result.unwrap().unwrap(), &[1]);
+    }
+
+    fn test_many_inserts_until_rehash<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = I::create(c_key, mem_pool).unwrap();
+
+        let pair_space_need = space_need(
+            &format!("{:06}", 1).as_bytes().to_vec(),
+            &format!("{:06}", 1).as_bytes().to_vec(),
+            &format!("{:06}", 1).as_bytes().to_vec(),
+        );
+        let pairs_num_rehash = AVAILABLE_PAGE_SIZE as u32 / pair_space_need + 2;
+        for i in 0..pairs_num_rehash {
+            hash_join_table
+                .insert(
+                    format!("{:06}", i).as_bytes().to_vec(),
+                    format!("{:06}", i).as_bytes().to_vec(),
+                    1,
+                    1,
+                    format!("{:06}", i).as_bytes().to_vec(),
+                )
+                .unwrap();
+        }
+
+        for i in 0..pairs_num_rehash {
+            let get_result = hash_join_table.get(
+                &(format!("{:06}", i).as_bytes().to_vec())[..],
+                &(format!("{:06}", i).as_bytes().to_vec())[..],
+                1,
+            );
+            assert_eq!(
+                get_result.unwrap().unwrap(),
+                format!("{:06}", i).as_bytes().to_vec()
+            );
+        }
     }
 
     #[test]
@@ -89,8 +151,37 @@ mod test_ops {
         }
     }
 
+    fn test_many_inserts_and_reads<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = I::create(c_key, mem_pool).unwrap();
+
+        for i in (0..1000).into_iter() {
+            let key = format!("key__{}", i).into_bytes();
+            let pkey = format!("pkey__{}", i).into_bytes();
+            let value = format!("value__{}", i).into_bytes();
+            hash_join_table
+                .insert(key, pkey, i as u64, 1, value)
+                .unwrap();
+        }
+
+        // log_warn!("FINISH JOIN!!!!!!!!!!");
+
+        // Verify all entries after insertions are complete
+        for i in 0..1000 {
+            let key = format!("key__{}", i).into_bytes();
+            let pkey = format!("pkey__{}", i).into_bytes();
+            let expected_value = format!("value__{}", i).into_bytes();
+            let retrieved_val = hash_join_table.get(&key, &pkey, i as u64).unwrap();
+            assert_eq!(retrieved_val.unwrap(), expected_value);
+        }
+    }
+
     #[test]
-    fn test_many_inserts_and_reads() {
+    fn many_inserts_and_reads() {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
         let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
@@ -117,8 +208,75 @@ mod test_ops {
         }
     }
 
+    fn test_concurrent_inserts_and_reads<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        use std::thread;
+
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(I::create(c_key, mem_pool).unwrap());
+
+        let hash_join_table_clone = hash_join_table.clone();
+        let handle = thread::spawn(move || {
+            // Insert entries in a separate thread
+            for i in (0..1000).into_iter().step_by(2) {
+                let key = format!("key__{}", i).into_bytes();
+                let pkey = format!("pkey__{}", i).into_bytes();
+                let value = format!("value__{}", i).into_bytes();
+                hash_join_table_clone
+                    .insert(key, pkey, i as u64, 1, value)
+                    .unwrap();
+            }
+        });
+
+        for i in (1..1000).into_iter().step_by(2) {
+            let key = format!("key__{}", i).into_bytes();
+            let pkey = format!("pkey__{}", i).into_bytes();
+            let value = format!("value__{}", i).into_bytes();
+            hash_join_table
+                .insert(key, pkey, i as u64, 1, value)
+                .unwrap();
+        }
+
+        // Read entries while inserts are happening
+        for i in 0..1000 {
+            let key = format!("key__{}", i).into_bytes();
+            let pkey = format!("pkey__{}", i).into_bytes();
+            // It's possible that the key hasn't been inserted yet
+            let _ = hash_join_table.get(&key, &pkey, i as u64);
+        }
+
+        handle.join().unwrap();
+        // log_warn!("FINISH JOIN!!!!!!!!!!");
+        let hash_join_table_clone = hash_join_table.clone();
+
+        let handle = thread::spawn(move || {
+            // Verify all entries after insertions are complete
+            for i in 0..1000 {
+                let key = format!("key__{}", i).into_bytes();
+                let pkey = format!("pkey__{}", i).into_bytes();
+                let expected_value = format!("value__{}", i).into_bytes();
+                let retrieved_val = hash_join_table_clone.get(&key, &pkey, i as u64).unwrap();
+                assert_eq!(retrieved_val.unwrap(), expected_value);
+            }
+        });
+        // Verify all entries after insertions are complete
+        for i in 0..1000 {
+            // log_warn!("get {i}");
+            let key = format!("key__{}", i).into_bytes();
+            let pkey = format!("pkey__{}", i).into_bytes();
+            let expected_value = format!("value__{}", i).into_bytes();
+            let retrieved_val = hash_join_table.get(&key, &pkey, i as u64).unwrap();
+            assert_eq!(retrieved_val.unwrap(), expected_value);
+        }
+
+        handle.join().unwrap();
+    }
+
     #[test]
-    fn test_concurrent_inserts_and_reads() {
+    fn concurrent_inserts_and_reads() {
         use std::thread;
 
         let mem_pool = get_in_mem_pool();
@@ -182,18 +340,20 @@ mod test_ops {
         handle.join().unwrap();
     }
 
-    #[test]
-    fn simple_update_same_timestamp() {
+    fn test_simple_update_different_timestamp<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table: LinearHashTable<crate::prelude::InMemPool> =
-            LinearHashTable::create(c_key, mem_pool).unwrap();
+        let hash_join_table = Arc::new(I::create(c_key, mem_pool).unwrap());
+
         hash_join_table
             .insert(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
 
         hash_join_table
-            .update(vec![1], vec![1], 1, 1, vec![2])
+            .update(vec![1], vec![1], 2, 1, vec![2])
             .unwrap();
 
         let get_result = hash_join_table.get(&[2], &[1], 1);
@@ -206,7 +366,7 @@ mod test_ops {
         assert_eq!(get_result.unwrap().unwrap(), &[2]);
 
         let get_result = hash_join_table.get(&[1], &[1], 1);
-        assert_eq!(get_result.unwrap().unwrap(), &[2]);
+        assert_eq!(get_result.unwrap().unwrap(), &[1]);
     }
 
     #[test]
@@ -318,20 +478,20 @@ mod test_ops {
         }
     }
 
-    #[test]
-    fn simple_delete_same_timestamp() {
+    fn test_simple_delete_different_timestamp<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = LinearHashTable::create(c_key, mem_pool).unwrap();
+        let hash_join_table = Arc::new(I::create(c_key, mem_pool).unwrap());
+
         hash_join_table
             .insert(vec![1], vec![1], 1, 1, vec![1])
             .unwrap();
 
-        let del_result = hash_join_table.delete(&(vec![1])[..], &(vec![1])[..], 0, 1);
-        assert_eq!(del_result.ok(), Some(()));
-
         hash_join_table
-            .delete(&(vec![1])[..], &(vec![1])[..], 1, 1)
+            .delete(&(vec![1])[..], &(vec![1])[..], 2, 1)
             .unwrap();
 
         let get_result = hash_join_table.get(&[2], &[1], 1);
@@ -344,11 +504,7 @@ mod test_ops {
         assert_eq!(get_result.unwrap(), None);
 
         let get_result = hash_join_table.get(&[1], &[1], 1);
-        assert_eq!(get_result.unwrap(), None);
-
-        // duplicate delete
-        let del_result = hash_join_table.delete(&(vec![1])[..], &(vec![1])[..], 1, 1);
-        assert_eq!(del_result.err(), None);
+        assert_eq!(get_result.unwrap().unwrap(), &[1]);
     }
 
     #[test]

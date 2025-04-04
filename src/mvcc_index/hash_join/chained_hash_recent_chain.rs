@@ -183,113 +183,113 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         }
     }
 
-    pub fn insert_with_check(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let space_need = <Page as HashJoinPage>::require_space(&entry);
-        if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
-            return Err(AccessMethodError::RecordTooLarge);
-        }
-        let mut last_page = self.traverse_until_endofchain_for_insert(self.first_key(), entry)?;
-        log_trace!("Acquired write lock for page {}", last_page.get_id());
-        match last_page.insert(entry) {
-            Ok(_) => Ok(()),
-            Err(AccessMethodError::OutOfSpace) => {
-                log_debug!(
-                    "Not enough space in page {}. Creating a new page.",
-                    last_page.get_id()
-                );
-                let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
-                new_page.init();
-                last_page.set_next_page(new_page.get_id(), new_page.frame_id());
-                log_trace!(
-                    "Linked last page {} -> new page {}",
-                    last_page.get_id(),
-                    new_page.get_id()
-                );
-                match new_page.insert(entry) {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e),
-                }
-            }
-            Err(e) => Err(e),
-        }
-    }
+    // pub fn insert_with_check(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    //     let space_need = <Page as HashJoinPage>::require_space(&entry);
+    //     if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
+    //         return Err(AccessMethodError::RecordTooLarge);
+    //     }
+    //     let mut last_page = self.traverse_until_endofchain_for_insert(self.first_key(), entry)?;
+    //     log_trace!("Acquired write lock for page {}", last_page.get_id());
+    //     match last_page.insert(entry) {
+    //         Ok(_) => Ok(()),
+    //         Err(AccessMethodError::OutOfSpace) => {
+    //             log_debug!(
+    //                 "Not enough space in page {}. Creating a new page.",
+    //                 last_page.get_id()
+    //             );
+    //             let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
+    //             new_page.init();
+    //             last_page.set_next_page(new_page.get_id(), new_page.frame_id());
+    //             log_trace!(
+    //                 "Linked last page {} -> new page {}",
+    //                 last_page.get_id(),
+    //                 new_page.get_id()
+    //             );
+    //             match new_page.insert(entry) {
+    //                 Ok(_) => Ok(()),
+    //                 Err(e) => Err(e),
+    //             }
+    //         }
+    //         Err(e) => Err(e),
+    //     }
+    // }
 
-    fn traverse_until_endofchain_for_insert(
-        &self,
-        page_key: PageFrameKey,
-        entry: &MvccEntry,
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
-        let base = 2;
-        let mut attempts = 0;
-        loop {
-            let last_page = self.try_traverse_until_endofchain_for_insert(page_key, entry);
-            match last_page {
-                Ok(last_page) => {
-                    return Ok(last_page);
-                }
-                Err(AccessMethodError::PageWriteLatchFailed) => {
-                    attempts += 1;
-                    log_trace!(
-                        "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
-                        attempts,
-                        u64::pow(base, attempts)
-                    );
-                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
-                }
-                Err(AccessMethodError::KeyDuplicate) => {
-                    return Err(AccessMethodError::KeyDuplicate);
-                }
-                Err(e) => {
-                    panic!("Unexpected error: {:?}", e);
-                }
-            }
-        }
-    }
+    // fn traverse_until_endofchain_for_insert(
+    //     &self,
+    //     page_key: PageFrameKey,
+    //     entry: &MvccEntry,
+    // ) -> Result<FrameWriteGuard, AccessMethodError> {
+    //     let base = 2;
+    //     let mut attempts = 0;
+    //     loop {
+    //         let last_page = self.try_traverse_until_endofchain_for_insert(page_key, entry);
+    //         match last_page {
+    //             Ok(last_page) => {
+    //                 return Ok(last_page);
+    //             }
+    //             Err(AccessMethodError::PageWriteLatchFailed) => {
+    //                 attempts += 1;
+    //                 log_trace!(
+    //                     "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
+    //                     attempts,
+    //                     u64::pow(base, attempts)
+    //                 );
+    //                 std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+    //             }
+    //             Err(AccessMethodError::KeyDuplicate) => {
+    //                 return Err(AccessMethodError::KeyDuplicate);
+    //             }
+    //             Err(e) => {
+    //                 panic!("Unexpected error: {:?}", e);
+    //             }
+    //         }
+    //     }
+    // }
 
-    fn try_traverse_until_endofchain_for_insert(
-        &self,
-        page_key: PageFrameKey,
-        entry: &MvccEntry,
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
-        let mut current_page = self.read_page(page_key);
-        loop {
-            if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                if current_page.binary_search(entry.search_key()).0 {
-                    return Err(AccessMethodError::KeyDuplicate);
-                }
+    // fn try_traverse_until_endofchain_for_insert(
+    //     &self,
+    //     page_key: PageFrameKey,
+    //     entry: &MvccEntry,
+    // ) -> Result<FrameWriteGuard, AccessMethodError> {
+    //     let mut current_page = self.read_page(page_key);
+    //     loop {
+    //         if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
+    //             if current_page.binary_search(entry.search_key()).0 {
+    //                 return Err(AccessMethodError::KeyDuplicate);
+    //             }
 
-                // TODO: check free space may can insert here later.
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
-                if next_page.frame_id() != next_frame_id {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
-                }
-                current_page = next_page;
-            } else {
-                // TODO: check key to avoid write lock in case of duplicate key
-                match current_page.try_upgrade(true) {
-                    Ok(upgraded_page) => {
-                        return Ok(upgraded_page);
-                    }
-                    Err(_) => {
-                        log_debug!("Failed to upgrade the page. Will retry");
-                        return Err(AccessMethodError::PageWriteLatchFailed);
-                    }
-                }
-            }
-        }
-    }
+    //             // TODO: check free space may can insert here later.
+    //             let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+    //                 self.c_key,
+    //                 next_page_id,
+    //                 next_frame_id,
+    //             ));
+    //             if next_page.frame_id() != next_frame_id {
+    //                 log_debug!(
+    //                     "Frame of the next page has been changed. Trying to fix the frame id"
+    //                 );
+    //                 let new_frame_key = PageFrameKey::new_with_frame_id(
+    //                     self.c_key,
+    //                     next_page_id,
+    //                     next_page.frame_id(),
+    //                 );
+    //                 let _ = fix_frame_id(current_page, &new_frame_key);
+    //             }
+    //             current_page = next_page;
+    //         } else {
+    //             // TODO: check key to avoid write lock in case of duplicate key
+    //             match current_page.try_upgrade(true) {
+    //                 Ok(upgraded_page) => {
+    //                     return Ok(upgraded_page);
+    //                 }
+    //                 Err(_) => {
+    //                     log_debug!("Failed to upgrade the page. Will retry");
+    //                     return Err(AccessMethodError::PageWriteLatchFailed);
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     pub fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let mut current_page = self.first_page();

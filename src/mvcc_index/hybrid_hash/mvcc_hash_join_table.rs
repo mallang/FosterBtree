@@ -188,14 +188,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
         self.hash_table.get(key.as_ref(), pkey.as_ref(), ts)
     }
 
-    fn get_key(
-        &self,
-        key: &Self::Key,
-        ts: Timestamp,
-    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        self.hash_table.get_keys(&key, ts)
-    }
-
     fn update(
         &self,
         key: Self::Key,
@@ -271,7 +263,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for OpenAddrHashTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        todo!()
+        self.hash_table.get_keys(&key, ts)
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {

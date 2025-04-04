@@ -1,11 +1,10 @@
 use dashmap::mapref::entry;
-use fbtree::mvcc_index::hash_heap::hash_heap_table::HashHeapTable;
+use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::hash_join::chained_hash_bucket_second::{
     HISTORY_GET_COUNT, HISTORY_GET_TOTAL_NS, RECENT_GET_COUNT, RECENT_GET_TOTAL_NS,
 };
 use fbtree::mvcc_index::hash_join::chained_hash_history_chain::HCHAIN_PAGE_READ_COUNT;
 use fbtree::mvcc_index::hash_join_page::HISTORY_SLOT_CMP_CNT;
-use fbtree::mvcc_index::hybrid_hash::mvcc_hash_join_table::OpenAddrHashTable;
 use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
@@ -72,9 +71,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if i + 1 < args.len() {
                     if let Ok(type_name) = args[i + 1].parse::<String>() {
                         match type_name.as_str() {
-                            "open_address" => {
-                                hash_table_t = HashTableType::OpenAddressing;
-                            }
                             "chain" => {
                                 hash_table_t = HashTableType::Chained;
                             }
@@ -156,11 +152,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         HashTableType::Chained => {
             Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
-        HashTableType::OpenAddressing => {
-            Box::new(OpenAddrHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
-        }
         HashTableType::HeapTable => {
-            Box::new(HashHeapTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+            Box::new(HeapHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::RustHashMap => {
             Box::new(MvccRustHashMap::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool

@@ -19,12 +19,12 @@ use dashmap::mapref::entry;
 use rand::seq::index;
 use serde::{Deserialize, Serialize};
 
-use super::hash_heap_chain::ChainedHashHeapChain;
+use super::super::hash_join_heap_chain::HeapHashChain;
 
 pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
 pub const DEAFAULT_FIRST_BUCKET_NUM: usize = 128;
 
-pub struct HashHeapTable<T: MemPool + 'static> {
+pub struct HeapHashTable<T: MemPool + 'static> {
     c_key: ContainerKey,
     mem_pool: Arc<T>,
 
@@ -32,11 +32,11 @@ pub struct HashHeapTable<T: MemPool + 'static> {
     meta_frame_id: AtomicU32,
 
     bucket_count: usize,
-    bucket_entries: Vec<Arc<ChainedHashHeapChain<T>>>,
+    bucket_entries: Vec<Arc<HeapHashChain<T>>>,
     // tx_status: HashMap<TxId, TxInfo>, // Neet to written down to disk later...
 }
 
-impl<T: MemPool + 'static> HashHeapTable<T> {
+impl<T: MemPool + 'static> HeapHashTable<T> {
     /// Creates a new hash join table with the default number of buckets.
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEAFAULT_FIRST_BUCKET_NUM)
@@ -48,9 +48,9 @@ impl<T: MemPool + 'static> HashHeapTable<T> {
         let meta_page_id = meta_page.get_id();
         let meta_frame_id = AtomicU32::new(meta_page.frame_id());
 
-        let mut bucket_entries: Vec<Arc<ChainedHashHeapChain<T>>> = Vec::with_capacity(num_buckets);
+        let mut bucket_entries: Vec<Arc<HeapHashChain<T>>> = Vec::with_capacity(num_buckets);
         for i in 0..num_buckets {
-            let second_table = ChainedHashHeapChain::new(c_key, mem_pool.clone());
+            let second_table = HeapHashChain::new(c_key, mem_pool.clone());
             bucket_entries.push(Arc::new(second_table));
         }
         drop(meta_page);
@@ -130,7 +130,7 @@ impl<T: MemPool + 'static> HashHeapTable<T> {
         let second_table = &self.bucket_entries[index];
 
         // TODO: (JUN) now assume key is not changed, need to handle key change later
-        second_table.update(pkey, entry)
+        second_table.update(entry)
     }
 
     /// Deletes a key-value pair from the hash join table.
@@ -175,14 +175,14 @@ impl<T: MemPool + 'static> HashHeapTable<T> {
         (hasher.finish() as usize) % self.bucket_count
     }
 
-    pub fn scan_key(&self, key: &[u8], ts: Timestamp) -> Vec<MvccEntry> {
-        let index = self.get_bucket_index(key);
-        let bucket = &self.bucket_entries[index];
-        bucket.scan_key(key, &ts)
-    }
+    // pub fn scan_key(&self, key: &[u8], ts: Timestamp) -> Vec<MvccEntry> {
+    //     let index = self.get_bucket_index(key);
+    //     let bucket = &self.bucket_entries[index];
+    //     bucket.scan_key(key, &ts)
+    // }
 }
 
-impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
+impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     type Error = AccessMethodError;
     type Key = Vec<u8>;
     type PKey = Vec<u8>;
@@ -204,8 +204,15 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
-        let entry = self.get(key, pkey, &ts)?;
-        Ok(Some(entry.value))
+        let v = self.get(key, pkey, &ts).map_or(None, |e| {
+            // log_warn!("get entry: {:?}", e);
+            if e.value().is_empty() {
+                None
+            } else {
+                Some(e.value().to_vec())
+            }
+        });
+        Ok(v)
     }
 
     fn update(
@@ -242,13 +249,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
     > {
         todo!("Implement delta_scan for HashHeapTable")
     }
-    fn get_key(
-        &self,
-        key: &Self::Key,
-        ts: Timestamp,
-    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        todo!("Implement get_key for HashHeapTable")
-    }
 
     fn scan(
         &self,
@@ -257,7 +257,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
     {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
-            let iter = bucket.scan(ts)?;
+            let iter = bucket.scan_unique(ts)?;
             result.extend(iter);
         }
         Ok(Box::new(
@@ -273,11 +273,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
 
-        let mvccs: Vec<MvccEntry> = chain.scan_key(key, &ts);
+        let pk_v = chain.scan_key_vec(key, &ts);
 
-        let mapped = mvccs
-            .into_iter()
-            .map(|entry| (entry.pkey().to_vec(), entry.value().to_vec()));
+        let mapped = pk_v.into_iter();
 
         Ok(Box::new(mapped))
     }
@@ -316,4 +314,44 @@ impl<T: MemPool + 'static> MvccIndex<T> for HashHeapTable<T> {
     {
         Ok(Self::new(c_key, mem_pool))
     }
+}
+
+#[test]
+fn test_scan() {
+    use crate::mvcc_index::MvccIndex;
+
+    use crate::bp::InMemPool;
+
+    let mem_pool = Arc::new(InMemPool::new());
+    let table = HeapHashTable::new(ContainerKey::new(0, 0), mem_pool.clone());
+
+    let key = vec![1, 2, 3];
+    let pkey = vec![4, 5, 6];
+    let ts = 1;
+    let value = vec![7, 8, 9];
+    let new_value = vec![7, 8, 9, 10];
+    <HeapHashTable<_> as MvccIndex<_>>::insert(&table, key.clone(), pkey.clone(), ts, 0, value)
+        .unwrap();
+    <HeapHashTable<_> as MvccIndex<_>>::update(
+        &table,
+        key.clone(),
+        pkey.clone(),
+        ts + 1,
+        0,
+        new_value.clone(),
+    )
+    .unwrap();
+
+    let result = <HeapHashTable<_> as MvccIndex<_>>::scan(&table, 10)
+        .unwrap()
+        .collect::<Vec<_>>();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, key);
+    assert_eq!(result[0].1, pkey);
+    assert_eq!(result[0].2, new_value);
+
+    let result = <HeapHashTable<_> as MvccIndex<_>>::scan_all(&table)
+        .unwrap()
+        .collect::<Vec<_>>();
+    assert_eq!(result.len(), 2);
 }

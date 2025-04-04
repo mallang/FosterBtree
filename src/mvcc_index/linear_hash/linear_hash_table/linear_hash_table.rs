@@ -202,14 +202,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         self
     }
 
-    fn get_key(
-        &self,
-        key: &Self::Key,
-        ts: crate::prelude::Timestamp,
-    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        todo!()
-    }
-
     fn garbage_collect(&self, safe_ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
         todo!()
     }

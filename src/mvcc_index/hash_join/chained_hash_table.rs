@@ -431,14 +431,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         }
     }
 
-    fn get_key(
-        &self,
-        key: &Self::Key,
-        ts: Timestamp,
-    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        self.get_key(key, ts)
-    }
-
     fn update(
         &self,
         key: Self::Key,
