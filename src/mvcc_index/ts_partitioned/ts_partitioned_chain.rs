@@ -98,7 +98,7 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
             .find(|p| ts >= p.range.0 && ts < p.range.1)
             .unwrap();
 
-        partition.chain.update(entry)
+        partition.chain.update_no_repair(entry.pkey(), entry)
     }
 
     pub fn delete(&self, ts: Timestamp, pkey: &[u8]) -> Result<(), AccessMethodError> {

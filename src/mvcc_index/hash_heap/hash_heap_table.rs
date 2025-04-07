@@ -130,7 +130,7 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         let second_table = &self.bucket_entries[index];
 
         // TODO: (JUN) now assume key is not changed, need to handle key change later
-        second_table.update(entry)
+        second_table.update_no_repair(pkey, entry)
     }
 
     /// Deletes a key-value pair from the hash join table.

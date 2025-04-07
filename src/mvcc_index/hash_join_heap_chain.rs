@@ -73,7 +73,7 @@ impl<T: MemPool> HeapHashChain<T> {
             PageFrameKey::new_with_frame_id(self.c_key, last_page_id, last_frame_id);
         let mut last_page = self.traverse_until_endofchain_for_insert(last_page_frame_key)?;
         log_trace!("Acquired write lock for page {}", last_page.get_id());
-        match last_page.heap_insert(entry) {
+        match last_page.insert_heap_no_repair(entry) {
             Ok(_) => {
                 if self.last_page_id.load(Ordering::Acquire) != last_page.get_id() {
                     self.last_page_id
@@ -183,7 +183,7 @@ impl<T: MemPool> HeapHashChain<T> {
         let mut current_page = self.first_page();
 
         loop {
-            if let Some(entry) = current_page.heap_get(pkey, ts).ok() {
+            if let Some(entry) = current_page.get_heap_no_repair(pkey, ts).ok() {
                 let is_better = match &best_candidate {
                     None => true,
                     Some(existing) => entry.start_ts() > existing.start_ts(),
@@ -220,8 +220,65 @@ impl<T: MemPool> HeapHashChain<T> {
         }
     }
 
-    pub fn update(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    pub fn update_no_repair(
+        &self,
+        pkey: &[u8],
+        entry: &MvccEntry,
+    ) -> Result<(), AccessMethodError> {
         self.insert(entry)
+    }
+
+    pub fn update_with_write_repair(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        let mut inserted = false;
+        let mut repaired = false;
+
+        loop {
+            let next_page_info = current_page.next_page();
+            let upgrade = current_page.try_upgrade(true);
+            let mut write_page = match upgrade {
+                Ok(p) => p,
+                Err(_) => return Err(AccessMethodError::PageWriteLatchFailed),
+            };
+
+            match write_page.update_heap_write_repair(entry, inserted, repaired) {
+                Ok(()) => return Ok(()),
+                Err(AccessMethodError::UpdateReapiredButNotInseted) => {
+                    repaired = true;
+                    drop(write_page);
+                }
+                Err(AccessMethodError::UpdateInsertedButNotReapired) => {
+                    inserted = true;
+                    drop(write_page);
+                }
+                Err(AccessMethodError::OutOfSpace) => {
+                    drop(write_page);
+                }
+                Err(e) => return Err(e),
+            }
+
+            if repaired && inserted {
+                return Ok(());
+            }
+
+            if let Some((next_pid, next_fid)) = next_page_info {
+                current_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+            } else {
+                if inserted {
+                    return Ok(());
+                }
+                let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key)?;
+                new_page.init();
+                new_page.insert_heap_no_repair(entry)?;
+                self.last_page_id
+                    .store(new_page.get_id(), Ordering::Release);
+                self.last_frame_id
+                    .store(new_page.frame_id(), Ordering::Release);
+                return Ok(());
+            }
+        }
     }
 
     pub fn delete(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
@@ -822,7 +879,9 @@ mod tests {
             200,
             u64::MAX,
         );
-        heap_chain.update(&update_entry).expect("Update failed");
+        heap_chain
+            .update_no_repair(&pkey, &update_entry)
+            .expect("Update failed");
 
         // For a query at ts = 120 the chain should return the old version, now with end_ts set to 200.
         let fetched_history = heap_chain
@@ -894,7 +953,9 @@ mod tests {
             200,
             u64::MAX,
         );
-        heap_chain.update(&update_entry).expect("Update failed");
+        heap_chain
+            .update_no_repair(&pkey, &update_entry)
+            .expect("Update failed");
 
         // The historical version should now have end_ts = 200.
         let history_version = heap_chain
@@ -1075,7 +1136,9 @@ mod tests {
                                 new_start,
                                 u64::MAX,
                             );
-                            heap_chain.update(&update_entry).expect("Update failed");
+                            heap_chain
+                                .update_no_repair(pkey, &update_entry)
+                                .expect("Update failed");
                             let mut old = versions.pop().unwrap();
                             old.set_end_ts(&new_start);
                             versions.push(old);
@@ -1298,7 +1361,9 @@ mod tests {
 
         // Apply all updates.
         for (pkey, old_start_ts, new_entry) in &update_entries {
-            heap_chain.update(new_entry).expect("Update failed");
+            heap_chain
+                .update_no_repair(pkey, new_entry)
+                .expect("Update failed");
             let versions = ref_state.get_mut(pkey).expect("Missing ref_state entry");
             let idx = versions
                 .iter()
@@ -1493,7 +1558,12 @@ mod tests {
             let updates_slice = update_entries[start_idx..end_idx].to_vec();
             let handle = thread::spawn(move || {
                 for (pkey, old_start_ts, new_entry) in updates_slice {
-                    if heap_chain_clone.lock().unwrap().update(&new_entry).is_ok() {
+                    if heap_chain_clone
+                        .lock()
+                        .unwrap()
+                        .update_no_repair(&pkey, &new_entry)
+                        .is_ok()
+                    {
                         let mut guard = ref_state_clone.lock().unwrap();
                         let versions = guard.get_mut(&pkey).unwrap();
                         let idx = versions
@@ -1600,7 +1670,9 @@ mod tests {
             1 as u64,
             u64::MAX,
         );
-        heap_chain.update(&entry).expect("Update failed");
+        heap_chain
+            .update_no_repair(&pkey, &entry)
+            .expect("Update failed");
 
         // Scan all entries.
         let all_entries = heap_chain
