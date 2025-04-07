@@ -196,6 +196,15 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         value: Self::Value,
     ) -> Result<(), Self::Error>;
 
+    fn update_write_repair(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: Timestamp,
+        tx_id: TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error>;
+
     /// Deletes the key-primary key tuple at the given timestamp.
     fn delete(
         &self,

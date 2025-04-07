@@ -116,7 +116,7 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         let index = self.get_bucket_index(key);
         let second_table = &self.bucket_entries[index];
 
-        second_table.get(pkey, ts)
+        second_table.get_no_repair(pkey, ts)
     }
 
     /// Updates an existing key-value pair in the hash join table.
@@ -131,6 +131,19 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
 
         // TODO: (JUN) now assume key is not changed, need to handle key change later
         second_table.update_no_repair(pkey, entry)
+    }
+
+    pub fn update_write_reapair(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        entry: &MvccEntry,
+    ) -> Result<(), AccessMethodError> {
+        let index = self.get_bucket_index(key);
+        let second_table = &self.bucket_entries[index];
+
+        // TODO: (JUN) now assume key is not changed, need to handle key change later
+        second_table.update_write_repair(entry)
     }
 
     /// Deletes a key-value pair from the hash join table.
@@ -225,6 +238,19 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     ) -> Result<(), Self::Error> {
         let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
         self.update(&entry.key(), &entry.pkey(), &entry)
+    }
+
+    fn update_write_repair(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: Timestamp,
+        tx_id: TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
+        let entry =
+            MvccEntry::new_with_tx_id(key.clone(), pkey.clone(), value, ts, u64::MAX, tx_id);
+        self.update_write_reapair(&key, &pkey, &entry)
     }
 
     fn delete(

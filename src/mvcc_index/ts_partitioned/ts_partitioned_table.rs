@@ -172,6 +172,18 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         self.update(&entry.key(), &entry.pkey(), &entry)
     }
 
+    fn update_write_repair(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: Timestamp,
+        tx_id: TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
+        let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
+        self.update(&entry.key(), &entry.pkey(), &entry)
+    }
+
     fn delete(
         &self,
         key: &[u8],

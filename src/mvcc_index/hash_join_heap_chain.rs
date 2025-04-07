@@ -178,18 +178,27 @@ impl<T: MemPool> HeapHashChain<T> {
         }
     }
 
-    pub fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
+    pub fn get_no_repair(
+        &self,
+        pkey: &[u8],
+        ts: &Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
         let mut best_candidate: Option<MvccEntry> = None;
         let mut current_page = self.first_page();
 
         loop {
             if let Some(entry) = current_page.get_heap_no_repair(pkey, ts).ok() {
-                let is_better = match &best_candidate {
-                    None => true,
-                    Some(existing) => entry.start_ts() > existing.start_ts(),
-                };
-                if is_better {
-                    best_candidate = Some(entry);
+                let et = entry.end_ts();
+                if et != u64::MAX {
+                    return Ok(entry);
+                }
+                match &best_candidate {
+                    None => best_candidate = Some(entry),
+                    Some(existing) => {
+                        if entry.start_ts() > existing.start_ts() {
+                            best_candidate = Some(entry);
+                        }
+                    }
                 }
             }
 
@@ -228,7 +237,7 @@ impl<T: MemPool> HeapHashChain<T> {
         self.insert(entry)
     }
 
-    pub fn update_with_write_repair(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    pub fn update_write_repair(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         let mut inserted = false;
         let mut repaired = false;
@@ -863,7 +872,7 @@ mod tests {
 
         // Verify that a get query at ts = 120 returns the inserted value.
         let fetched_initial = heap_chain
-            .get(&pkey, &120)
+            .get_no_repair(&pkey, &120)
             .expect("Get failed for initial recent value");
         assert_eq!(fetched_initial.value(), initial_value.as_slice());
         assert_eq!(fetched_initial.start_ts(), 100);
@@ -885,7 +894,7 @@ mod tests {
 
         // For a query at ts = 120 the chain should return the old version, now with end_ts set to 200.
         let fetched_history = heap_chain
-            .get(&pkey, &120)
+            .get_no_repair(&pkey, &120)
             .expect("Get failed for historical version");
         assert_eq!(
             fetched_history.value(),
@@ -901,7 +910,7 @@ mod tests {
 
         // For a query at ts = 220 the chain should return the updated (recent) version.
         let fetched_recent = heap_chain
-            .get(&pkey, &220)
+            .get_no_repair(&pkey, &220)
             .expect("Get failed for updated recent version");
         assert_eq!(
             fetched_recent.value(),
@@ -938,7 +947,7 @@ mod tests {
 
         // Verify get at ts = 120.
         let fetched_recent = heap_chain
-            .get(&pkey, &120)
+            .get_no_repair(&pkey, &120)
             .expect("Get failed for recent value");
         assert_eq!(fetched_recent.value(), initial_value.as_slice());
         assert_eq!(fetched_recent.start_ts(), 100);
@@ -959,7 +968,7 @@ mod tests {
 
         // The historical version should now have end_ts = 200.
         let history_version = heap_chain
-            .get(&pkey, &150)
+            .get_no_repair(&pkey, &150)
             .expect("Get failed for historical version");
         assert_eq!(
             history_version.value(),
@@ -971,7 +980,7 @@ mod tests {
 
         // The recent version should be returned for ts = 220.
         let recent_updated = heap_chain
-            .get(&pkey, &220)
+            .get_no_repair(&pkey, &220)
             .expect("Get failed for updated recent version");
         assert_eq!(
             recent_updated.value(),
@@ -990,7 +999,7 @@ mod tests {
 
         // After deletion, a get at ts = 150 should still return the historical version.
         let fetched_history = heap_chain
-            .get(&pkey, &150)
+            .get_no_repair(&pkey, &150)
             .expect("Get failed for historical version after delete");
         assert_eq!(
             fetched_history.value(),
@@ -1002,7 +1011,7 @@ mod tests {
 
         // And a get at ts = 220 should return the updated version with end_ts = deletion_ts.
         let fetched_deleted = heap_chain
-            .get(&pkey, &220)
+            .get_no_repair(&pkey, &220)
             .expect("Get failed for deleted version at ts 220");
         assert_eq!(
             fetched_deleted.value(),
@@ -1015,7 +1024,7 @@ mod tests {
         // assert_eq!(fetched_deleted.end_ts(), deletion_ts);
 
         // A query with ts beyond the deletion should fail.
-        let not_found = heap_chain.get(&pkey, &300);
+        let not_found = heap_chain.get_no_repair(&pkey, &300);
         assert!(
             not_found.is_err(),
             "Expected get to fail for pkey at ts 300"
@@ -1197,7 +1206,7 @@ mod tests {
                                 } else {
                                     start + ((end - start) / 2)
                                 };
-                                let _ = heap_chain.get(pkey, &query_ts);
+                                let _ = heap_chain.get_no_repair(pkey, &query_ts);
                                 log_op(
                                     &mut op_log,
                                     pkey,
@@ -1234,7 +1243,7 @@ mod tests {
                 };
                 if query_ts >= start && query_ts < end {
                     let fetched = heap_chain
-                        .get(pkey, &query_ts)
+                        .get_no_repair(pkey, &query_ts)
                         .expect("Expected version, got error");
                     assert_eq!(
                         fetched.start_ts(),
@@ -1258,7 +1267,7 @@ mod tests {
                         query_ts
                     );
                 } else {
-                    if let Ok(res) = heap_chain.get(pkey, &query_ts) {
+                    if let Ok(res) = heap_chain.get_no_repair(pkey, &query_ts) {
                         panic!(
                             "Got unexpected version for pkey='{}' at ts={}: found version with [start={}, end={}] while interval is [{}, {})",
                             String::from_utf8_lossy(pkey),
@@ -1395,7 +1404,7 @@ mod tests {
                 };
                 if query_ts >= start && query_ts < end {
                     let fetched = heap_chain
-                        .get(pkey, &query_ts)
+                        .get_no_repair(pkey, &query_ts)
                         .expect("Expected version, got error");
                     assert_eq!(
                         fetched.start_ts(),
@@ -1419,7 +1428,7 @@ mod tests {
                         query_ts
                     );
                 } else {
-                    if let Ok(res) = heap_chain.get(pkey, &query_ts) {
+                    if let Ok(res) = heap_chain.get_no_repair(pkey, &query_ts) {
                         panic!(
                             "Got a version unexpectedly for pkey='{}' at ts={}: found [start={}, end={}] while interval is [{}, {})",
                             String::from_utf8_lossy(pkey),
@@ -1607,7 +1616,7 @@ mod tests {
                         let fetched = heap_chain
                             .lock()
                             .unwrap()
-                            .get(pkey, &query_ts)
+                            .get_no_repair(pkey, &query_ts)
                             .expect("Expected version, got error");
                         assert_eq!(
                             fetched.start_ts(),
@@ -1631,7 +1640,7 @@ mod tests {
                             query_ts
                         );
                     } else {
-                        if let Ok(res) = heap_chain.lock().unwrap().get(pkey, &query_ts) {
+                        if let Ok(res) = heap_chain.lock().unwrap().get_no_repair(pkey, &query_ts) {
                             panic!(
                                 "Got version unexpectedly for pkey='{}' at ts={}: found [start={}, end={}] while interval is [{}, {})",
                                 String::from_utf8_lossy(pkey),

@@ -922,28 +922,32 @@ impl HashJoinPage for Page {
         let mut best_candidate: Option<(usize, Timestamp)> = None;
 
         for i in 0..self.slot_count() {
-            // Attempt a cheap pkey check first; if no match, skip it.
-            if let Some(_rec) = self.slot_pkey_matches(&self.slot(i), pkey) {
-                // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
-                let slot = self.slot(i);
-                let start = slot.start_ts();
-                if start <= *ts {
-                    // If this start_ts is the largest we've seen so far (still ≤ ts),
-                    // we update the best candidate.
-                    match best_candidate {
-                        Some((_, best_start)) if start > best_start => {
-                            best_candidate = Some((i, start));
+            let slot = self.slot(i);
+
+            if let Some(_rec) = self.slot_pkey_matches(&slot, pkey) {
+                let st = slot.start_ts();
+                let et = slot.end_ts();
+
+                if st <= *ts {
+                    if *ts < et && et != Timestamp::MAX {
+                        // find exact match
+                        return self.get_entry_at_slot_id(i);
+                    } else if et == Timestamp::MAX {
+                        // Need to keep find the best candidate
+                        match best_candidate {
+                            Some((_, best_start)) if st > best_start => {
+                                best_candidate = Some((i, st));
+                            }
+                            None => {
+                                best_candidate = Some((i, st));
+                            }
+                            _ => {}
                         }
-                        None => {
-                            best_candidate = Some((i, start));
-                        }
-                        _ => {}
                     }
                 }
             }
         }
 
-        // If we found a candidate, return its MVCC entry.
         if let Some((idx, _)) = best_candidate {
             self.get_entry_at_slot_id(idx)
         } else {

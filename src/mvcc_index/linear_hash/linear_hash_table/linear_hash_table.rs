@@ -124,6 +124,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         }
     }
 
+    fn update_write_repair(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: crate::prelude::Timestamp,
+        tx_id: crate::mvcc_index::TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
     fn delete(
         &self,
         key: &[u8],

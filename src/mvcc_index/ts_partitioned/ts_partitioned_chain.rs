@@ -80,7 +80,7 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
     ) -> Result<MvccEntry, AccessMethodError> {
         for p in self.partitions.iter().rev() {
             if ts >= p.range.0 && ts < p.range.1 {
-                match p.chain.get(pkey, &ts) {
+                match p.chain.get_no_repair(pkey, &ts) {
                     Ok(entry) => return Ok(entry),
                     Err(AccessMethodError::KeyNotFound) => continue,
                     Err(e) => return Err(e),
