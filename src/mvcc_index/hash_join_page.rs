@@ -4,6 +4,7 @@ use crate::{
     prelude::{Page, PageId, Timestamp, AVAILABLE_PAGE_SIZE},
 };
 use std::{
+    collections::BTreeMap,
     result::Result::Ok,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -534,6 +535,8 @@ pub mod record {
 }
 use record::*;
 
+use super::hash_common::MvccEntryLoc;
+
 pub trait HashJoinPage {
     fn init(&mut self);
     fn heap_insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
@@ -547,6 +550,12 @@ pub trait HashJoinPage {
 
     fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn heap_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
+    fn heap_get_read_repair(
+        &self,
+        pkey: &[u8],
+        ts: &Timestamp,
+        versions: &mut BTreeMap<Timestamp, MvccEntryLoc>,
+    ) -> Result<MvccEntry, AccessMethodError>;
     fn get_history(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn get_entry_at_slot_id(&self, slot_id: usize) -> Result<MvccEntry, AccessMethodError>;
 
@@ -911,6 +920,49 @@ impl HashJoinPage for Page {
                 // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
                 let slot = self.slot(i);
                 let start = slot.start_ts();
+                if start <= *ts {
+                    // If this start_ts is the largest we've seen so far (still ≤ ts),
+                    // we update the best candidate.
+                    match best_candidate {
+                        Some((_, best_start)) if start > best_start => {
+                            best_candidate = Some((i, start));
+                        }
+                        None => {
+                            best_candidate = Some((i, start));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // If we found a candidate, return its MVCC entry.
+        if let Some((idx, _)) = best_candidate {
+            self.get_entry_at_slot_id(idx)
+        } else {
+            Err(AccessMethodError::KeyNotFound)
+        }
+    }
+
+    fn heap_get_read_repair(
+        &self,
+        pkey: &[u8],
+        ts: &Timestamp,
+        versions: &mut BTreeMap<Timestamp, MvccEntryLoc>,
+    ) -> Result<MvccEntry, AccessMethodError> {
+        let mut best_candidate: Option<(usize, Timestamp)> = None;
+
+        for i in 0..self.slot_count() {
+            // Attempt a cheap pkey check first; if no match, skip it.
+            if let Some(_rec) = self.slot_pkey_matches(&self.slot(i), pkey) {
+                // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
+                let slot = self.slot(i);
+                let start = slot.start_ts();
+
+                versions.insert(start, MvccEntryLoc::new(self.get_id(), i as u32));
+                if slot.end_ts() != u64::MAX {
+                    versions.retain(|&key, _| key <= start);
+                }
                 if start <= *ts {
                     // If this start_ts is the largest we've seen so far (still ≤ ts),
                     // we update the best candidate.

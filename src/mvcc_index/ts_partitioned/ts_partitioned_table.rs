@@ -10,7 +10,7 @@ use std::{
     error::Error,
     fmt::Debug,
     hash::{Hash, Hasher},
-    sync::{atomic::AtomicU32, Arc},
+    sync::{atomic::AtomicU32, Arc, RwLock},
     time::Duration,
     vec::IntoIter,
 };
@@ -26,10 +26,18 @@ pub struct TsPartitionedTable<T: MemPool + 'static> {
     mem_pool: Arc<T>,
 
     bucket_count: usize,
-    bucket_entries: Vec<Arc<TimestampPartitionCollection<T>>>,
+    bucket_entries: Vec<Arc<RwLock<TimestampPartitionCollection<T>>>>,
 }
 
 impl<T: MemPool + 'static> TsPartitionedTable<T> {
+    pub fn split_at_ts(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
+        for bucket in &self.bucket_entries {
+            bucket.write().unwrap().split_last_partition_at(ts)?;
+        }
+
+        Ok(())
+    }
+
     /// Creates a new hash join table with the default number of buckets.
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEFAULT_BUCKET_NUM)
@@ -40,7 +48,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         let mut bucket_entries = Vec::with_capacity(num_buckets);
         for i in 0..num_buckets {
             let second_table = TimestampPartitionCollection::new(c_key, mem_pool.clone());
-            bucket_entries.push(Arc::new(second_table));
+            bucket_entries.push(Arc::new(RwLock::new(second_table)));
         }
 
         Self {
@@ -52,15 +60,18 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     }
 
     /// Inserts a key-value pair with new pkey into the hash join table.
-    pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    pub fn _insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(entry.key());
         let ts_partitions = &self.bucket_entries[index];
 
-        ts_partitions.insert(entry.start_ts(), entry)
+        ts_partitions
+            .read()
+            .unwrap()
+            .insert(entry.start_ts(), entry)
     }
 
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
-    pub fn get(
+    pub fn _get(
         &self,
         key: &[u8],
         pkey: &[u8],
@@ -69,11 +80,23 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         let index = self.get_bucket_index(key);
         let ts_partitions = &self.bucket_entries[index];
 
-        ts_partitions.get_no_repair(pkey, *ts)
+        ts_partitions.read().unwrap().get_no_repair(pkey, *ts)
+    }
+
+    pub fn _get_read_repair(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
+        let index = self.get_bucket_index(key);
+        let ts_partitions = &self.bucket_entries[index];
+
+        ts_partitions.read().unwrap().get_read_repair(pkey, ts)
     }
 
     /// Updates an existing key-value pair in the hash join table.
-    pub fn update(
+    pub fn _update(
         &self,
         key: &[u8],
         pkey: &[u8],
@@ -83,16 +106,24 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         let ts_partitions = &self.bucket_entries[index];
 
         // TODO: (JUN) now assume key is not changed, need to handle key change later
-        ts_partitions.update(entry.start_ts(), entry)
+        ts_partitions
+            .read()
+            .unwrap()
+            .update(entry.start_ts(), entry)
     }
 
     // Deletes a key-value pair from the hash join table.
-    pub fn delete(&self, key: &[u8], pkey: &[u8], ts: &Timestamp) -> Result<(), AccessMethodError> {
+    pub fn _delete(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: &Timestamp,
+    ) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(key);
         let ts_partitions = &self.bucket_entries[index];
 
         // TODO: (JUN) now assume key is not changed, need to handle key change later
-        ts_partitions.delete(*ts, pkey)
+        ts_partitions.read().unwrap().delete(*ts, pkey)
     }
 
     // pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
@@ -108,10 +139,10 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         (hasher.finish() as usize) % self.bucket_count
     }
 
-    fn scan_unique(&self, ts: &Timestamp) -> Result<Vec<MvccEntry>, AccessMethodError> {
+    fn _scan_unique(&self, ts: &Timestamp) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut unique_keys = Vec::new();
         for bucket in &self.bucket_entries {
-            let keys = bucket.scan_unique(*ts)?;
+            let keys = bucket.read().unwrap().scan_unique(*ts)?;
             unique_keys.extend(keys);
         }
         Ok(unique_keys)
@@ -120,7 +151,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     fn _scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut all_entries = Vec::new();
         for bucket in &self.bucket_entries {
-            let entries = bucket.scan_all()?;
+            let entries = bucket.read().unwrap().scan_all()?;
             all_entries.extend(entries);
         }
         Ok(all_entries)
@@ -141,7 +172,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
-        self.insert(&entry)
+        self._insert(&entry)
     }
     fn get(
         &self,
@@ -149,7 +180,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
-        let v = self.get(key, pkey, &ts).map_or(None, |e| {
+        let v = self._get(key, pkey, &ts).map_or(None, |e| {
             // log_warn!("get entry: {:?}", e);
             if e.value().is_empty() {
                 None
@@ -169,7 +200,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
-        self.update(&entry.key(), &entry.pkey(), &entry)
+        self._update(&entry.key(), &entry.pkey(), &entry)
     }
 
     fn delete(
@@ -179,9 +210,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
         tx_id: TxId,
     ) -> Result<(), Self::Error> {
-        let entry =
-            MvccEntry::new_with_tx_id(key.to_vec(), pkey.to_vec(), vec![], ts, u64::MAX, tx_id);
-        self.insert(&entry)
+        // let entry =
+        //     MvccEntry::new_with_tx_id(key.to_vec(), pkey.to_vec(), vec![], ts, u64::MAX, tx_id);
+        // self._insert(&entry)
+        unimplemented!("delete is not implemented yet")
     }
 
     fn delta_scan(
@@ -200,7 +232,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
-        Ok(Box::new(self.scan_unique(&ts)?.into_iter().map(|entry| {
+        Ok(Box::new(self._scan_unique(&ts)?.into_iter().map(|entry| {
             (
                 entry.key().to_vec(),
                 entry.pkey().to_vec(),
@@ -217,7 +249,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         let idx = self.get_bucket_index(key);
         let partitions = &self.bucket_entries[idx];
 
-        let mvccs = partitions.scan_with_key(ts, key)?;
+        let mvccs = partitions.read().unwrap().scan_with_key(ts, key)?;
 
         Ok(Box::new(mvccs.into_iter()))
     }

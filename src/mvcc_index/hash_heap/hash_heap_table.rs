@@ -1,12 +1,12 @@
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{Delta, MvccEntry, MvccIndex, TxId},
+    mvcc_index::{hash_common::MvccEntryLoc, Delta, MvccEntry, MvccIndex, TxId},
     page::{Page, PageId},
     prelude::{AccessMethodError, Timestamp},
 };
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
     error::Error,
     fmt::Debug,
     hash::{Hash, Hasher},
@@ -50,8 +50,8 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
 
         let mut bucket_entries: Vec<Arc<HeapHashChain<T>>> = Vec::with_capacity(num_buckets);
         for i in 0..num_buckets {
-            let second_table = HeapHashChain::new(c_key, mem_pool.clone());
-            bucket_entries.push(Arc::new(second_table));
+            let heap_chain = HeapHashChain::new(c_key, mem_pool.clone());
+            bucket_entries.push(Arc::new(heap_chain));
         }
         drop(meta_page);
 
@@ -101,9 +101,9 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
     /// Inserts a key-value pair with new pkey into the hash join table.
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(entry.key());
-        let second_table = &self.bucket_entries[index];
+        let heap_chain = &self.bucket_entries[index];
 
-        second_table.insert(entry)
+        heap_chain.insert(entry)
     }
 
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
@@ -114,9 +114,24 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         ts: &Timestamp,
     ) -> Result<MvccEntry, AccessMethodError> {
         let index = self.get_bucket_index(key);
-        let second_table = &self.bucket_entries[index];
+        let heap_chain = &self.bucket_entries[index];
 
-        second_table.get(pkey, ts)
+        heap_chain.get_no_repair(pkey, ts)
+    }
+
+    pub fn get_read_repair(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: &Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
+        let index = self.get_bucket_index(key);
+        let heap_chain = &self.bucket_entries[index];
+        let mut versions: BTreeMap<u64, MvccEntryLoc> = BTreeMap::new();
+
+        let res = heap_chain.get_read_repair(pkey, ts, &mut versions);
+        heap_chain.read_repair(&mut versions);
+        return res;
     }
 
     /// Updates an existing key-value pair in the hash join table.
@@ -127,18 +142,18 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         entry: &MvccEntry,
     ) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(key);
-        let second_table = &self.bucket_entries[index];
+        let heap_chain = &self.bucket_entries[index];
 
         // TODO: (JUN) now assume key is not changed, need to handle key change later
-        second_table.update(entry)
+        heap_chain.update(entry)
     }
 
     /// Deletes a key-value pair from the hash join table.
     // pub fn delete(&self, key: &[u8], pkey: &[u8], ts: &Timestamp) -> Result<(), AccessMethodError> {
     //     let index = self.get_bucket_index(key);
-    //     let second_table = &self.bucket_entries[index];
+    //     let heap_chain = &self.bucket_entries[index];
 
-    //     second_table.delete(pkey, ts)
+    //     heap_chain.delete(pkey, ts)
     // }
 
     pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {

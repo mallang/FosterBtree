@@ -5,35 +5,43 @@ from collections import defaultdict
 import string
 
 def generate_transactions_and_operations(
-    data_file,
+    data_file_prefix,
     txs_file,
     ops_file,
     num_transactions,
     min_cmds_per_tx,
     max_cmds_per_tx,
-    history_get_ratio
+    history_get_ratio,
+    partitions,
 ):
     # Load data and determine pkey length
     data = {}
     pkey_lengths = set()
     value_lengths = []  # To collect lengths of values
     max_init_ts = 0
-    with open(data_file, 'r') as csvfile:
-        reader = csv.reader(csvfile)
-        for row in reader:
-            if len(row) < 6:
-                continue  # Skip invalid rows
-            tx_id, _start_ts, op, key, pkey_str, value = row
-            start_ts = int(_start_ts)
-            if op == "insert":
-                data[pkey_str] = [key, pkey_str, {start_ts: value}]
-            elif op == "update":
-                data[pkey_str][2][start_ts] = value
-            else:
-                print("Warning, unknown op {op}")
-            pkey_lengths.add(len(pkey_str))
-            value_lengths.append(len(value))  # Collect value lengths
-            max_init_ts = max(max_init_ts, start_ts)
+    # remove extension of data_file_prefix
+    data_file_prefix = data_file_prefix.rsplit('.', 1)[0]
+    csv_dir = data_file_prefix.rsplit('/', 1)[0]
+    data_file_prefix = data_file_prefix.rsplit('/', 1)[-1]
+    # find all files with prefix in csv_dir
+    data_files = [f"{csv_dir}/{data_file_prefix}_partition_{i}.csv" for i in range(0, partitions)]  # Example: data_0.csv, data_1.csv, ...
+    for data_file in data_files:
+        with open(data_file, 'r') as csvfile:
+            reader = csv.reader(csvfile)
+            for row in reader:
+                if len(row) < 6:
+                    continue  # Skip invalid rows
+                tx_id, _start_ts, op, key, pkey_str, value = row
+                start_ts = int(_start_ts)
+                if op == "insert":
+                    data[pkey_str] = [key, pkey_str, {start_ts: value}]
+                elif op == "update":
+                    data[pkey_str][2][start_ts] = value
+                else:
+                    print("Warning, unknown op {op}")
+                pkey_lengths.add(len(pkey_str))
+                value_lengths.append(len(value))  # Collect value lengths
+                max_init_ts = max(max_init_ts, start_ts)
 
     # Ensure pkey lengths are consistent
     if len(pkey_lengths) != 1:
@@ -279,6 +287,12 @@ if __name__ == "__main__":
         default=0.0,
         help='Ratio of get history version operations in read transactions. (default: 0.0)'
     )
+    parser.add_argument(
+        '-par', '--partition_number',
+        type=int,
+        default=1,
+        help='partition number (default: 1)'
+    )
     args = parser.parse_args()
 
     if (args.history_get_ratio - 0.0) < -0.001 or (args.history_get_ratio - 1.0) > 0.001 :
@@ -286,11 +300,12 @@ if __name__ == "__main__":
         exit(1)
     
     generate_transactions_and_operations(
-        data_file=args.data_file,
+        data_file_prefix=args.data_file,
         txs_file=args.txs_file,
         ops_file=args.ops_file,
         num_transactions=args.num_transactions,
         min_cmds_per_tx=args.min_cmds_per_tx,
         max_cmds_per_tx=args.max_cmds_per_tx,
         history_get_ratio=args.history_get_ratio,
+        partitions=args.partition_number,
     )

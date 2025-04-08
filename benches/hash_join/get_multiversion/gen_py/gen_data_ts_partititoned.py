@@ -21,7 +21,7 @@ def generate_key_pool(key_pool_size):
         key_pool.append(key_word)
     return key_pool
 
-def generate_data(output_file, num_records, key_length, pkey_length, value_min_length, value_max_length, key_pool_size, version_number):
+def generate_data(output_file_prefix, num_records, key_length, pkey_length, value_min_length, value_max_length, key_pool_size, version_number, partitions):
     """
     pkey: [1, num_records]
     key: size = key_pool_size
@@ -29,38 +29,48 @@ def generate_data(output_file, num_records, key_length, pkey_length, value_min_l
     # Generate the key pool
     key_pool = generate_key_pool(key_pool_size)
 
+    # get file prefix without extension
+    output_file_prefix = output_file_prefix.rsplit('.', 1)[0]
+
     # Generate pkeys as incrementing numbers, formatted to the specified length
     pkey_counter = 1  # Start from 1
     default_txn_id = 0
-    with open(output_file, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        for _ in range(num_records):
-            # Select a key from the key pool
-            key = random.choice(key_pool)
-            # Ensure the key has the specified length, pad or truncate as necessary
-            if len(key) < key_length:
-                key = key.ljust(key_length, '_')  # Pad with underscores for readability
-            else:
-                key = key[:key_length]
+    
+    for _ in range(num_records):
+        # Select a key from the key pool
+        key = random.choice(key_pool)
+        # Ensure the key has the specified length, pad or truncate as necessary
+        if len(key) < key_length:
+            key = key.ljust(key_length, '_')  # Pad with underscores for readability
+        else:
+            key = key[:key_length]
 
-            # Generate pkey, filled with underscores
-            pkey = str(pkey_counter)
-            if len(pkey) < pkey_length:
-                pkey = pkey.rjust(pkey_length, '_')  # Pad with underscores
-            else:
-                pkey = pkey[:pkey_length]
-            pkey_counter += 1
+        # Generate pkey, filled with underscores
+        pkey = str(pkey_counter)
+        if len(pkey) < pkey_length:
+            pkey = pkey.rjust(pkey_length, '_')  # Pad with underscores
+        else:
+            pkey = pkey[:pkey_length]
+        pkey_counter += 1
 
-            # Generate a value with random length between value_min_length and value_max_length
-            value_length = random.randint(value_min_length, value_max_length)
-            value = ''.join(random.choices(string.ascii_letters + string.digits, k=value_length))
-            
-            writer.writerow([default_txn_id, 0,"insert", key, pkey, value])
-            for ts in range(1, version_number):
-                value_length = random.randint(value_min_length, value_max_length)
-                value = ''.join(random.choices(string.ascii_letters + string.digits, k=value_length))
-                writer.writerow([default_txn_id, ts, "update", key, pkey, value])
-
+        # Generate a value with random length between value_min_length and value_max_length
+        value_length = random.randint(value_min_length, value_max_length)
+        value = ''.join(random.choices(string.ascii_letters + string.digits, k=value_length))
+        
+        versions_per_partition = version_number // partitions
+        for partition_id in range(partitions): 
+            start_version = partition_id * versions_per_partition
+            end_version = version_number if partition_id == (partitions - 1) else start_version + versions_per_partition
+            output_file = f"{output_file_prefix}_partition_{partition_id}.csv"
+            with open(output_file, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                for ts in range(start_version, end_version):
+                    value_length = random.randint(value_min_length, value_max_length)
+                    value = ''.join(random.choices(string.ascii_letters + string.digits, k=value_length))
+                    if ts == 0:
+                        writer.writerow([default_txn_id, 0, "insert", key, pkey, value])
+                    else:
+                        writer.writerow([default_txn_id, ts, "update", key, pkey, value])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -123,6 +133,16 @@ if __name__ == "__main__":
             '(default: 0)'
         )
     )
+    parser.add_argument(
+        '-par', '--partition_number',
+        type=int,
+        default=1,
+        help=(
+            'Number of partitions\n'
+            'Defines how many partitions of versions will be generated in the table.\n'
+            '(default: 1)'
+        )
+    )
     args = parser.parse_args()
 
     generate_data(
@@ -134,4 +154,5 @@ if __name__ == "__main__":
         args.value_max_length,
         args.key_pool_size,
         args.version_number,
+        args.partition_number,
     )

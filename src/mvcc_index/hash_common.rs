@@ -18,6 +18,20 @@ pub fn get_hashed_bucket_index(key: &[u8], total_size: u32) -> usize {
     (farmhash::hash32_with_seed(key, SUBTABLE_HASHER_SEED) % total_size) as usize
 }
 
+pub struct MvccEntryLoc(PageId, u32);
+
+impl MvccEntryLoc {
+    pub fn new(page_id: PageId, slot_id: u32) -> Self {
+        Self(page_id, slot_id)
+    }
+    pub fn page_id(&self) -> PageId {
+        self.0
+    }
+    pub fn slot_id(&self) -> u32 {
+        self.1
+    }
+}
+
 #[derive(Default)]
 pub struct BucketEntry {
     page_id: PageId,
@@ -46,7 +60,7 @@ impl BucketEntry {
 }
 
 // helper function
-pub fn write_page<T: MemPool + 'static>(mem_pool: &T, page_key: PageFrameKey) -> FrameWriteGuard {
+pub fn write_page<T: MemPool>(mem_pool: &T, page_key: PageFrameKey) -> FrameWriteGuard {
     loop {
         let page = mem_pool.get_page_for_write(page_key);
         // protected by LockManager, only acceptable error is "CannotEvictPage"

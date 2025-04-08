@@ -6,7 +6,7 @@ import argparse
 import random
 import string
 
-def main(output_dir):
+def main(output_dir, partition_number):
     # workload_dir = '../workload' # directory for CSV files
     # gen_txs_script = 'gen_txs.py'  # Path to gen_txs.py
     # csv_dir = '../csv'  # directory for CSV files
@@ -37,6 +37,7 @@ def main(output_dir):
                     '--min_cmds_per_tx', str(config.get('min_cmds_per_tx', 5)),
                     '--max_cmds_per_tx', str(config.get('max_cmds_per_tx', 10)),
                     '--history_get_ratio', str(ratio/100.0),
+                    '--partition_number', str(partition_number),
                 ]
 
                 # Run gen_txs.py with the arguments
@@ -52,7 +53,12 @@ if __name__ == '__main__':
         default='./csv',
         help='Output csv dir. (default: ./csv)'
     )
-    
+    parser.add_argument(
+        '-par', '--partition_number',
+        type=int,
+        default=1,
+        help='partition_number'
+    )
     args = parser.parse_args()
     print(f"generating get workloads... output dir {args.output_dir}")
-    main(args.output_dir)
+    main(args.output_dir, args.partition_number)

@@ -104,3 +104,7 @@ path = "benches/hash_join/get_multiversion/hash_join_bench_mixed_get.rs"
 [[bin]]
 name = "join_simulation"
 path = "benches/hash_join/join_simulation/join_simulation.rs"
+
+[[bin]]
+name = "hash_join_bench_mixed_get_repair"
+path = "benches/hash_join/get_multiversion/hash_join_bench_mixed_get_repair.rs"

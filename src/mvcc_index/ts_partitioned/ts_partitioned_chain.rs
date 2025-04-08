@@ -1,8 +1,19 @@
-use std::{collections::HashMap, sync::Arc};
+use core::panic;
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Bound::{Excluded, Unbounded},
+    sync::Arc,
+};
 
 use crate::{
-    bp::{ContainerKey, MemPool},
-    mvcc_index::{hash_join_heap_chain::HeapHashChain, MvccEntry},
+    bp::{ContainerKey, MemPool, PageFrameKey},
+    mvcc_index::{
+        hash_common::{write_page, MvccEntryLoc},
+        hash_join_heap_chain::HeapHashChain,
+        hash_join_page::HashJoinPage,
+        MvccEntry,
+    },
+    page::Page,
     prelude::{AccessMethodError, Timestamp},
 };
 
@@ -45,13 +56,13 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         }
     }
 
-    pub fn split_last_partition_at(&mut self, new_ts: Timestamp) -> Result<(), String> {
+    pub fn split_last_partition_at(&mut self, new_ts: Timestamp) -> Result<(), AccessMethodError> {
         let last_idx = self.partitions.len().saturating_sub(1);
         let last_partition = &self.partitions[last_idx];
         let (start, end) = last_partition.get_range();
 
         if new_ts <= start || new_ts >= end {
-            return Err("new_ts must be strictly within the last partition range".into());
+            panic!("Invalid timestamp for partition split");
         }
 
         let new_partition =
@@ -80,7 +91,7 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
     ) -> Result<MvccEntry, AccessMethodError> {
         for p in self.partitions.iter().rev() {
             if ts >= p.range.0 && ts < p.range.1 {
-                match p.chain.get(pkey, &ts) {
+                match p.chain.get_no_repair(pkey, &ts) {
                     Ok(entry) => return Ok(entry),
                     Err(AccessMethodError::KeyNotFound) => continue,
                     Err(e) => return Err(e),
@@ -88,6 +99,46 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
             }
         }
         Err(AccessMethodError::KeyNotFound)
+    }
+
+    pub fn get_read_repair(
+        &self,
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
+        let mut versions: BTreeMap<u64, MvccEntryLoc> = BTreeMap::new();
+
+        for p in self.partitions.iter().rev() {
+            if ts >= p.range.0 && ts < p.range.1 {
+                match p.chain.get_read_repair(pkey, &ts, &mut versions) {
+                    Ok(entry) => {
+                        self.read_repair(&versions);
+                        return Ok(entry);
+                    }
+                    Err(AccessMethodError::KeyNotFound) => continue,
+                    Err(e) => {
+                        self.read_repair(&versions);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        self.read_repair(&versions);
+        Err(AccessMethodError::KeyNotFound)
+    }
+
+    pub fn read_repair(&self, versions: &BTreeMap<u64, MvccEntryLoc>) {
+        for (ts, loc) in versions.iter() {
+            let next_entry = versions.range((Excluded(*ts), Unbounded)).next();
+            if let Some((next_ts, _)) = next_entry {
+                let page_key = PageFrameKey::new(self.c_key, loc.page_id());
+                let mut current_page = write_page(&*self.mem_pool, page_key);
+                let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
+                slot.set_end_ts(*next_ts);
+                <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
+            }
+        }
     }
 
     pub fn update(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
