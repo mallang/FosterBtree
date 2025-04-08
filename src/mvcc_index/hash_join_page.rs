@@ -539,8 +539,10 @@ use super::hash_common::MvccEntryLoc;
 
 pub trait HashJoinPage {
     fn init(&mut self);
-    fn heap_insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
-    fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
+
+    fn insert_heap_no_repair(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
+    fn insert_recent_history(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
+
     fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError>;
     fn insert_at_slot_id(
         &mut self,
@@ -565,6 +567,12 @@ pub trait HashJoinPage {
         entry: &MvccEntry,
         slot_id: usize,
     ) -> Result<MvccEntry, AccessMethodError>;
+    fn update_heap_write_repair(
+        &mut self,
+        entry: &MvccEntry,
+        already_inserted: bool,
+        already_repaired: bool,
+    ) -> Result<(), AccessMethodError>;
 
     fn delete(&mut self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn delete_at_slot_id(
@@ -747,7 +755,7 @@ impl HashJoinPage for Page {
         HashJoinPage::set_header(&mut *self, &header);
     }
 
-    fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    fn insert_recent_history(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
         let needed_space = SLOT_SIZE + new_rec.size();
         if needed_space > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
@@ -791,7 +799,7 @@ impl HashJoinPage for Page {
         Ok(())
     }
 
-    fn heap_insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    fn insert_heap_no_repair(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let rec = Record::new(entry.key(), entry.pkey(), entry.value());
         if SLOT_SIZE + rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
@@ -1098,6 +1106,57 @@ impl HashJoinPage for Page {
         );
 
         Ok(old_entry)
+    }
+
+    fn update_heap_write_repair(
+        &mut self,
+        entry: &MvccEntry,
+        already_inserted: bool,
+        already_repaired: bool,
+    ) -> Result<(), AccessMethodError> {
+        let mut did_repair = already_repaired;
+        let mut did_insert = already_inserted;
+
+        let pkey = entry.pkey();
+        let st = entry.start_ts();
+
+        // 1. repair
+        if !already_repaired {
+            for i in 0..self.slot_count() {
+                let slot = self.slot(i);
+                if slot.end_ts() != Timestamp::MAX {
+                    continue;
+                }
+                if let Some(_) = self.slot_pkey_matches(&slot, pkey) {
+                    if slot.start_ts() < st {
+                        let mut new_slot = slot;
+                        new_slot.set_end_ts(st);
+                        self.set_slot(i, &new_slot);
+                        did_repair = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 2. insert
+        if !already_inserted {
+            match self.insert_heap_no_repair(entry) {
+                Ok(_) => {
+                    did_insert = true;
+                }
+                Err(AccessMethodError::OutOfSpace) => { /* skip */ }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // 3. 결과
+        match (did_repair, did_insert) {
+            (true, true) => Ok(()),
+            (true, false) => Err(AccessMethodError::UpdateReapiredButNotInseted),
+            (false, true) => Err(AccessMethodError::UpdateInsertedButNotReapired),
+            (false, false) => Err(AccessMethodError::OutOfSpace),
+        }
     }
 
     fn delete(&mut self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
@@ -1683,7 +1742,7 @@ mod tests {
         let entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), start_ts, end_ts);
 
         // Insert the entry into the page.
-        let insert_result = HashJoinPage::insert(&mut page, &entry);
+        let insert_result = HashJoinPage::insert_recent_history(&mut page, &entry);
         assert!(insert_result.is_ok(), "Insert failed: {:?}", insert_result);
 
         // Retrieve the entry by its primary key and the timestamp.
@@ -1720,7 +1779,7 @@ mod tests {
             let end_ts: Timestamp = 200 + i as Timestamp;
             let entry = MvccEntry::new(key, pkey.clone(), value, start_ts, end_ts);
 
-            let res = HashJoinPage::insert(&mut page, &entry);
+            let res = HashJoinPage::insert_recent_history(&mut page, &entry);
             assert!(
                 res.is_ok(),
                 "Failed to insert entry for pkey {:?}: {:?}",
@@ -1873,7 +1932,7 @@ mod tests {
         let insert_entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), 100, 200);
 
         // Insert the entry into the page.
-        let res = HashJoinPage::insert(&mut page, &insert_entry);
+        let res = HashJoinPage::insert_recent_history(&mut page, &insert_entry);
         assert!(res.is_ok(), "Insert failed: {:?}", res.err());
 
         // Increase the expected used space.
@@ -1954,7 +2013,7 @@ mod tests {
             let entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), start_ts, end_ts);
 
             // Insert the entry.
-            let res = HashJoinPage::insert(&mut page, &entry);
+            let res = HashJoinPage::insert_recent_history(&mut page, &entry);
             assert!(
                 res.is_ok(),
                 "Insert failed for entry {}: {:?}",

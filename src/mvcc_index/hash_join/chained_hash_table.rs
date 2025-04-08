@@ -443,6 +443,18 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         ChainedHashTable::update(self, entry.key(), entry.pkey(), &entry)
     }
 
+    fn update_write_repair(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: Timestamp,
+        tx_id: TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
+        let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
+        ChainedHashTable::update(self, entry.key(), entry.pkey(), &entry)
+    }
+
     fn delete(
         &self,
         key: &[u8],

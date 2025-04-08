@@ -94,6 +94,29 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
         entries.push(new_entry);
         Ok(())
     }
+    fn update_write_repair(
+        &self,
+        key: Self::Key,
+        pkey: Self::PKey,
+        ts: crate::prelude::Timestamp,
+        tx_id: crate::mvcc_index::TxId,
+        value: Self::Value,
+    ) -> Result<(), Self::Error> {
+        let mut table = self.table.write().unwrap();
+        let entries = table.entry(key.clone()).or_insert_with(Vec::new);
+        // End the previous version if exists for the same pkey
+        if let Some(last_entry) = entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.pkey == pkey && e.end_ts == u64::MAX)
+        {
+            last_entry.end_ts = ts;
+        }
+        // Add the new version
+        let new_entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), ts, u64::MAX);
+        entries.push(new_entry);
+        Ok(())
+    }
     fn delete(
         &self,
         key: &[u8],

@@ -74,7 +74,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         let mut last_page = self.traverse_until_endofchain_for_write(last_page_frame_key)?;
         log_trace!("Acquired write lock for page {}", last_page.get_id());
 
-        match last_page.insert(entry) {
+        match last_page.insert_recent_history(entry) {
             Ok(_) => {
                 if self.last_page_id.load(atomic::Ordering::Acquire) != last_page.get_id() {
                     self.last_page_id
@@ -108,7 +108,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                     .store(new_page.get_id(), atomic::Ordering::Release);
                 self.last_frame_id
                     .store(new_page.frame_id(), atomic::Ordering::Release);
-                match new_page.insert(entry) {
+                match new_page.insert_recent_history(entry) {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e),
                 }
