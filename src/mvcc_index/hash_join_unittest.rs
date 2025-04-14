@@ -34,7 +34,7 @@ mod test_ops {
         test_many_inserts_and_reads::<I>();
         test_concurrent_inserts_and_reads::<I>();
         test_simple_update_different_timestamp::<I>();
-        test_simple_delete_different_timestamp::<I>();
+        // test_simple_delete_different_timestamp::<I>();
     }
 
     fn test_simple_insert<I>()

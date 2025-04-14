@@ -1,4 +1,5 @@
 pub mod hash_common;
+pub mod hash_common_page;
 pub mod hash_heap;
 pub mod hash_join;
 pub mod hash_join_page;

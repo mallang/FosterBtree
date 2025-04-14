@@ -584,11 +584,6 @@ pub trait HashJoinPage {
     fn garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError>;
 
     fn search_slot(&self, sort_key: &[u8]) -> (bool, usize) {
-        // if PARAMS.get().as_ref().unwrap().sorted == "True" {
-        //     self.binary_search(sort_key)
-        // } else {
-        //     self.linear_search(sort_key)
-        // };
         self.binary_search(sort_key)
         // self.linear_search(sort_key)
     }
@@ -1300,12 +1295,13 @@ impl HashJoinPage for Page {
         (false, low)
     }
 
-    fn linear_search(&self, sort_key: &[u8]) -> (bool, usize) {
+    fn linear_search(&self, search_key: &[u8]) -> (bool, usize) {
         for i in 0..self.slot_count() {
-            let rec = HashJoinPage::record(&*self, i);
-            if rec.sort_key() == sort_key {
+            let res = self.slot_cmp_key(i, search_key);
+            if res == std::cmp::Ordering::Equal {
                 return (true, i);
-            } else if rec.sort_key() > sort_key {
+            }
+            if res == std::cmp::Ordering::Greater {
                 return (false, i);
             }
         }
@@ -1531,29 +1527,23 @@ impl HashJoinPage for Page {
             if slot_prefix != input_prefix {
                 continue;
             }
+            let st = slot.start_ts();
+            let et = slot.end_ts();
+            if ts < st || et <= ts {
+                continue;
+            }
 
             // 2) If prefix matches, load the record
             let rec = self.record_from_slot(&slot);
             if rec.key() == search_key {
-                let st = slot.start_ts();
-                let et = slot.end_ts();
-                if st <= ts {
-                    let pkey = rec.pkey();
-                    match best_map.get_mut(pkey) {
-                        Some((old_st, old_e)) => {
-                            if st > *old_st {
-                                *old_st = st;
-                                let new_entry = MvccEntry::new(
-                                    rec.key().to_vec(),
-                                    rec.pkey().to_vec(),
-                                    rec.val().to_vec(),
-                                    st,
-                                    et,
-                                );
-                                *old_e = new_entry;
-                            }
+                let pkey = rec.pkey();
+                match best_map.get_mut(pkey) {
+                    Some((old_st, old_e)) => {
+                        if old_e.end_ts() != Timestamp::MAX {
+                            continue;
                         }
-                        None => {
+                        if st > *old_st {
+                            *old_st = st;
                             let new_entry = MvccEntry::new(
                                 rec.key().to_vec(),
                                 rec.pkey().to_vec(),
@@ -1561,8 +1551,18 @@ impl HashJoinPage for Page {
                                 st,
                                 et,
                             );
-                            best_map.insert(pkey.to_vec(), (st, new_entry));
+                            *old_e = new_entry;
                         }
+                    }
+                    None => {
+                        let new_entry = MvccEntry::new(
+                            rec.key().to_vec(),
+                            rec.pkey().to_vec(),
+                            rec.val().to_vec(),
+                            st,
+                            et,
+                        );
+                        best_map.insert(pkey.to_vec(), (st, new_entry));
                     }
                 }
             }
@@ -1633,6 +1633,7 @@ impl HashJoinPage for Page {
 
         // 1) skip older slots
         let start_idx = self.binary_search_by_end_ts(ts);
+        // let start_idx = 0;
 
         for slot_idx in start_idx..self.slot_count() {
             let slot = self.slot(slot_idx);

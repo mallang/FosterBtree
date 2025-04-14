@@ -352,7 +352,7 @@ fn read_table_0_and_insert(
     Ok(())
 }
 
-fn read_txs_and_apply(
+fn read_txs_and_apply_no_repair(
     filepath: &PathBuf,
     hash_join_table: &mut BoxMvccIndexMemPool,
 ) -> Result<(), Box<dyn Error>> {
@@ -373,6 +373,75 @@ fn read_txs_and_apply(
             }
             "update" => {
                 hash_join_table.update(
+                    op.join_key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
+                op_count += 1;
+            }
+            "delete" => {
+                hash_join_table.delete(&op.join_key, &op.pkey, op.ts, op.tx_id)?;
+                op_count += 1;
+            }
+            "get" => {
+                let _ = hash_join_table.get(&op.join_key, &op.pkey, op.ts)?;
+                op_count += 1;
+            }
+            "tx_begin" | "tx_commit" => { /* no-op */ }
+            "scan_with_join_key" => {
+                // For scan operations, we call scan_key but suppress printing
+
+                // if hash_table_type == HashTableType::Chained {
+                //     let scanner = hash_join_table.scan_key(&op.join_key, op.ts)?;
+                //     // iterate over the scanner to force the scan
+                //     let _ = scanner.collect::<Vec<_>>();
+                // } else {
+                //     let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
+                // }
+
+                // let scanner = hash_join_table.scan_key(&op.join_key, op.ts)?;
+                // let _ = scanner.collect::<Vec<_>>(); // force the scan
+                let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
+                op_count += 1;
+            }
+            other => {
+                eprintln!("Unknown operation: {}", other);
+            }
+        }
+    }
+    let duration = start.elapsed();
+    println!(
+        "Applied {} operations from {:?} in {} ns",
+        op_count,
+        filepath.file_name().unwrap_or_default(),
+        duration.as_nanos()
+    );
+    Ok(())
+}
+
+fn read_txs_and_apply_write_repair(
+    filepath: &PathBuf,
+    hash_join_table: &mut BoxMvccIndexMemPool,
+) -> Result<(), Box<dyn Error>> {
+    let ops = read_txs_csv(filepath)?;
+    let mut op_count = 0;
+    let start = Instant::now();
+    for op in &ops {
+        match op.op.as_str() {
+            "insert" => {
+                hash_join_table.insert(
+                    op.join_key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
+                op_count += 1;
+            }
+            "update" => {
+                hash_join_table.update_write_repair(
                     op.join_key.clone(),
                     op.pkey.clone(),
                     op.ts,
@@ -842,7 +911,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 3) Apply update TX log.
     println!("\n=== Applying update TX log ===");
-    read_txs_and_apply(&txs0_path, &mut hash_join_table)?;
+    read_txs_and_apply_no_repair(&txs0_path, &mut hash_join_table)?;
+    // read_txs_and_apply_write_repair(&txs0_path, &mut hash_join_table)?;
 
     // 4) Check update consistency.
     if do_consistency_check {
@@ -890,7 +960,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "\n=== Applying join TX log: {} (table_idx={}, ts={}) ===",
                 fname, table_idx, ts_val
             );
-            read_txs_and_apply(&join_log_path, &mut hash_join_table)?;
+            read_txs_and_apply_no_repair(&join_log_path, &mut hash_join_table)?;
 
             // Consistency check using expected join result files.
             if do_consistency_check {
