@@ -918,23 +918,30 @@ impl HashJoinPage for Page {
         let mut best_candidate: Option<(usize, Timestamp)> = None;
 
         for i in 0..self.slot_count() {
+            let slot = self.slot(i);
+            let start = slot.start_ts();
+            if start > *ts {
+                // This slot is too new; skip it.
+                continue;
+            }
+            let end = slot.end_ts();
+            if end < *ts {
+                // This slot is too old; skip it.
+                continue;
+            }
+
             // Attempt a cheap pkey check first; if no match, skip it.
             if let Some(_rec) = self.slot_pkey_matches(&self.slot(i), pkey) {
                 // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
-                let slot = self.slot(i);
-                let start = slot.start_ts();
-                if start <= *ts {
-                    // If this start_ts is the largest we've seen so far (still ≤ ts),
-                    // we update the best candidate.
-                    match best_candidate {
-                        Some((_, best_start)) if start > best_start => {
-                            best_candidate = Some((i, start));
-                        }
-                        None => {
-                            best_candidate = Some((i, start));
-                        }
-                        _ => {}
+                // we update the best candidate.
+                match best_candidate {
+                    Some((_, best_start)) if start > best_start => {
+                        best_candidate = Some((i, start));
                     }
+                    None => {
+                        best_candidate = Some((i, start));
+                    }
+                    _ => {}
                 }
             }
         }

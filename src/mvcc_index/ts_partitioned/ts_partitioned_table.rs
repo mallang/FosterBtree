@@ -190,6 +190,22 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         });
         Ok(v)
     }
+    fn get_read_repair(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        let v = self._get_read_repair(key, pkey, ts).map_or(None, |e| {
+            // log_warn!("get entry: {:?}", e);
+            if e.value().is_empty() {
+                None
+            } else {
+                Some(e.value().to_vec())
+            }
+        });
+        Ok(v)
+    }
 
     fn update(
         &self,
@@ -291,5 +307,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Self: Sized,
     {
         Ok(Self::new(c_key, mem_pool))
+    }
+
+    fn create_with_bucket_num(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        bucket_num: usize,
+    ) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
+        Ok(Self::new_with_bucket_num(c_key, mem_pool, bucket_num))
     }
 }

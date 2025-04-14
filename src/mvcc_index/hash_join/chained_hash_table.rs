@@ -405,6 +405,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         Ok(Self::new(c_key, mem_pool))
     }
 
+    fn create_with_bucket_num(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        bucket_num: usize,
+    ) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
+        Ok(Self::new_with_bucket_num(c_key, mem_pool, bucket_num))
+    }
+
     fn insert(
         &self,
         key: Self::Key,
@@ -419,6 +430,19 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     }
 
     fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        match ChainedHashTable::get(self, key.as_ref(), pkey.as_ref(), &ts) {
+            Ok(entry) => Ok(Some(entry.value().to_vec())),
+            Err(AccessMethodError::KeyNotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn get_read_repair(
         &self,
         key: &[u8],
         pkey: &[u8],

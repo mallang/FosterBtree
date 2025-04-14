@@ -7,6 +7,7 @@ use fbtree::mvcc_index::hash_join::chained_hash_history_chain::HCHAIN_PAGE_READ_
 use fbtree::mvcc_index::hash_join_page::HISTORY_SLOT_CMP_CNT;
 use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
+use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
 use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
 use std::collections::{HashMap, HashSet};
@@ -72,7 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Ok(type_name) = args[i + 1].parse::<String>() {
                         match type_name.as_str() {
                             "chain" => {
-                                hash_table_t = HashTableType::Chained;
+                                hash_table_t = HashTableType::RecentHistoryChained;
                             }
                             "heap" => {
                                 hash_table_t = HashTableType::HeapTable;
@@ -149,7 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
     let hash_join_table = match hash_table_t {
-        HashTableType::Chained => {
+        HashTableType::RecentHistoryChained => {
             Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::HeapTable => {
@@ -160,6 +161,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         HashTableType::LinearHashTable => {
             Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+        }
+        HashTableType::TsPartitionChained => {
+            Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
     };
 
@@ -284,7 +288,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // After finishing all operations, print the statistics.
     println!("===STAT_START===");
-    if hash_table_t == HashTableType::Chained {
+    if hash_table_t == HashTableType::RecentHistoryChained {
         if let Some(chained_hash_table) = hash_join_table
             .as_any()
             .downcast_ref::<ChainedHashTable<_>>()

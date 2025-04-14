@@ -167,6 +167,14 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     where
         Self: Sized;
 
+    fn create_with_bucket_num(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        bucket_num: usize,
+    ) -> Result<Self, Self::Error>
+    where
+        Self: Sized;
+
     /// Inserts a key-primary key-value tuple with a timestamp.
     fn insert(
         &self,
@@ -180,6 +188,13 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     /// Retrieves the value associated with the key and primary key at the given timestamp.
     /// Returns `None` if no matching record is found at that timestamp.
     fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+    ) -> Result<Option<Self::Value>, Self::Error>;
+
+    fn get_read_repair(
         &self,
         key: &[u8],
         pkey: &[u8],
@@ -295,8 +310,9 @@ pub type BoxMvccIndexMemPool = Box<
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashTableType {
-    Chained,
+    RecentHistoryChained,
     HeapTable,
     RustHashMap,
     LinearHashTable,
+    TsPartitionChained,
 }
