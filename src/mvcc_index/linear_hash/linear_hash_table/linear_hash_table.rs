@@ -216,6 +216,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     fn garbage_collect(&self, safe_ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
         todo!()
     }
+
+    fn split_at_ts(&self, ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 mod tests {

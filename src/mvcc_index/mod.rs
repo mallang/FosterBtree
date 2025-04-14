@@ -155,11 +155,6 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     type PKey: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
     type Value: Clone + Debug + Send + Sync + AsRef<[u8]>;
     type Error: Error + Debug + Send + Sync + 'static;
-    // type MemPoolType: MemPool;
-    // type Iter: Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send;
-    // type DeltaIter: Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send;
-    // type ScanKeyIter: Iterator<Item = (Self::PKey, Self::Value)> + Send;
-    // type ScanAllIter: Iterator<Item = MvccEntry> + Send;
 
     /// Creates a new instance of the index.
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
@@ -254,6 +249,9 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error>;
 
     fn as_any(&self) -> &dyn Any;
+    
+    // only has effect for ts_partitioned table
+    fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error>;
 }
 
 /// Represents a change (delta) in the value of a key-primary key tuple.

@@ -491,16 +491,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         Ok(Box::new(iter))
     }
 
-    // fn scan_key(
-    //     &self,
-    //     key: &Self::Key,
-    //     ts: Timestamp,
-    // ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
-    //     let all = ChainedHashTable::scan_key_vec(&Arc::new(self.clone()), key, ts);
-    //     let iter = all.into_iter().map(|entry| (entry.pkey().to_vec(), entry.value().to_vec()));
-    //     Ok(Box::new(iter))
-    // }
-
     fn scan_key_vec(
         &self,
         key: &Self::Key,
@@ -537,6 +527,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+    fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 

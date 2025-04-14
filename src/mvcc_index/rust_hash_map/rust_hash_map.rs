@@ -220,4 +220,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
             .unwrap_or_default();
         Ok(result)
     }
+
+    fn split_at_ts(&self, ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }

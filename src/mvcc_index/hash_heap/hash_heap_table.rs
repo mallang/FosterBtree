@@ -355,6 +355,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     {
         Ok(Self::new(c_key, mem_pool))
     }
+
+    fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[test]
