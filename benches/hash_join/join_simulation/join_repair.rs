@@ -8,10 +8,10 @@ use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccIndex, TxId};
 use fbtree::prelude::Timestamp;
-use rand::rngs::SmallRng;
+use rand::rngs::{SmallRng, StdRng};
 use rand::seq::SliceRandom;
-use rand::Rng;
 use rand::SeedableRng;
+use rand::{Rng, RngCore};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -42,6 +42,7 @@ fn random_bytes(rng: &mut SmallRng, len: usize) -> Vec<u8> {
 }
 
 pub fn generate_insert_ops(
+    rng: &mut SmallRng,
     row_count: usize,
     num_join_keys: usize,
     join_key_size: usize,
@@ -49,11 +50,9 @@ pub fn generate_insert_ops(
     value_size: usize,
     table_map: &mut HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
 ) -> Vec<TxOperation> {
-    let mut rng = SmallRng::from_entropy();
-
     let mut join_keys = Vec::with_capacity(num_join_keys);
     for _ in 0..num_join_keys {
-        let jk = random_bytes(&mut rng, join_key_size);
+        let jk = random_bytes(rng, join_key_size);
         join_keys.push(jk);
     }
 
@@ -65,14 +64,14 @@ pub fn generate_insert_ops(
         let selected_jk = &join_keys[jk_idx];
 
         let pkey = loop {
-            let candidate = random_bytes(&mut rng, pkey_size);
+            let candidate = random_bytes(rng, pkey_size);
             if !used_pkeys.contains(&candidate) {
                 used_pkeys.insert(candidate.clone());
                 break candidate;
             }
         };
 
-        let value = random_bytes(&mut rng, value_size);
+        let value = random_bytes(rng, value_size);
         table_map.insert(pkey.clone(), (selected_jk.clone(), value.clone()));
 
         let op = TxOperation {
@@ -91,6 +90,7 @@ pub fn generate_insert_ops(
 }
 
 pub fn generate_update_ops(
+    rng: &mut SmallRng,
     row_count: usize,
     update_ratio: f64,
     value_size: usize,
@@ -98,7 +98,6 @@ pub fn generate_update_ops(
     num_tx: usize,
     table_map: &mut HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
 ) -> Vec<TxOperation> {
-    let mut rng = SmallRng::from_entropy();
     let total_updates = ((row_count as f64) * update_ratio).ceil() as usize;
     let ops_per_tx = (total_updates as f64 / num_tx as f64).ceil() as usize;
 
@@ -110,14 +109,14 @@ pub fn generate_update_ops(
         let tx_id = ts;
 
         let sampled_keys = all_keys
-            .choose_multiple(&mut rng, ops_per_tx)
+            .choose_multiple(rng, ops_per_tx)
             .cloned()
             .collect::<Vec<_>>();
 
         for pkey in sampled_keys {
             if let Some((join_key, _)) = table_map.get(&pkey) {
                 let join_key = join_key.clone();
-                let new_val = random_bytes(&mut rng, value_size);
+                let new_val = random_bytes(rng, value_size);
                 table_map.insert(pkey.clone(), (join_key.clone(), new_val.clone()));
 
                 ops.push(TxOperation {
@@ -136,6 +135,7 @@ pub fn generate_update_ops(
 }
 
 pub fn generate_get_ops(
+    rng: &mut SmallRng,
     row_count: usize,
     get_ratio: f64,
     recent_get_ratio: f64,
@@ -143,7 +143,6 @@ pub fn generate_get_ops(
     tx_id: TxId,
     table_map: &HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
 ) -> Vec<TxOperation> {
-    let mut rng = SmallRng::from_entropy();
     let total_gets = ((row_count as f64) * get_ratio).ceil() as usize;
     let recent_gets = ((total_gets as f64) * recent_get_ratio).ceil() as usize;
     let history_gets = total_gets.saturating_sub(recent_gets);
@@ -153,7 +152,7 @@ pub fn generate_get_ops(
 
     // 1) recent reads (max_ts)
     for _ in 0..recent_gets {
-        let pkey = all_keys.choose(&mut rng).unwrap().clone();
+        let pkey = all_keys.choose(rng).unwrap().clone();
         let (join_key, _) = table_map.get(&pkey).unwrap();
 
         ops.push(TxOperation {
@@ -168,7 +167,7 @@ pub fn generate_get_ops(
 
     // 2) older reads (random ts in 0..max_ts)
     for _ in 0..history_gets {
-        let pkey = all_keys.choose(&mut rng).unwrap().clone();
+        let pkey = all_keys.choose(rng).unwrap().clone();
         let (join_key, _) = table_map.get(&pkey).unwrap();
         let ts = rng.gen_range(0..max_ts);
 
@@ -361,15 +360,15 @@ struct Cli {
     #[arg(short = 't', long = "table-type", default_value = "heap")]
     table_kind: TableType,
 
-    /// Update ratio (0.0 - 1.0)
-    #[arg(short = 'u', long = "update-ratio", default_value = "0.1")]
+    /// Update ratio
+    #[arg(short = 'u', long = "update-ratio", default_value = "2.0")]
     update_ratio: f64,
 
     /// number of transactions
     #[arg(short = 'n', long = "num-tx", default_value = "10")]
     num_tx: usize,
 
-    /// Get ratio (0.0 - 1.0)
+    /// Get ratio
     #[arg(short = 'g', long = "get-ratio", default_value = "0.5")]
     get_ratio: f64,
 
@@ -380,10 +379,30 @@ struct Cli {
     /// Bucket_num
     #[arg(short = 'b', long = "bucket-num")]
     bucket_num: Option<usize>,
+
+    /// Seed for random number generation
+    #[arg(short = 's', long = "seed")]
+    seed: Option<u64>,
+}
+
+pub fn create_rng(seed: Option<u64>) -> SmallRng {
+    match seed {
+        Some(s) => {
+            println!("[INFO] Using provided seed: {}\n", s);
+            SmallRng::seed_from_u64(s)
+        }
+        None => {
+            let mut entropy = StdRng::from_entropy();
+            let seed = entropy.next_u64();
+            println!("[INFO] Generated random seed: {}\n", seed);
+            SmallRng::seed_from_u64(seed)
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let mut rng = create_rng(cli.seed);
 
     let pkey_per_join_key = 500;
     let join_key_per_bucket = 2;
@@ -402,6 +421,7 @@ fn main() -> Result<()> {
 
     let mut table_map: HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)> = HashMap::new();
     let insert_ops = generate_insert_ops(
+        &mut rng,
         cli.row_count,
         num_join_keys,
         cli.join_key_size,
@@ -410,6 +430,7 @@ fn main() -> Result<()> {
         &mut table_map,
     );
     let update_ops = generate_update_ops(
+        &mut rng,
         cli.row_count,
         cli.update_ratio,
         cli.value_size,
@@ -418,6 +439,7 @@ fn main() -> Result<()> {
         &mut table_map,
     );
     let get_ops = generate_get_ops(
+        &mut rng,
         cli.row_count,
         cli.get_ratio,
         recent_get_ratio,
