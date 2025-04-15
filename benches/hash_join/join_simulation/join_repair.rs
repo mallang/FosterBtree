@@ -13,17 +13,26 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand::{Rng, RngCore};
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct TxOperation {
     pub tx_id: u64,
-    pub ts: u64,
+    pub ts: Timestamp,
     pub op: String,
     pub pkey: Vec<u8>,
     pub join_key: Vec<u8>,
     pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReadTxOperation {
+    pub tx_id: u64,
+    pub tx_ts: u64,
+    pub op: String, // "scan_key", "scan_all", "delta_scan"
+    pub join_key: Vec<u8>,
+    pub scan_ts: Timestamp,
+    pub gc_ts: Vec<Timestamp>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -48,38 +57,48 @@ pub fn generate_insert_ops(
     join_key_size: usize,
     pkey_size: usize,
     value_size: usize,
-    table_map: &mut HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
+    table_map: &mut HashMap<Vec<u8>, HashMap<Vec<u8>, Vec<(Timestamp, Vec<u8>)>>>,
+    join_keys: &mut Vec<Vec<u8>>,
+    key_pairs: &mut Vec<(Vec<u8>, Vec<u8>)>, // (pkey, join_key)
 ) -> Vec<TxOperation> {
-    let mut join_keys = Vec::with_capacity(num_join_keys);
+    let mut used_join_keys = HashSet::with_capacity(num_join_keys);
     for _ in 0..num_join_keys {
-        let jk = random_bytes(rng, join_key_size);
-        join_keys.push(jk);
-    }
-
-    let mut used_pkeys = HashSet::with_capacity(row_count);
-
-    let mut ops = Vec::with_capacity(row_count);
-    for _ in 0..row_count {
-        let jk_idx = rng.gen_range(0..num_join_keys);
-        let selected_jk = &join_keys[jk_idx];
-
-        let pkey = loop {
-            let candidate = random_bytes(rng, pkey_size);
-            if !used_pkeys.contains(&candidate) {
-                used_pkeys.insert(candidate.clone());
+        let jkey = loop {
+            let candidate = random_bytes(rng, join_key_size);
+            if used_join_keys.insert(candidate.clone()) {
                 break candidate;
             }
         };
+        join_keys.push(jkey);
+    }
+
+    let mut used_pkeys = HashSet::with_capacity(row_count);
+    let mut ops = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        let jkey_idx = rng.gen_range(0..num_join_keys);
+        let join_key = &join_keys[jkey_idx];
+
+        let pkey = loop {
+            let candidate = random_bytes(rng, pkey_size);
+            if used_pkeys.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        key_pairs.push((pkey.clone(), join_key.clone()));
 
         let value = random_bytes(rng, value_size);
-        table_map.insert(pkey.clone(), (selected_jk.clone(), value.clone()));
+        let pkey_map = table_map
+            .entry(join_key.clone())
+            .or_insert_with(HashMap::new);
+        let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
+        version_list.push((0, value.clone()));
 
         let op = TxOperation {
             tx_id: 0,
             ts: 0,
             op: "insert".to_string(),
             pkey,
-            join_key: selected_jk.clone(),
+            join_key: join_key.clone(),
             value,
         };
 
@@ -96,28 +115,29 @@ pub fn generate_update_ops(
     value_size: usize,
     start_ts: Timestamp,
     num_tx: usize,
-    table_map: &mut HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
+    key_pairs: &[(Vec<u8>, Vec<u8>)],
+    table_map: &mut HashMap<Vec<u8>, HashMap<Vec<u8>, Vec<(Timestamp, Vec<u8>)>>>,
 ) -> Vec<TxOperation> {
     let total_updates = ((row_count as f64) * update_ratio).ceil() as usize;
     let ops_per_tx = (total_updates as f64 / num_tx as f64).ceil() as usize;
 
-    let all_keys: Vec<_> = table_map.keys().cloned().collect();
     let mut ops = Vec::with_capacity(total_updates);
 
     for i in 0..num_tx {
         let ts = start_ts + i as u64;
         let tx_id = ts;
 
-        let sampled_keys = all_keys
+        let sampled_pairs = key_pairs
             .choose_multiple(rng, ops_per_tx)
             .cloned()
             .collect::<Vec<_>>();
 
-        for pkey in sampled_keys {
-            if let Some((join_key, _)) = table_map.get(&pkey) {
-                let join_key = join_key.clone();
-                let new_val = random_bytes(rng, value_size);
-                table_map.insert(pkey.clone(), (join_key.clone(), new_val.clone()));
+        for (pkey, join_key) in sampled_pairs {
+            let new_val = random_bytes(rng, value_size);
+
+            if let Some(pkey_map) = table_map.get_mut(&join_key) {
+                let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
+                version_list.push((ts, new_val.clone()));
 
                 ops.push(TxOperation {
                     tx_id,
@@ -127,6 +147,8 @@ pub fn generate_update_ops(
                     join_key,
                     value: new_val,
                 });
+            } else {
+                panic!("Join_key should found in table map");
             }
         }
     }
@@ -141,34 +163,30 @@ pub fn generate_get_ops(
     recent_get_ratio: f64,
     max_ts: Timestamp,
     tx_id: TxId,
-    table_map: &HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
+    key_pairs: &[(Vec<u8>, Vec<u8>)],
 ) -> Vec<TxOperation> {
     let total_gets = ((row_count as f64) * get_ratio).ceil() as usize;
     let recent_gets = ((total_gets as f64) * recent_get_ratio).ceil() as usize;
     let history_gets = total_gets.saturating_sub(recent_gets);
 
-    let all_keys: Vec<_> = table_map.keys().cloned().collect();
     let mut ops = Vec::with_capacity(total_gets);
 
-    // 1) recent reads (max_ts)
+    // Recent read
     for _ in 0..recent_gets {
-        let pkey = all_keys.choose(rng).unwrap().clone();
-        let (join_key, _) = table_map.get(&pkey).unwrap();
-
+        let (pkey, join_key) = key_pairs.choose(rng).unwrap().clone();
         ops.push(TxOperation {
             tx_id,
             ts: max_ts,
             op: "get".to_string(),
             pkey,
-            join_key: join_key.clone(),
+            join_key,
             value: vec![], // not used in get
         });
     }
 
-    // 2) older reads (random ts in 0..max_ts)
+    // History read
     for _ in 0..history_gets {
-        let pkey = all_keys.choose(rng).unwrap().clone();
-        let (join_key, _) = table_map.get(&pkey).unwrap();
+        let (pkey, join_key) = key_pairs.choose(rng).unwrap().clone();
         let ts = rng.gen_range(0..max_ts);
 
         ops.push(TxOperation {
@@ -176,13 +194,19 @@ pub fn generate_get_ops(
             ts,
             op: "get".to_string(),
             pkey,
-            join_key: join_key.clone(),
+            join_key,
             value: vec![],
         });
     }
 
     ops
 }
+
+// pub fn read_tx(
+
+// ) -> Vec<TxOperation> {
+
+// }
 
 fn run_txs_no_repair(
     ops: &[TxOperation],
@@ -385,24 +409,21 @@ struct Cli {
     seed: Option<u64>,
 }
 
-pub fn create_rng(seed: Option<u64>) -> SmallRng {
-    match seed {
-        Some(s) => {
-            println!("[INFO] Using provided seed: {}\n", s);
-            SmallRng::seed_from_u64(s)
-        }
+pub fn create_rng(seed_opt: Option<u64>) -> (SmallRng, u64) {
+    match seed_opt {
+        Some(seed) => (SmallRng::seed_from_u64(seed), seed),
         None => {
+            // generate random u64 seed from entropy
             let mut entropy = StdRng::from_entropy();
             let seed = entropy.next_u64();
-            println!("[INFO] Generated random seed: {}\n", seed);
-            SmallRng::seed_from_u64(seed)
+            (SmallRng::seed_from_u64(seed), seed)
         }
     }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut rng = create_rng(cli.seed);
+    let (mut rng, seed) = create_rng(cli.seed);
 
     let pkey_per_join_key = 500;
     let join_key_per_bucket = 2;
@@ -419,7 +440,9 @@ fn main() -> Result<()> {
         .unwrap_or(num_join_keys.max(1) / join_key_per_bucket)
         .max(1);
 
-    let mut table_map: HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)> = HashMap::new();
+    let mut table_map = HashMap::new(); // join_key -> (pkey -> version_list(ts, value))
+    let mut join_keys = Vec::with_capacity(num_join_keys);
+    let mut key_pairs = Vec::with_capacity(cli.row_count); // (pkey, join_key)
     let insert_ops = generate_insert_ops(
         &mut rng,
         cli.row_count,
@@ -428,6 +451,8 @@ fn main() -> Result<()> {
         cli.pkey_size,
         cli.value_size,
         &mut table_map,
+        &mut join_keys,
+        &mut key_pairs,
     );
     let update_ops = generate_update_ops(
         &mut rng,
@@ -436,6 +461,7 @@ fn main() -> Result<()> {
         cli.value_size,
         1,
         cli.num_tx,
+        &key_pairs,
         &mut table_map,
     );
     let get_ops = generate_get_ops(
@@ -445,7 +471,7 @@ fn main() -> Result<()> {
         recent_get_ratio,
         cli.num_tx as Timestamp,
         (cli.num_tx + 1) as TxId,
-        &table_map,
+        &key_pairs,
     );
     let hash_table_t = match cli.table_kind {
         TableType::Chain => HashTableType::RecentHistoryChained,
@@ -463,8 +489,9 @@ fn main() -> Result<()> {
         "Pkey per Bucket: {}",
         pkey_per_join_key * join_key_per_bucket
     );
-    println!("Join key per Bucket: {}", join_key_per_bucket);
-    println!("Pkey per Join key: {}", pkey_per_join_key);
+    println!("- Join key per Bucket: {}", join_key_per_bucket);
+    println!("- Pkey per Join key: {}", pkey_per_join_key);
+    println!("Rng seed: {}", seed);
     println!("-----------------------------------------------------------------------");
     println!();
     println!("Row count: {}", cli.row_count);
