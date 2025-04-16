@@ -4,7 +4,7 @@ use crate::{
     prelude::{Page, PageId, Timestamp, AVAILABLE_PAGE_SIZE},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     result::Result::Ok,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -746,6 +746,13 @@ pub trait HashJoinPage {
         search_pkey: &[u8],
         ts: &Timestamp,
         results: &mut Vec<MvccEntry>,
+    );
+
+    fn scan_key_heap_into_best_read_repair(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        best_map:  &mut HashMap<Vec<u8>, BTreeMap<Timestamp, (MvccEntryLoc, MvccEntry)>>,
     );
 }
 
@@ -1562,6 +1569,61 @@ impl HashJoinPage for Page {
                                 et,
                             );
                             best_map.insert(pkey.to_vec(), (st, new_entry));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// For “heap” pages, we do a linear scan.  But *instead* of returning a Vec,
+    /// we pass in a &mut HashMap so we can update the "best version" logic
+    /// directly without creating an intermediate Vec.
+    fn scan_key_heap_into_best_read_repair(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        best_map: &mut HashMap<Vec<u8>, BTreeMap<Timestamp, (MvccEntryLoc, MvccEntry)>>,
+    ) {
+        let page_id = self.get_id();
+        let ts = *ts;
+        // For each slot:
+        for slot_idx in 0..self.slot_count() {
+            let slot = self.slot(slot_idx);
+
+            // 1) Compare prefix, etc. (same as your existing logic)
+            let slot_key_len = slot.key_size();
+            if slot_key_len != search_key.len() {
+                continue;
+            }
+            let prefix_len = std::cmp::min(SLOT_KEY_PREFIX_SIZE, slot_key_len);
+            let slot_prefix = &slot.key_prefix()[..prefix_len];
+            let input_prefix = &search_key[..prefix_len];
+            if slot_prefix != input_prefix {
+                continue;
+            }
+
+            // 2) If prefix matches, load the record
+            let rec = self.record_from_slot(&slot);
+            if rec.key() == search_key {
+                let st = slot.start_ts();
+                let et = slot.end_ts();
+                if st <= ts {
+                    let pkey = rec.pkey();
+                    let new_entry = MvccEntry::new(
+                        rec.key().to_vec(),
+                        rec.pkey().to_vec(),
+                        rec.val().to_vec(),
+                        st,
+                        et,
+                    );
+                    match best_map.get_mut(pkey) {
+                        Some(map) => {
+                            map.insert(st, (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry));
+                        }
+                        None => {
+                            let value = best_map.entry(pkey.to_vec()).or_insert(BTreeMap::new());
+                            value.insert(st, (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry));
                         }
                     }
                 }

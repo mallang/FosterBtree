@@ -231,6 +231,14 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error>;
 
+    /// Scans all entries with the given key at the specified timestamp.
+    /// Returns a vec over primary key and value pairs.
+    fn scan_key_vec_read_repair(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error>;
+
     /// Delta scan between two timestamps.
     /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.
     fn delta_scan(
@@ -296,4 +304,5 @@ pub enum HashTableType {
     HeapTable,
     RustHashMap,
     LinearHashTable,
+    TsPartition,
 }

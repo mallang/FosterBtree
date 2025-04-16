@@ -34,7 +34,6 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         for bucket in &self.bucket_entries {
             bucket.write().unwrap().split_last_partition_at(ts)?;
         }
-
         Ok(())
     }
 
@@ -274,6 +273,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Ok(self
             .scan_key(key, ts)
             .map(|iter| iter.collect::<Vec<_>>())?)
+    }
+    fn scan_key_vec_read_repair(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let idx = self.get_bucket_index(key);
+        let partitions = &self.bucket_entries[idx];
+
+        let mvccs = partitions.read().unwrap().scan_with_key_read_repair(ts, key)?;
+        Ok(mvccs)
     }
 
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {

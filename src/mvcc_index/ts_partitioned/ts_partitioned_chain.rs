@@ -206,6 +206,25 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         Ok(best_candidates.into_iter().collect())
     }
 
+    pub fn scan_with_key_read_repair(
+        &self,
+        ts: Timestamp,
+        key: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let mut best_candidates: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        for p in self.partitions.iter().rev() {
+            if ts >= p.range.0 && ts < p.range.1 {
+                let partition_scanner = p.chain.scan_key_vec_read_repair(key, &ts);
+                // Iterate over all entries from the chain.
+                for entry in partition_scanner {
+                    let (pkey, value) = entry;
+                    best_candidates.entry(pkey).or_insert(value);
+                }
+            }
+        }
+        Ok(best_candidates.into_iter().collect())
+    }
+
     pub fn scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
         // let mut best_candidates = HashMap::new();
         // for p in self.partitions.iter().rev() {

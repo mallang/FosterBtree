@@ -221,6 +221,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
         Ok(result)
     }
 
+    fn scan_key_vec_read_repair(
+        &self,
+        key: &Self::Key,
+        ts: crate::prelude::Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        <Self as MvccIndex<T>>::scan_key_vec(self, key, ts)
+    }
+
     fn split_at_ts(&self, ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
         Ok(())
     }

@@ -334,6 +334,18 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Ok(mvccs)
     }
 
+    fn scan_key_vec_read_repair(
+            &self,
+            key: &Self::Key,
+            ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let idx = self.get_bucket_index(key);
+        let chain = &self.bucket_entries[idx];
+        
+        let mvccs = chain.scan_key_vec_read_repair(key, &ts);
+        Ok(mvccs)
+    }
+
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
         let mut result = vec![];
         for bucket in &self.bucket_entries {

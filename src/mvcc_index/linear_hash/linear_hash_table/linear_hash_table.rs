@@ -192,7 +192,15 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         key: &Self::Key,
         ts: crate::prelude::Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        todo!()
+        Ok(self.scan_key(key, ts)?.into_iter().collect())
+    }
+
+    fn scan_key_vec_read_repair(
+        &self,
+        key: &Self::Key,
+        ts: crate::prelude::Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        self.scan_key_vec(key, ts)
     }
 
     fn delta_scan(

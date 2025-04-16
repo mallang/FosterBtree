@@ -504,6 +504,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         )
     }
 
+    fn scan_key_vec_read_repair(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        self.scan_key_vec(key, ts)
+    }
+
     fn delta_scan(
         &self,
         from_ts: Timestamp,

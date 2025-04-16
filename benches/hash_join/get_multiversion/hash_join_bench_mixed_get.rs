@@ -7,6 +7,7 @@ use fbtree::mvcc_index::hash_join::chained_hash_history_chain::HCHAIN_PAGE_READ_
 use fbtree::mvcc_index::hash_join_page::HISTORY_SLOT_CMP_CNT;
 use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
+use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
 use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
 use std::collections::{HashMap, HashSet};
@@ -160,6 +161,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         HashTableType::LinearHashTable => {
             Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+        }
+        HashTableType::TsPartition => {
+            Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
     };
 
