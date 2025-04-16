@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         HashTableType::TsPartitionChained => {
             Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
-        HashTableType::TsPartition => {
+        HashTableType::TsPartitionChained => {
             Box::new(TsPartitionedTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
         }
     };

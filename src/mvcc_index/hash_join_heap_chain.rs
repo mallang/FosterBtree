@@ -634,7 +634,6 @@ impl<T: MemPool> HeapHashChain<T> {
         Ok(best_candidates.into_values().collect())
     }
 
-
     pub fn scan_key_vec(&self, search_key: &[u8], ts: &Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
         use std::collections::HashMap;
 
@@ -669,7 +668,11 @@ impl<T: MemPool> HeapHashChain<T> {
             .collect::<Vec<(Vec<u8>, Vec<u8>)>>()
     }
 
-    pub fn scan_key_vec_read_repair(&self, search_key: &[u8], ts: &Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub fn scan_key_vec_read_repair(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         use std::collections::HashMap;
 
         // pkey, st, mvccentry
@@ -686,36 +689,39 @@ impl<T: MemPool> HeapHashChain<T> {
                         log_debug!(
                             "Frame of the next page has been changed. Trying to fix the frame id"
                         );
-                        let new_frame_key =
-                            PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                        let new_frame_key = PageFrameKey::new_with_frame_id(
+                            self.c_key,
+                            next_pid,
+                            next_page.frame_id(),
+                        );
                         let _ = fix_frame_id(current_page, &new_frame_key);
                     }
                     current_page = next_page;
                 } else {
                     break;
                 }
-                }
+            }
         }
-
 
         // return pkey, val from entry
         let res = best_map
             .values()
-            .map(|bmap| bmap.last_key_value().unwrap().1.1.to_owned())
+            .map(|bmap| bmap.last_key_value().unwrap().1 .1.to_owned())
             .map(|e| (e.pkey, e.value))
             .collect::<Vec<(Vec<u8>, Vec<u8>)>>();
 
-        let bmap_colle = best_map.into_values()
+        let bmap_colle = best_map
+            .into_values()
             .map(|btmap| {
-                btmap.into_iter()
-                    .map(|(k, v)| {(k, v.0)})
+                btmap
+                    .into_iter()
+                    .map(|(k, v)| (k, v.0))
                     .collect::<BTreeMap<u64, MvccEntryLoc>>()
             })
             .collect::<Vec<_>>();
         for btmap in bmap_colle {
             self.read_repair(&btmap);
         }
-
 
         return res;
     }

@@ -273,7 +273,7 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error>;
 
     fn as_any(&self) -> &dyn Any;
-    
+
     // only has effect for ts_partitioned table
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error>;
 }
@@ -321,5 +321,4 @@ pub enum HashTableType {
     RustHashMap,
     LinearHashTable,
     TsPartitionChained,
-
 }

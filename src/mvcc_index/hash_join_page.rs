@@ -747,7 +747,7 @@ pub trait HashJoinPage {
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        best_map:  &mut HashMap<Vec<u8>, BTreeMap<Timestamp, (MvccEntryLoc, MvccEntry)>>,
+        best_map: &mut HashMap<Vec<u8>, BTreeMap<Timestamp, (MvccEntryLoc, MvccEntry)>>,
     );
 }
 
@@ -1626,11 +1626,17 @@ impl HashJoinPage for Page {
                     );
                     match best_map.get_mut(pkey) {
                         Some(map) => {
-                            map.insert(st, (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry));
+                            map.insert(
+                                st,
+                                (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry),
+                            );
                         }
                         None => {
                             let value = best_map.entry(pkey.to_vec()).or_insert(BTreeMap::new());
-                            value.insert(st, (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry));
+                            value.insert(
+                                st,
+                                (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry),
+                            );
                         }
                     }
                 }

@@ -298,7 +298,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         let idx = self.get_bucket_index(key);
         let partitions = &self.bucket_entries[idx];
 
-        let mvccs = partitions.read().unwrap().scan_with_key_read_repair(ts, key)?;
+        let mvccs = partitions
+            .read()
+            .unwrap()
+            .scan_with_key_read_repair(ts, key)?;
         Ok(mvccs)
     }
 

@@ -121,7 +121,6 @@ fn decode_expected_value(value_str: &str) -> String {
     String::from_utf8_lossy(&decoded).to_string()
 }
 
-
 /// Read TX CSV which may have either 4 columns (for join scan logs) or 6 columns.
 fn read_ops_csv(filepath: &PathBuf, rp: &RepairType) -> io::Result<Vec<TxOperation>> {
     let file = File::open(filepath)?;
@@ -172,13 +171,10 @@ fn read_ops_csv(filepath: &PathBuf, rp: &RepairType) -> io::Result<Vec<TxOperati
     Ok(ops)
 }
 
-
-
-
 fn read_deltas_and_apply(
     filepath: &PathBuf,
     hash_join_table: &mut BoxMvccIndexMemPool,
-    rp: &RepairType
+    rp: &RepairType,
 ) -> Result<(), Box<dyn Error>> {
     let ops = read_ops_csv(filepath, rp)?;
     let mut op_count = 0;
@@ -245,7 +241,9 @@ fn read_deltas_and_apply(
     Ok(())
 }
 
-fn read_join_keys(scan_key_file: &Path) -> Result<Vec<(Vec<u8>, Timestamp)>, Box<dyn std::error::Error>> {
+fn read_join_keys(
+    scan_key_file: &Path,
+) -> Result<Vec<(Vec<u8>, Timestamp)>, Box<dyn std::error::Error>> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_path(scan_key_file)?;
@@ -292,11 +290,28 @@ fn read_join_keys_and_apply(
     Ok(())
 }
 
-fn bench_join_keys(csv_dir: PathBuf, join_keys_csv_name_prefix: &String, hash_join_table: &mut BoxMvccIndexMemPool, rp: &RepairType) -> Result<(), Box<dyn Error>> {
-    let join_keys_csv_history_path = csv_dir.join(format!("{}{}", join_keys_csv_name_prefix, "_history.csv"));
-    let join_keys_csv_recent_path = csv_dir.join(format!("{}{}", join_keys_csv_name_prefix, "_recent.csv"));
-    read_join_keys_and_apply(&join_keys_csv_history_path, hash_join_table, &format!("history_scan_keys"), rp)?;
-    read_join_keys_and_apply(&join_keys_csv_recent_path, hash_join_table, &format!("recent_scan_keys"), rp)?;
+fn bench_join_keys(
+    csv_dir: PathBuf,
+    join_keys_csv_name_prefix: &String,
+    hash_join_table: &mut BoxMvccIndexMemPool,
+    rp: &RepairType,
+) -> Result<(), Box<dyn Error>> {
+    let join_keys_csv_history_path =
+        csv_dir.join(format!("{}{}", join_keys_csv_name_prefix, "_history.csv"));
+    let join_keys_csv_recent_path =
+        csv_dir.join(format!("{}{}", join_keys_csv_name_prefix, "_recent.csv"));
+    read_join_keys_and_apply(
+        &join_keys_csv_history_path,
+        hash_join_table,
+        &format!("history_scan_keys"),
+        rp,
+    )?;
+    read_join_keys_and_apply(
+        &join_keys_csv_recent_path,
+        hash_join_table,
+        &format!("recent_scan_keys"),
+        rp,
+    )?;
     Ok(())
 }
 
@@ -367,11 +382,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if i + 1 < args.len() {
                     let type_name = &args[i + 1];
                     match type_name.as_str() {
-                        "chain" => hash_table_t = HashTableType::Chained,
+                        "chain" => hash_table_t = HashTableType::RecentHistoryChained,
                         "heap" => hash_table_t = HashTableType::HeapTable,
                         "rust" => hash_table_t = HashTableType::RustHashMap,
                         "linear" => hash_table_t = HashTableType::LinearHashTable,
-                        "ts_partition" => hash_table_t = HashTableType::TsPartition,
+                        "ts_partition" => hash_table_t = HashTableType::TsPartitionChained,
                         other => eprintln!("Unknown table type: {}", other),
                     }
                     i += 2;
@@ -408,24 +423,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let delta_csv_path = csv_dir.join(&deltas_csv_name);
 
-
     println!("Using CSV directory: {:?}", csv_dir);
     println!(
         "delta_csv: {:?}",
         delta_csv_path.file_name().unwrap_or_default()
     );
-    println!(
-        "join_keys_csv prefix: {:?}",
-        join_keys_csv_name_prefix
-    );
+    println!("join_keys_csv prefix: {:?}", join_keys_csv_name_prefix);
     println!("Hash Table Type: {:?}", hash_table_t);
-
 
     // 1) Create the hash join table.
     let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
     let mut hash_join_table: BoxMvccIndexMemPool = match hash_table_t {
-        HashTableType::Chained => {
+        HashTableType::RecentHistoryChained => {
             Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::HeapTable => {
@@ -437,7 +447,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         HashTableType::LinearHashTable => {
             Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
-        HashTableType::TsPartition => {
+        HashTableType::TsPartitionChained => {
             Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
     };
@@ -453,7 +463,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 4) Scan keys in hash_join_table
     println!("\n=== Applying Scan Keys ===");
     // TODO: scan delta
-    bench_join_keys(csv_dir, &join_keys_csv_name_prefix, &mut hash_join_table, &repair_t)?;
+    bench_join_keys(
+        csv_dir,
+        &join_keys_csv_name_prefix,
+        &mut hash_join_table,
+        &repair_t,
+    )?;
 
     Ok(())
 }

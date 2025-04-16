@@ -394,7 +394,7 @@ fn read_txs_and_apply_no_repair(
             "scan_with_join_key" => {
                 // For scan operations, we call scan_key but suppress printing
 
-                // if hash_table_type == HashTableType::Chained {
+                // if hash_table_type == HashTableType::RecentHistoryChained {
                 //     let scanner = hash_join_table.scan_key(&op.join_key, op.ts)?;
                 //     // iterate over the scanner to force the scan
                 //     let _ = scanner.collect::<Vec<_>>();
