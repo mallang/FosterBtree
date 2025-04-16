@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let Ok(type_name) = args[i + 1].parse::<String>();
                     match type_name.as_str() {
                         "chain" => {
-                            hash_table_t = HashTableType::Chained;
+                            hash_table_t = HashTableType::RecentHistoryChained;
                         }
                         "heap" => {
                             hash_table_t = HashTableType::HeapTable;
@@ -165,17 +165,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let c_key = ContainerKey::new(0, 0);
 
     let hash_join_table = match hash_table_t {
-        HashTableType::Chained => {
-            Box::new(ChainedHashTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
+        HashTableType::RecentHistoryChained => {
+            Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::HeapTable => {
             Box::new(HeapHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::RustHashMap => {
-            Box::new(MvccRustHashMap::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
+            Box::new(MvccRustHashMap::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::LinearHashTable => {
-            Box::new(LinearHashTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
+            Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
+        }
+        HashTableType::TsPartitionChained => {
+            Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::TsPartition => {
             Box::new(TsPartitionedTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool

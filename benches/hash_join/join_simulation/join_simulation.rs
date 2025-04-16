@@ -353,7 +353,7 @@ fn read_table_0_and_insert(
     Ok(())
 }
 
-fn read_txs_and_apply(
+fn read_txs_and_apply_no_repair(
     filepath: &PathBuf,
     hash_join_table: &mut BoxMvccIndexMemPool,
 ) -> Result<(), Box<dyn Error>> {
@@ -404,6 +404,120 @@ fn read_txs_and_apply(
 
                 // let scanner = hash_join_table.scan_key(&op.join_key, op.ts)?;
                 // let _ = scanner.collect::<Vec<_>>(); // force the scan
+                let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
+                op_count += 1;
+            }
+            other => {
+                eprintln!("Unknown operation: {}", other);
+            }
+        }
+    }
+    let duration = start.elapsed();
+    println!(
+        "Applied {} operations from {:?} in {} ns",
+        op_count,
+        filepath.file_name().unwrap_or_default(),
+        duration.as_nanos()
+    );
+    Ok(())
+}
+
+fn read_txs_and_apply_write_repair(
+    filepath: &PathBuf,
+    hash_join_table: &mut BoxMvccIndexMemPool,
+) -> Result<(), Box<dyn Error>> {
+    let ops = read_txs_csv(filepath)?;
+    let mut op_count = 0;
+    let start = Instant::now();
+    for op in &ops {
+        match op.op.as_str() {
+            "insert" => {
+                hash_join_table.insert(
+                    op.join_key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
+                op_count += 1;
+            }
+            "update" => {
+                hash_join_table.update_write_repair(
+                    op.join_key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
+                op_count += 1;
+            }
+            "delete" => {
+                hash_join_table.delete(&op.join_key, &op.pkey, op.ts, op.tx_id)?;
+                op_count += 1;
+            }
+            "get" => {
+                let _ = hash_join_table.get(&op.join_key, &op.pkey, op.ts)?;
+                op_count += 1;
+            }
+            "tx_begin" | "tx_commit" => { /* no-op */ }
+            "scan_with_join_key" => {
+                let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
+                op_count += 1;
+            }
+            other => {
+                eprintln!("Unknown operation: {}", other);
+            }
+        }
+    }
+    let duration = start.elapsed();
+    println!(
+        "Applied {} operations from {:?} in {} ns",
+        op_count,
+        filepath.file_name().unwrap_or_default(),
+        duration.as_nanos()
+    );
+    Ok(())
+}
+
+fn read_txs_and_apply_read_repair(
+    filepath: &PathBuf,
+    hash_join_table: &mut BoxMvccIndexMemPool,
+) -> Result<(), Box<dyn Error>> {
+    let ops = read_txs_csv(filepath)?;
+    let mut op_count = 0;
+    let start = Instant::now();
+    for op in &ops {
+        match op.op.as_str() {
+            "insert" => {
+                hash_join_table.insert(
+                    op.join_key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
+                op_count += 1;
+            }
+            "update" => {
+                hash_join_table.update(
+                    op.join_key.clone(),
+                    op.pkey.clone(),
+                    op.ts,
+                    op.tx_id,
+                    op.value.clone(),
+                )?;
+                op_count += 1;
+            }
+            "delete" => {
+                hash_join_table.delete(&op.join_key, &op.pkey, op.ts, op.tx_id)?;
+                op_count += 1;
+            }
+            "get" => {
+                let _ = hash_join_table.get_read_repair(&op.join_key, &op.pkey, op.ts)?;
+                op_count += 1;
+            }
+            "tx_begin" | "tx_commit" => { /* no-op */ }
+            "scan_with_join_key" => {
                 let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
                 op_count += 1;
             }
@@ -538,60 +652,6 @@ fn check_full_join_consistency(
         Ok(false)
     }
 }
-
-// /// Reads two CSV files (expected recent & expected history) and does a
-// /// detailed row‑by‑row comparison against a full `scan_all()` of the index.
-// /// Prints missing/extra rows if there's a mismatch.
-// fn full_check_update_consistency(
-//     hash_join_table: &BoxMvccIndexMemPool,
-//     expected_recent: &Path,
-//     expected_history: &Path,
-// ) -> Result<(), Box<dyn Error>> {
-//     // 1) Full scan of the index
-//     let scan_iter = hash_join_table.scan_all()?;
-//     // Convert the scanned MvccEntry items to our ExpectedUpdateRow form
-//     let actual_rows: Vec<ExpectedUpdateRow> = scan_iter
-//         .map(|mvcc_e| mvcc_entry_to_expected_row(&mvcc_e))
-//         .collect();
-
-//     // Turn them into a set for easier diff
-//     let actual_set: HashSet<ExpectedUpdateRow> = actual_rows.into_iter().collect();
-
-//     // 2) Read the “expected” rows from the two CSVs
-//     let expected_r = read_expected_update_csv(expected_recent).unwrap_or_default();
-//     let expected_h = read_expected_update_csv(expected_history).unwrap_or_default();
-
-//     // Combine them into one
-//     let mut all_expected = Vec::with_capacity(expected_r.len() + expected_h.len());
-//     all_expected.extend(expected_r);
-//     all_expected.extend(expected_h);
-
-//     let expected_set: HashSet<ExpectedUpdateRow> = all_expected.into_iter().collect();
-
-//     // 3) Compare sets
-//     let missing_in_actual = expected_set.difference(&actual_set).collect::<Vec<_>>();
-//     let extra_in_actual = actual_set.difference(&expected_set).collect::<Vec<_>>();
-
-//     if missing_in_actual.is_empty() && extra_in_actual.is_empty() {
-//         // Perfect match
-//         println!("Update consistency check PASSED: actual rows match expected rows exactly.");
-//     } else {
-//         println!("[ERROR] Update consistency check FAILED: mismatch in actual vs. expected rows.");
-//         if !missing_in_actual.is_empty() {
-//             println!("  Missing from actual (in expected, but not found in scan):");
-//             for row in &missing_in_actual {
-//                 println!("    {:?}", row);
-//             }
-//         }
-//         if !extra_in_actual.is_empty() {
-//             println!("  Extra in actual (found in scan, but not in expected):");
-//             for row in &extra_in_actual {
-//                 println!("    {:?}", row);
-//             }
-//         }
-//     }
-//     Ok(())
-// }
 
 fn random_partial_update_consistency(
     hash_join_table: &BoxMvccIndexMemPool,
@@ -757,7 +817,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if i + 1 < args.len() {
                     let type_name = &args[i + 1];
                     match type_name.as_str() {
-                        "chain" => hash_table_t = HashTableType::Chained,
+                        "chain" => hash_table_t = HashTableType::RecentHistoryChained,
                         "heap" => hash_table_t = HashTableType::HeapTable,
                         "rust" => hash_table_t = HashTableType::RustHashMap,
                         "linear" => hash_table_t = HashTableType::LinearHashTable,
@@ -822,8 +882,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 1) Create the hash join table.
     let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
-    let mut hash_join_table: BoxMvccIndexMemPool = match hash_table_t {
-        HashTableType::Chained => {
+    let mut hash_join_table = match hash_table_t {
+        HashTableType::RecentHistoryChained => {
             Box::new(ChainedHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::HeapTable => {
@@ -835,7 +895,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         HashTableType::LinearHashTable => {
             Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
-        HashTableType::TsPartition => {
+        HashTableType::TsPartitionChained => {
             Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
     };
@@ -846,7 +906,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 3) Apply update TX log.
     println!("\n=== Applying update TX log ===");
-    read_txs_and_apply(&txs0_path, &mut hash_join_table)?;
+    read_txs_and_apply_no_repair(&txs0_path, &mut hash_join_table)?;
+    // read_txs_and_apply_write_repair(&txs0_path, &mut hash_join_table)?;
 
     // 4) Check update consistency.
     if do_consistency_check {
@@ -894,7 +955,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "\n=== Applying join TX log: {} (table_idx={}, ts={}) ===",
                 fname, table_idx, ts_val
             );
-            read_txs_and_apply(&join_log_path, &mut hash_join_table)?;
+            read_txs_and_apply_no_repair(&join_log_path, &mut hash_join_table)?;
 
             // Consistency check using expected join result files.
             if do_consistency_check {

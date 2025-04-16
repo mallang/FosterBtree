@@ -28,6 +28,7 @@ pub enum AccessMethodError {
     // for write-repair
     UpdateReapiredButNotInseted,
     UpdateInsertedButNotReapired,
+    NotRepairedAndNotInserted,
     Other(String),
 }
 
@@ -127,6 +128,9 @@ impl fmt::Display for AccessMethodError {
             }
             AccessMethodError::UpdateInsertedButNotReapired => {
                 write!(f, "Update inserted but not repaired")
+            }
+            AccessMethodError::NotRepairedAndNotInserted => {
+                write!(f, "Not repaired and not inserted")
             }
         }
     }

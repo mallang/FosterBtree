@@ -30,6 +30,19 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
         })
     }
 
+    fn create_with_bucket_num(
+        c_key: crate::prelude::ContainerKey,
+        mem_pool: std::sync::Arc<T>,
+        bucket_num: usize,
+    ) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
+        Ok(Self {
+            table: RwLock::new(HashMap::new()),
+        })
+    }
+
     fn insert(
         &self,
         key: Self::Key,
@@ -54,6 +67,24 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
         Ok(())
     }
     fn get(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: crate::prelude::Timestamp,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        let table = self.table.read().unwrap();
+        if let Some(entries) = table.get(key) {
+            if let Some(entry) = entries
+                .iter()
+                .rev()
+                .find(|e| e.pkey == pkey && e.start_ts <= ts && e.end_ts > ts)
+            {
+                return Ok(Some(entry.value.clone()));
+            }
+        }
+        Ok(None)
+    }
+    fn get_read_repair(
         &self,
         key: &[u8],
         pkey: &[u8],
