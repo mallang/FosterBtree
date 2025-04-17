@@ -245,6 +245,7 @@ pub mod slot {
     pub const SLOT_PKEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
 
     #[derive(Debug, PartialEq)]
+    #[repr(C)]
     pub struct Slot {
         key_size: u32,
         key_prefix: [u8; SLOT_KEY_PREFIX_SIZE],
@@ -258,6 +259,14 @@ pub mod slot {
     }
 
     impl Slot {
+        pub unsafe fn unsafe_from_bytes(bytes: &[u8]) -> &Slot {
+            &*(bytes.as_ptr() as *const Slot)
+        }
+
+        pub unsafe fn unsafe_from_bytes_mut(bytes: &[u8]) -> &mut Slot {
+            &mut *(bytes.as_ptr() as *mut Slot)
+        }
+
         pub fn from_bytes(bytes: &[u8]) -> Self {
             let mut current_pos = 0;
 

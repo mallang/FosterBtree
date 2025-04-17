@@ -8,6 +8,7 @@ use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccIndex, TxId};
 use fbtree::prelude::Timestamp;
+use num_format::{Locale, ToFormattedString};
 use rand::rngs::{SmallRng, StdRng};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -15,24 +16,960 @@ use rand::{Rng, RngCore};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+const PKEY_PER_JOIN_KEY: usize = 500;
+const JOIN_KEY_PER_BUCKET: usize = 2;
+
 #[derive(Debug, Clone)]
-pub struct TxOperation {
-    pub tx_id: u64,
-    pub ts: Timestamp,
-    pub op: String,
-    pub pkey: Vec<u8>,
-    pub join_key: Vec<u8>,
-    pub value: Vec<u8>,
+pub enum OperationType {
+    Insert,
+    Update,
+    Delete,
+    Get,
+    ScanKey,
+    Scan,
+    DeltaScan,
 }
 
 #[derive(Debug, Clone)]
-pub struct ReadTxOperation {
-    pub tx_id: u64,
-    pub tx_ts: u64,
-    pub op: String, // "scan_key", "scan_all", "delta_scan"
+pub struct TxOperation {
+    pub tx_id: TxId,
+    pub tx_ts: Timestamp,
+    pub op: OperationType,
+    pub read_ts: Timestamp, // for read operations
+    pub pkey: Vec<u8>,
     pub join_key: Vec<u8>,
-    pub scan_ts: Timestamp,
-    pub gc_ts: Vec<Timestamp>,
+    pub value: Vec<u8>,
+    pub gc_ts: Vec<Timestamp>, // ts that we want to gc
+}
+impl TxOperation {
+    pub fn new(
+        tx_id: TxId,
+        tx_ts: Timestamp,
+        op: OperationType,
+        read_ts: Timestamp,
+        pkey: Vec<u8>,
+        join_key: Vec<u8>,
+        value: Vec<u8>,
+        gc_ts: Vec<Timestamp>,
+    ) -> Self {
+        Self {
+            tx_id,
+            tx_ts,
+            op,
+            read_ts,
+            pkey,
+            join_key,
+            value,
+            gc_ts,
+        }
+    }
+
+    pub fn new_insert(
+        tx_id: TxId,
+        tx_ts: Timestamp,
+        pkey: Vec<u8>,
+        join_key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::Insert,
+            0,
+            pkey,
+            join_key,
+            value,
+            vec![],
+        )
+    }
+
+    pub fn new_get(
+        tx_id: TxId,
+        tx_ts: Timestamp,
+        pkey: Vec<u8>,
+        join_key: Vec<u8>,
+        read_ts: Timestamp,
+    ) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::Get,
+            read_ts,
+            pkey,
+            join_key,
+            vec![],
+            vec![],
+        )
+    }
+
+    pub fn new_update(
+        tx_id: TxId,
+        tx_ts: Timestamp,
+        pkey: Vec<u8>,
+        join_key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::Update,
+            0,
+            pkey,
+            join_key,
+            value,
+            vec![],
+        )
+    }
+
+    pub fn new_delete(tx_id: TxId, tx_ts: Timestamp, pkey: Vec<u8>, join_key: Vec<u8>) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::Delete,
+            0,
+            pkey,
+            join_key,
+            vec![],
+            vec![],
+        )
+    }
+
+    pub fn new_scan_key(
+        tx_id: TxId,
+        tx_ts: Timestamp,
+        join_key: Vec<u8>,
+        read_ts: Timestamp,
+    ) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::ScanKey,
+            read_ts,
+            vec![],
+            join_key,
+            vec![],
+            vec![],
+        )
+    }
+
+    pub fn new_scan_all(tx_id: TxId, tx_ts: Timestamp, read_ts: Timestamp) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::Scan,
+            read_ts,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    }
+
+    pub fn new_delta_scan(tx_id: TxId, tx_ts: Timestamp, read_ts: Timestamp) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::DeltaScan,
+            read_ts,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Tx {
+    pub tx_type: OperationType,
+    pub tx_id: TxId,
+    pub tx_ts: Timestamp,
+    pub ops: Vec<TxOperation>,
+}
+impl Tx {
+    pub fn new(
+        tx_type: OperationType,
+        tx_id: TxId,
+        tx_ts: Timestamp,
+        ops: Vec<TxOperation>,
+    ) -> Self {
+        Self {
+            tx_type,
+            tx_id,
+            tx_ts,
+            ops,
+        }
+    }
+    pub fn add_op(&mut self, op: TxOperation) {
+        self.ops.push(op);
+    }
+}
+
+pub struct TxBench {
+    pub txs: Vec<Tx>, // txs[0] is the initial insert
+    pub read_ts_candidates: Vec<Timestamp>,
+    pub read_txs: Vec<Tx>,
+    pub tx_count: TxId,
+    pub next_ts: Timestamp,
+
+    pub join_keys: Vec<Vec<u8>>,
+    pub join_key_set: HashSet<Vec<u8>>,
+    pub key_pairs: Vec<(Vec<u8>, Vec<u8>)>, // (pkey, join_key)
+    pub pkey_set: HashSet<Vec<u8>>,
+
+    pub table_map: HashMap<Vec<u8>, HashMap<Vec<u8>, Vec<(Timestamp, Vec<u8>)>>>, // key -> pkey -> VersionList(ts, value)
+
+    pub cli: Cli,
+    pub rng: SmallRng,
+
+    pub row_count: usize,
+}
+
+impl TxBench {
+    pub fn new(mut cli: Cli) -> Self {
+        let pkey_per_join_key = PKEY_PER_JOIN_KEY;
+        let join_key_per_bucket = JOIN_KEY_PER_BUCKET;
+
+        let num_join_keys = cli
+            .num_join_keys
+            .unwrap_or(cli.row_count.max(1) / pkey_per_join_key)
+            .max(1);
+        cli.num_join_keys = Some(num_join_keys);
+        let recent_get_ratio = cli
+            .recent_get_ratio
+            .unwrap_or(1.0 / (cli.num_tx + 1) as f64);
+        cli.recent_get_ratio = Some(recent_get_ratio);
+        let bucket_num = cli
+            .bucket_num
+            .unwrap_or(num_join_keys.max(1) / join_key_per_bucket)
+            .max(1);
+        cli.bucket_num = Some(bucket_num);
+        let seed = match cli.seed {
+            Some(seed) => seed,
+            None => {
+                let mut entropy = StdRng::from_entropy();
+                entropy.next_u64()
+            }
+        };
+        cli.seed = Some(seed);
+
+        let rng = SmallRng::seed_from_u64(cli.seed.unwrap_or(0));
+        Self {
+            txs: Vec::new(),
+            read_ts_candidates: Vec::new(),
+            read_txs: Vec::new(),
+            tx_count: 0,
+            next_ts: 0,
+
+            join_keys: Vec::new(),
+            join_key_set: HashSet::new(),
+            key_pairs: Vec::new(),
+            pkey_set: HashSet::new(),
+
+            table_map: HashMap::new(),
+
+            cli,
+            rng,
+
+            row_count: 0,
+        }
+    }
+
+    pub fn gen_new_tx(&mut self) -> (TxId, Timestamp) {
+        let tx_id = self.tx_count;
+        let tx_ts = self.next_ts;
+        self.tx_count += 1;
+        self.next_ts += 1;
+        (tx_id, tx_ts)
+    }
+
+    pub fn gen_new_ts(&mut self) -> Timestamp {
+        let ts = self.next_ts;
+        self.next_ts += 1;
+        ts
+    }
+
+    fn random_bytes(&mut self, len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        self.rng.fill(&mut buf[..]);
+        buf
+    }
+
+    pub fn gen_initial_insert(
+        &mut self,
+        row_count: usize,
+        num_join_keys: usize,
+        join_key_size: usize,
+        pkey_size: usize,
+        value_size: usize,
+    ) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        for _ in 0..num_join_keys {
+            let jkey = loop {
+                let candidate = self.random_bytes(join_key_size);
+                if self.join_key_set.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            self.join_keys.push(jkey);
+        }
+
+        let mut ops = Vec::new();
+        for _ in 0..row_count {
+            let jkey_idx = self.rng.gen_range(0..num_join_keys);
+            let join_key = self.join_keys[jkey_idx].clone();
+
+            let pkey = loop {
+                let candidate = self.random_bytes(pkey_size);
+                if self.pkey_set.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            self.key_pairs.push((pkey.clone(), join_key.clone()));
+
+            let value = self.random_bytes(value_size);
+            let pkey_map = self
+                .table_map
+                .entry(join_key.clone())
+                .or_insert_with(HashMap::new);
+            let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
+            version_list.push((0, value.clone()));
+
+            let op = TxOperation::new_insert(tx_id, tx_ts, pkey, join_key, value);
+            ops.push(op);
+        }
+        self.txs
+            .push(Tx::new(OperationType::Insert, tx_id, tx_ts, ops));
+
+        self.row_count = row_count;
+    }
+
+    pub fn gen_initial_insert_from_cli(&mut self) {
+        self.gen_initial_insert(
+            self.cli.row_count,
+            self.cli.num_join_keys.unwrap(),
+            self.cli.join_key_size,
+            self.cli.pkey_size,
+            self.cli.value_size,
+        );
+    }
+
+    pub fn gen_insert_tx(&mut self, insert_count: usize) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        for _ in 0..insert_count {
+            let jkey_idx = self.rng.gen_range(0..self.join_keys.len());
+            let join_key = self.join_keys[jkey_idx].clone();
+
+            let pkey = loop {
+                let candidate = self.random_bytes(self.cli.pkey_size);
+                if self.pkey_set.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            self.key_pairs.push((pkey.clone(), join_key.clone()));
+
+            let value = self.random_bytes(self.cli.value_size);
+            let pkey_map = self
+                .table_map
+                .entry(join_key.clone())
+                .or_insert_with(HashMap::new);
+            let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
+            version_list.push((tx_ts, value.clone()));
+
+            let op = TxOperation::new_insert(tx_id, tx_ts, pkey, join_key, value);
+            self.txs
+                .push(Tx::new(OperationType::Insert, tx_id, tx_ts, vec![op]));
+        }
+    }
+
+    pub fn gen_update_tx(&mut self, update_count: usize) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        let sampled_pairs = self
+            .key_pairs
+            .choose_multiple(&mut self.rng, update_count)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut ops = Vec::new();
+        for (pkey, join_key) in sampled_pairs {
+            let new_val = self.random_bytes(self.cli.value_size);
+
+            if let Some(pkey_map) = self.table_map.get_mut(&join_key) {
+                let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
+                version_list.push((tx_ts, new_val.clone()));
+
+                let op = TxOperation::new_update(tx_id, tx_ts, pkey, join_key, new_val);
+                ops.push(op);
+            } else {
+                panic!("Join_key should found in table map");
+            }
+        }
+        self.txs
+            .push(Tx::new(OperationType::Update, tx_id, tx_ts, ops));
+    }
+
+    pub fn gen_delete_tx(&mut self, delete_count: usize) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        let sampled_pairs = self
+            .key_pairs
+            .choose_multiple(&mut self.rng, delete_count)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut ops = Vec::new();
+        for (pkey, join_key) in sampled_pairs {
+            if let Some(pkey_map) = self.table_map.get_mut(&join_key) {
+                let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
+                version_list.push((tx_ts, vec![]));
+
+                let op = TxOperation::new_delete(tx_id, tx_ts, pkey.clone(), join_key.clone());
+                ops.push(op);
+
+                // remove key_pairs
+                if let Some(pos) = self
+                    .key_pairs
+                    .iter()
+                    .position(|(pk, jkey)| pk == &pkey && jkey == &join_key)
+                {
+                    self.key_pairs.remove(pos);
+                }
+                // remove from pkey_set
+                self.pkey_set.remove(&pkey);
+            } else {
+                panic!("Join_key should found in table map");
+            }
+        }
+        self.txs
+            .push(Tx::new(OperationType::Delete, tx_id, tx_ts, ops));
+        self.row_count -= delete_count;
+    }
+
+    pub fn gen_get_tx(&mut self, get_count: usize, recent_get_ratio: f64) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        let recent_gets = ((get_count as f64) * recent_get_ratio).ceil() as usize;
+        let history_gets = get_count.saturating_sub(recent_gets);
+
+        let mut ops = Vec::new();
+
+        for _ in 0..recent_gets {
+            let (pkey, join_key) = self.key_pairs.choose(&mut self.rng).unwrap().clone();
+            let op = TxOperation::new_get(tx_id, tx_id, pkey, join_key, tx_id);
+            ops.push(op);
+        }
+        for _ in 0..history_gets {
+            let (pkey, join_key) = self.key_pairs.choose(&mut self.rng).unwrap().clone();
+            let ts = self.rng.gen_range(0..(tx_ts - 1).max(1));
+            let op = TxOperation::new_get(tx_id, ts, pkey, join_key, ts);
+            ops.push(op);
+        }
+        self.txs
+            .push(Tx::new(OperationType::Get, tx_id, tx_ts, ops));
+    }
+
+    pub fn gen_scan_key_tx(&mut self) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        self.read_ts_candidates.push(tx_ts);
+        let join_key = self.join_keys.choose(&mut self.rng).unwrap().clone();
+        let read_ts = self
+            .read_ts_candidates
+            .choose(&mut self.rng)
+            .unwrap()
+            .clone();
+        let op = TxOperation::new_scan_key(tx_id, tx_ts, join_key.clone(), read_ts);
+        let tx = Tx::new(OperationType::ScanKey, tx_id, tx_ts, vec![op]);
+        self.read_txs.push(tx.clone());
+        self.txs.push(tx);
+    }
+
+    pub fn gen_scan_tx(&mut self) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        self.read_ts_candidates.push(tx_ts);
+        let read_ts = self
+            .read_ts_candidates
+            .choose(&mut self.rng)
+            .unwrap()
+            .clone();
+        let op = TxOperation::new_scan_all(tx_id, tx_ts, read_ts);
+        let tx = Tx::new(OperationType::Scan, tx_id, tx_ts, vec![op.clone()]);
+        self.read_txs.push(tx.clone());
+        self.txs.push(tx);
+    }
+
+    pub fn gen_delta_scan_tx(&mut self) {
+        let tx_ts = self.gen_new_ts();
+
+        // randomly select tx from read_txs
+        let old_tx = self.read_txs.choose(&mut self.rng).unwrap();
+
+        let tx_id = old_tx.tx_id;
+        let read_ts = match old_tx.tx_type {
+            OperationType::ScanKey => old_tx.ops[0].read_ts,
+            OperationType::Scan => old_tx.ops[0].read_ts,
+            OperationType::DeltaScan => old_tx.ops[0].tx_ts,
+            _ => panic!("Invalid tx type for delta scan"),
+        };
+
+        // remove read_ts from read_ts_candidates
+        if let Some(pos) = self.read_ts_candidates.iter().position(|&ts| ts == read_ts) {
+            self.read_ts_candidates.remove(pos);
+        }
+        // TODO: garbage collect the read_ts when pos == 0
+
+        // remove old_tx from read_txs
+        if let Some(pos) = self.read_txs.iter().position(|tx| tx.tx_id == old_tx.tx_id) {
+            self.read_txs.remove(pos);
+        }
+
+        self.read_ts_candidates.push(tx_ts);
+        let op = TxOperation::new_delta_scan(tx_id, tx_ts, read_ts);
+        let tx = Tx::new(OperationType::DeltaScan, tx_id, tx_ts, vec![op.clone()]);
+        self.read_txs.push(tx.clone());
+        self.txs.push(tx);
+    }
+
+    pub fn gen_read_tx_with_ratio(
+        &mut self,
+        scan_key_ratio: f64,
+        scan_all_ratio: f64,
+        mut delta_scan_ratio: f64,
+    ) {
+        if self.read_ts_candidates.is_empty() {
+            delta_scan_ratio = 0.0;
+        }
+        let total_ratio = scan_key_ratio + scan_all_ratio + delta_scan_ratio;
+        if total_ratio == 0.0 {
+            println!(
+                "Total ratio is 0.0, no read tx generated, at least one ratio should be > 0.0"
+            );
+            return;
+        }
+
+        let random_value = self.rng.gen_range(0.0..total_ratio);
+        if random_value < scan_key_ratio {
+            self.gen_scan_key_tx();
+        } else if random_value < scan_key_ratio + scan_all_ratio {
+            self.gen_scan_tx();
+        } else {
+            self.gen_delta_scan_tx();
+        }
+    }
+
+    pub fn gen_random_read_tx(&mut self) {
+        self.gen_read_tx_with_ratio(1.0, 1.0, 1.0)
+    }
+
+    pub fn gen_txs_with_ratio(
+        &mut self,
+        total_tx_count: usize,
+        write_tx_ratio: f64,
+        insert_tx_ratio: f64,
+        insert_tx_count: usize,
+        update_tx_ratio: f64,
+        update_tx_count: usize,
+        delete_tx_ratio: f64,
+        delete_tx_count: usize,
+        read_tx_ratio: f64,
+        scan_key_tx_ratio: f64,
+        scan_all_tx_ratio: f64,
+        delta_scan_tx_ratio: f64,
+    ) {
+        let read_write_ratio = write_tx_ratio + read_tx_ratio;
+        if read_write_ratio == 0.0 {
+            println!("Total ratio is 0.0, no tx generated, at least one ratio should be > 0.0");
+            return;
+        }
+        for _ in 0..total_tx_count {
+            let random_read_write = self.rng.gen_range(0.0..read_write_ratio);
+            if random_read_write < write_tx_ratio {
+                let random_write = self
+                    .rng
+                    .gen_range(0.0..(insert_tx_ratio + update_tx_ratio + delete_tx_ratio));
+                if random_write < insert_tx_ratio {
+                    self.gen_insert_tx(insert_tx_count);
+                } else if random_write < insert_tx_ratio + update_tx_ratio {
+                    self.gen_update_tx(update_tx_count);
+                } else {
+                    self.gen_delete_tx(delete_tx_count);
+                }
+            } else {
+                self.gen_read_tx_with_ratio(
+                    scan_key_tx_ratio,
+                    scan_all_tx_ratio,
+                    delta_scan_tx_ratio,
+                );
+            }
+        }
+    }
+
+    pub fn gen_random_txs(&mut self) {
+        self.gen_initial_insert_from_cli();
+        let update_tx_count = (self.row_count as f64 * self.cli.update_ratio).ceil() as usize;
+        self.gen_txs_with_ratio(
+            20,
+            0.2,
+            0.0,
+            0,
+            1.0,
+            update_tx_count,
+            0.0,
+            0,
+            0.8,
+            1.0,
+            1.0,
+            1.0,
+        );
+    }
+
+    pub fn run_tx_no_repair(
+        &self,
+        txs_idx: TxId,
+        hash_join_table: &mut BoxMvccIndexMemPool,
+    ) -> Result<Duration> {
+        let tx = &self.txs[txs_idx as usize];
+        let start = Instant::now();
+        match tx.tx_type {
+            OperationType::Insert => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .insert(
+                            op.join_key.clone(),
+                            op.pkey.clone(),
+                            op.tx_ts,
+                            op.tx_id,
+                            op.value.clone(),
+                        )
+                        .unwrap();
+                }
+            }
+            OperationType::Update => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .update(
+                            op.join_key.clone(),
+                            op.pkey.clone(),
+                            op.tx_ts,
+                            op.tx_id,
+                            op.value.clone(),
+                        )
+                        .unwrap();
+                }
+            }
+            OperationType::Delete => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
+                        .unwrap();
+                }
+            }
+            OperationType::Get => {
+                for op in &tx.ops {
+                    let _ = hash_join_table
+                        .get(&op.join_key, &op.pkey, op.read_ts)
+                        .unwrap();
+                }
+            }
+            OperationType::ScanKey => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.scan_key_vec(&op.join_key, op.read_ts).unwrap();
+                }
+            }
+            OperationType::Scan => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.scan(op.read_ts).unwrap();
+                }
+            }
+            OperationType::DeltaScan => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "[No Repair] idx: {:>3}, tx id: {:>3}, tx type: {:>10}, duration: {:?}",
+            txs_idx,
+            tx.tx_id,
+            format!("{:?}", tx.tx_type),
+            elapsed
+        );
+        Ok(elapsed)
+    }
+
+    pub fn run_all_txs_no_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
+        for txs_idx in 0..self.txs.len() {
+            let _ = self.run_tx_no_repair(txs_idx as TxId, hash_join_table);
+        }
+    }
+
+    pub fn run_tx_read_repair(
+        &self,
+        txs_idx: TxId,
+        hash_join_table: &mut BoxMvccIndexMemPool,
+    ) -> Result<Duration> {
+        let tx = &self.txs[txs_idx as usize];
+        let start = Instant::now();
+        match tx.tx_type {
+            OperationType::Insert => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .insert(
+                            op.join_key.clone(),
+                            op.pkey.clone(),
+                            op.tx_ts,
+                            op.tx_id,
+                            op.value.clone(),
+                        )
+                        .unwrap();
+                }
+            }
+            OperationType::Update => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .update(
+                            op.join_key.clone(),
+                            op.pkey.clone(),
+                            op.tx_ts,
+                            op.tx_id,
+                            op.value.clone(),
+                        )
+                        .unwrap();
+                }
+            }
+            OperationType::Delete => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
+                        .unwrap();
+                }
+            }
+            OperationType::Get => {
+                for op in &tx.ops {
+                    let _ = hash_join_table
+                        .get_read_repair(&op.join_key, &op.pkey, op.read_ts)
+                        .unwrap();
+                }
+            }
+            OperationType::ScanKey => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.scan_key_vec_read_repair(&op.join_key, op.read_ts).unwrap();
+                }
+            }
+            OperationType::Scan => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.scan(op.read_ts).unwrap();
+                }
+            }
+            OperationType::DeltaScan => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "[Read Repair] idx : {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
+            txs_idx,
+            tx.tx_id,
+            format!("{:?}", tx.tx_type),
+            elapsed
+        );
+        Ok(elapsed)
+    }
+
+    pub fn run_all_txs_read_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
+        for txs_idx in 0..self.txs.len() {
+            let _ = self.run_tx_read_repair(txs_idx as TxId, hash_join_table);
+        }
+    }
+
+    fn run_tx_write_repair(
+        &self,
+        txs_idx: TxId,
+        hash_join_table: &mut BoxMvccIndexMemPool,
+    ) -> Result<Duration> {
+        let tx = &self.txs[txs_idx as usize];
+        let start = Instant::now();
+        match tx.tx_type {
+            OperationType::Insert => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .insert(
+                            op.join_key.clone(),
+                            op.pkey.clone(),
+                            op.tx_ts,
+                            op.tx_id,
+                            op.value.clone(),
+                        )
+                        .unwrap();
+                }
+            }
+            OperationType::Update => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .update_write_repair(
+                            op.join_key.clone(),
+                            op.pkey.clone(),
+                            op.tx_ts,
+                            op.tx_id,
+                            op.value.clone(),
+                        )
+                        .unwrap();
+                }
+            }
+            OperationType::Delete => {
+                for op in &tx.ops {
+                    hash_join_table
+                        .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
+                        .unwrap();
+                }
+            }
+            OperationType::Get => {
+                for op in &tx.ops {
+                    let _ = hash_join_table
+                        .get(&op.join_key, &op.pkey, op.read_ts)
+                        .unwrap();
+                }
+            }
+            OperationType::ScanKey => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.scan_key_vec(&op.join_key, op.read_ts).unwrap();
+                }
+            }
+            OperationType::Scan => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.scan(op.read_ts).unwrap();
+                }
+            }
+            OperationType::DeltaScan => {
+                for op in &tx.ops {
+                    // let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "[Write Repair] idx : {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
+            txs_idx,
+            tx.tx_id,
+            format!("{:?}", tx.tx_type),
+            elapsed
+        );
+        Ok(elapsed)
+    }
+
+    pub fn run_all_txs_write_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
+        for txs_idx in 0..self.txs.len() {
+            let _ = self.run_tx_write_repair(txs_idx as TxId, hash_join_table);
+        }
+    }
+
+    pub fn print_cli(&self) {
+        let cli = &self.cli;
+
+        println!("Hash table type: {:?}", cli.table_type);
+        println!("Bucket number: {:?}", cli.bucket_num);
+        println!(
+            "Pkey per Bucket: {}",
+            PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET
+        );
+        println!("- Join key per Bucket: {}", JOIN_KEY_PER_BUCKET);
+        println!("- Pkey per Join key: {}", PKEY_PER_JOIN_KEY);
+        println!("Rng seed: {:?}", cli.seed);
+        println!("-----------------------------------------------------------------------");
+        println!();
+        println!(
+            "Row count: {}",
+            cli.row_count.to_formatted_string(&Locale::en)
+        );
+        println!("Number of distinct join keys: {:?}", cli.num_join_keys);
+        println!("Join key size: {}", cli.join_key_size);
+        println!("Pkey size: {}", cli.pkey_size);
+        println!("Value size: {}", cli.value_size);
+        println!();
+        println!("Update ratio: {}", cli.update_ratio);
+        println!(
+            "Number of transactions (max Timestamp value): {}",
+            cli.num_tx
+        );
+        println!();
+        println!("Get ratio: {}", cli.get_ratio);
+        println!("Recent get ratio: {:?}", cli.recent_get_ratio);
+        println!("-----------------------------------------------------------------------");
+        println!();
+    }
+
+    pub fn print_txs(&self) {
+        println!("txs:");
+        // print idx, tx_id, tx_type
+        for (idx, tx) in self.txs.iter().enumerate() {
+            print!(
+                "idx: {:>3}, tx id: {:>3}, tx_ts: {:>3}, tx type: {:>10}, ",
+                idx,
+                tx.tx_id,
+                tx.tx_ts,
+                format!("{:?}", tx.tx_type)
+            );
+            match tx.tx_type {
+                OperationType::Insert => {
+                    println!(" Insert count: {:?}", tx.ops.len());
+                }
+                OperationType::Update => {
+                    println!(" Update count: {:?}", tx.ops.len());
+                }
+                OperationType::Delete => {
+                    println!(" Delete count: {:?}", tx.ops.len());
+                }
+                OperationType::Get => {
+                    println!(" Get count: {:?}", tx.ops.len());
+                }
+                OperationType::ScanKey => {
+                    println!(" read_ts: {:?}", tx.ops[0].read_ts);
+                }
+                OperationType::Scan => {
+                    println!(" read_ts: {:?}", tx.ops[0].read_ts);
+                }
+                OperationType::DeltaScan => {
+                    println!(
+                        " from read_ts: {:?} to tx_ts: {:?}",
+                        tx.ops[0].read_ts, tx.ops[0].tx_ts
+                    );
+                }
+            }
+        }
+        println!("-----------------------------------------------------------------------");
+        println!();
+        println!("read_txs:");
+        for tx in &self.read_txs {
+            print!(
+                "Tx id: {:>3}, tx type: {:>10}, ",
+                tx.tx_id,
+                format!("{:?}", tx.tx_type)
+            );
+            match tx.tx_type {
+                OperationType::ScanKey => {
+                    println!(" read_ts: {:>3}", tx.ops[0].read_ts);
+                }
+                OperationType::Scan => {
+                    println!(" read_ts: {:>3}", tx.ops[0].read_ts);
+                }
+                OperationType::DeltaScan => {
+                    println!(
+                        " read_ts: {:>3} to tx_ts: {:>3}",
+                        tx.ops[0].read_ts, tx.ops[0].tx_ts
+                    );
+                }
+                _ => {}
+            }
+        }
+        println!("-----------------------------------------------------------------------");
+        println!();
+        print!("read_ts_candidates: ");
+        for ts in &self.read_ts_candidates {
+            print!("{:?}, ", ts);
+        }
+        println!();
+        println!("-----------------------------------------------------------------------");
+        println!();
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -42,299 +979,6 @@ enum TableType {
     Rust,
     Linear,
     Partition,
-}
-
-fn random_bytes(rng: &mut SmallRng, len: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; len];
-    rng.fill(&mut buf[..]);
-    buf
-}
-
-pub fn generate_insert_ops(
-    rng: &mut SmallRng,
-    row_count: usize,
-    num_join_keys: usize,
-    join_key_size: usize,
-    pkey_size: usize,
-    value_size: usize,
-    table_map: &mut HashMap<Vec<u8>, HashMap<Vec<u8>, Vec<(Timestamp, Vec<u8>)>>>,
-    join_keys: &mut Vec<Vec<u8>>,
-    key_pairs: &mut Vec<(Vec<u8>, Vec<u8>)>, // (pkey, join_key)
-) -> Vec<TxOperation> {
-    let mut used_join_keys = HashSet::with_capacity(num_join_keys);
-    for _ in 0..num_join_keys {
-        let jkey = loop {
-            let candidate = random_bytes(rng, join_key_size);
-            if used_join_keys.insert(candidate.clone()) {
-                break candidate;
-            }
-        };
-        join_keys.push(jkey);
-    }
-
-    let mut used_pkeys = HashSet::with_capacity(row_count);
-    let mut ops = Vec::with_capacity(row_count);
-    for _ in 0..row_count {
-        let jkey_idx = rng.gen_range(0..num_join_keys);
-        let join_key = &join_keys[jkey_idx];
-
-        let pkey = loop {
-            let candidate = random_bytes(rng, pkey_size);
-            if used_pkeys.insert(candidate.clone()) {
-                break candidate;
-            }
-        };
-        key_pairs.push((pkey.clone(), join_key.clone()));
-
-        let value = random_bytes(rng, value_size);
-        let pkey_map = table_map
-            .entry(join_key.clone())
-            .or_insert_with(HashMap::new);
-        let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
-        version_list.push((0, value.clone()));
-
-        let op = TxOperation {
-            tx_id: 0,
-            ts: 0,
-            op: "insert".to_string(),
-            pkey,
-            join_key: join_key.clone(),
-            value,
-        };
-
-        ops.push(op);
-    }
-
-    ops
-}
-
-pub fn generate_update_ops(
-    rng: &mut SmallRng,
-    row_count: usize,
-    update_ratio: f64,
-    value_size: usize,
-    start_ts: Timestamp,
-    num_tx: usize,
-    key_pairs: &[(Vec<u8>, Vec<u8>)],
-    table_map: &mut HashMap<Vec<u8>, HashMap<Vec<u8>, Vec<(Timestamp, Vec<u8>)>>>,
-) -> Vec<TxOperation> {
-    let total_updates = ((row_count as f64) * update_ratio).ceil() as usize;
-    let ops_per_tx = (total_updates as f64 / num_tx as f64).ceil() as usize;
-
-    let mut ops = Vec::with_capacity(total_updates);
-
-    for i in 0..num_tx {
-        let ts = start_ts + i as u64;
-        let tx_id = ts;
-
-        let sampled_pairs = key_pairs
-            .choose_multiple(rng, ops_per_tx)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for (pkey, join_key) in sampled_pairs {
-            let new_val = random_bytes(rng, value_size);
-
-            if let Some(pkey_map) = table_map.get_mut(&join_key) {
-                let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
-                version_list.push((ts, new_val.clone()));
-
-                ops.push(TxOperation {
-                    tx_id,
-                    ts,
-                    op: "update".to_string(),
-                    pkey,
-                    join_key,
-                    value: new_val,
-                });
-            } else {
-                panic!("Join_key should found in table map");
-            }
-        }
-    }
-
-    ops
-}
-
-pub fn generate_get_ops(
-    rng: &mut SmallRng,
-    row_count: usize,
-    get_ratio: f64,
-    recent_get_ratio: f64,
-    max_ts: Timestamp,
-    tx_id: TxId,
-    key_pairs: &[(Vec<u8>, Vec<u8>)],
-) -> Vec<TxOperation> {
-    let total_gets = ((row_count as f64) * get_ratio).ceil() as usize;
-    let recent_gets = ((total_gets as f64) * recent_get_ratio).ceil() as usize;
-    let history_gets = total_gets.saturating_sub(recent_gets);
-
-    let mut ops = Vec::with_capacity(total_gets);
-
-    // Recent read
-    for _ in 0..recent_gets {
-        let (pkey, join_key) = key_pairs.choose(rng).unwrap().clone();
-        ops.push(TxOperation {
-            tx_id,
-            ts: max_ts,
-            op: "get".to_string(),
-            pkey,
-            join_key,
-            value: vec![], // not used in get
-        });
-    }
-
-    // History read
-    for _ in 0..history_gets {
-        let (pkey, join_key) = key_pairs.choose(rng).unwrap().clone();
-        let ts = rng.gen_range(0..max_ts);
-
-        ops.push(TxOperation {
-            tx_id,
-            ts,
-            op: "get".to_string(),
-            pkey,
-            join_key,
-            value: vec![],
-        });
-    }
-
-    ops
-}
-
-// pub fn read_tx(
-
-// ) -> Vec<TxOperation> {
-
-// }
-
-fn run_txs_no_repair(
-    ops: &[TxOperation],
-    hash_join_table: &mut BoxMvccIndexMemPool,
-) -> Result<Duration> {
-    let start = Instant::now();
-    for op in ops {
-        match op.op.as_str() {
-            "insert" => {
-                hash_join_table.insert(
-                    op.join_key.clone(),
-                    op.pkey.clone(),
-                    op.ts,
-                    op.tx_id,
-                    op.value.clone(),
-                )?;
-            }
-            "update" => {
-                hash_join_table.update(
-                    op.join_key.clone(),
-                    op.pkey.clone(),
-                    op.ts,
-                    op.tx_id,
-                    op.value.clone(),
-                )?;
-            }
-            "delete" => {
-                hash_join_table.delete(&op.join_key, &op.pkey, op.ts, op.tx_id)?;
-            }
-            "get" => {
-                let _ = hash_join_table.get(&op.join_key, &op.pkey, op.ts)?;
-            }
-            "tx_begin" | "tx_commit" => { /* no-op */ }
-            "scan_with_join_key" => {
-                let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
-            }
-            other => {
-                eprintln!("Unknown operation: {}", other);
-            }
-        }
-    }
-    Ok(start.elapsed())
-}
-
-fn run_txs_read_repair(
-    ops: &[TxOperation],
-    hash_join_table: &mut BoxMvccIndexMemPool,
-) -> Result<Duration> {
-    let start = Instant::now();
-    for op in ops {
-        match op.op.as_str() {
-            "insert" => {
-                hash_join_table.insert(
-                    op.join_key.clone(),
-                    op.pkey.clone(),
-                    op.ts,
-                    op.tx_id,
-                    op.value.clone(),
-                )?;
-            }
-            "update" => {
-                hash_join_table.update(
-                    op.join_key.clone(),
-                    op.pkey.clone(),
-                    op.ts,
-                    op.tx_id,
-                    op.value.clone(),
-                )?;
-            }
-            "delete" => {
-                hash_join_table.delete(&op.join_key, &op.pkey, op.ts, op.tx_id)?;
-            }
-            "get" => {
-                let _ = hash_join_table.get_read_repair(&op.join_key, &op.pkey, op.ts)?;
-            }
-            "tx_begin" | "tx_commit" => { /* no-op */ }
-            "scan_with_join_key" => {
-                let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
-            }
-            other => {
-                eprintln!("Unknown operation: {}", other);
-            }
-        }
-    }
-    Ok(start.elapsed())
-}
-
-fn run_txs_write_repair(
-    ops: &[TxOperation],
-    hash_join_table: &mut BoxMvccIndexMemPool,
-) -> Result<Duration> {
-    let start = Instant::now();
-    for op in ops {
-        match op.op.as_str() {
-            "insert" => {
-                hash_join_table.insert(
-                    op.join_key.clone(),
-                    op.pkey.clone(),
-                    op.ts,
-                    op.tx_id,
-                    op.value.clone(),
-                )?;
-            }
-            "update" => {
-                hash_join_table.update_write_repair(
-                    op.join_key.clone(),
-                    op.pkey.clone(),
-                    op.ts,
-                    op.tx_id,
-                    op.value.clone(),
-                )?;
-            }
-            "delete" => {
-                hash_join_table.delete(&op.join_key, &op.pkey, op.ts, op.tx_id)?;
-            }
-            "get" => {
-                let _ = hash_join_table.get(&op.join_key, &op.pkey, op.ts)?;
-            }
-            "tx_begin" | "tx_commit" => { /* no-op */ }
-            "scan_with_join_key" => {
-                let _ = hash_join_table.scan_key_vec(&op.join_key, op.ts)?;
-            }
-            other => {
-                eprintln!("Unknown operation: {}", other);
-            }
-        }
-    }
-    Ok(start.elapsed())
 }
 
 /// Parse human-readable sizes like "1M", "512K", or "100"
@@ -357,11 +1001,10 @@ fn parse_human_readable_usize(s: &str) -> Result<usize, String> {
     let result = (num * (multiplier as f64)).round() as usize;
     Ok(result).map_err(|e| e.to_string())
 }
-
 #[derive(Parser, Debug)]
-struct Cli {
+pub struct Cli {
     /// Row count (number of insert ops for creating the table)
-    #[arg(short = 'r', long = "row-count", default_value = "1M", value_parser = parse_human_readable_usize)]
+    #[arg(short = 'r', long = "row-count", default_value = "100K", value_parser = parse_human_readable_usize)]
     row_count: usize,
 
     /// Number of distinct join-keys to generate
@@ -382,18 +1025,18 @@ struct Cli {
 
     /// Table type (chain, heap, rust, linear, partition)
     #[arg(short = 't', long = "table-type", default_value = "heap")]
-    table_kind: TableType,
-
-    /// Update ratio
-    #[arg(short = 'u', long = "update-ratio", default_value = "2.0")]
-    update_ratio: f64,
+    table_type: TableType,
 
     /// number of transactions
     #[arg(short = 'n', long = "num-tx", default_value = "10")]
     num_tx: usize,
 
+    /// Update ratio
+    #[arg(short = 'u', long = "update-ratio", default_value = "2.0")]
+    update_ratio: f64,
+
     /// Get ratio
-    #[arg(short = 'g', long = "get-ratio", default_value = "0.5")]
+    #[arg(short = 'g', long = "get-ratio", default_value = "0.1")]
     get_ratio: f64,
 
     /// Recent get ratio (0.0 - 1.0)
@@ -409,110 +1052,31 @@ struct Cli {
     seed: Option<u64>,
 }
 
-pub fn create_rng(seed_opt: Option<u64>) -> (SmallRng, u64) {
-    match seed_opt {
-        Some(seed) => (SmallRng::seed_from_u64(seed), seed),
-        None => {
-            // generate random u64 seed from entropy
-            let mut entropy = StdRng::from_entropy();
-            let seed = entropy.next_u64();
-            (SmallRng::seed_from_u64(seed), seed)
-        }
-    }
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let (mut rng, seed) = create_rng(cli.seed);
 
-    let pkey_per_join_key = 500;
-    let join_key_per_bucket = 2;
+    // Generate benchmark data
+    let mut bench = TxBench::new(cli);
+    bench.gen_random_txs();
+    bench.print_cli();
+    bench.print_txs();
 
-    let num_join_keys = cli
-        .num_join_keys
-        .unwrap_or(cli.row_count.max(1) / pkey_per_join_key)
-        .max(1);
-    let recent_get_ratio = cli
-        .recent_get_ratio
-        .unwrap_or(1.0 / (cli.num_tx + 1) as f64);
-    let bucket_num = cli
-        .bucket_num
-        .unwrap_or(num_join_keys.max(1) / join_key_per_bucket)
-        .max(1);
-
-    let mut table_map = HashMap::new(); // join_key -> (pkey -> version_list(ts, value))
-    let mut join_keys = Vec::with_capacity(num_join_keys);
-    let mut key_pairs = Vec::with_capacity(cli.row_count); // (pkey, join_key)
-    let insert_ops = generate_insert_ops(
-        &mut rng,
-        cli.row_count,
-        num_join_keys,
-        cli.join_key_size,
-        cli.pkey_size,
-        cli.value_size,
-        &mut table_map,
-        &mut join_keys,
-        &mut key_pairs,
-    );
-    let update_ops = generate_update_ops(
-        &mut rng,
-        cli.row_count,
-        cli.update_ratio,
-        cli.value_size,
-        1,
-        cli.num_tx,
-        &key_pairs,
-        &mut table_map,
-    );
-    let get_ops = generate_get_ops(
-        &mut rng,
-        cli.row_count,
-        cli.get_ratio,
-        recent_get_ratio,
-        cli.num_tx as Timestamp,
-        (cli.num_tx + 1) as TxId,
-        &key_pairs,
-    );
-    let hash_table_t = match cli.table_kind {
+    // Create HashJoin table
+    let hash_table_t = match bench.cli.table_type {
         TableType::Chain => HashTableType::RecentHistoryChained,
         TableType::Heap => HashTableType::HeapTable,
         TableType::Rust => HashTableType::RustHashMap,
         TableType::Linear => HashTableType::LinearHashTable,
         TableType::Partition => HashTableType::TsPartitionChained,
     };
-    let mem_pool = get_in_mem_pool();
-    let c_key = ContainerKey::new(0, 0);
+    let bucket_num = bench.cli.bucket_num.unwrap();
 
-    println!("Hash table type: {:?}", hash_table_t);
-    println!("Bucket number: {}", bucket_num);
-    println!(
-        "Pkey per Bucket: {}",
-        pkey_per_join_key * join_key_per_bucket
-    );
-    println!("- Join key per Bucket: {}", join_key_per_bucket);
-    println!("- Pkey per Join key: {}", pkey_per_join_key);
-    println!("Rng seed: {}", seed);
-    println!("-----------------------------------------------------------------------");
-    println!();
-    println!("Row count: {}", cli.row_count);
-    println!("Number of distinct join keys: {}", num_join_keys);
-    println!("Join key size: {}", cli.join_key_size);
-    println!("Pkey size: {}", cli.pkey_size);
-    println!("Value size: {}", cli.value_size);
-    println!();
-    println!("Update ratio: {}", cli.update_ratio);
-    println!(
-        "Number of transactions (max Timestamp value): {}",
-        cli.num_tx
-    );
-    println!();
-    println!("Get ratio: {}", cli.get_ratio);
-    println!("Recent get ratio: {}", recent_get_ratio);
-    println!("-----------------------------------------------------------------------");
-    println!();
     println!("No Repair");
     // no_repair
     {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+
         let mut table_no_repair = match hash_table_t {
             HashTableType::RecentHistoryChained => Box::new(
                 ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
@@ -536,22 +1100,16 @@ fn main() -> Result<()> {
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
             ) as BoxMvccIndexMemPool,
         };
-        let insert_dur = run_txs_no_repair(&insert_ops, &mut table_no_repair)?;
-        println!("No repair insert duration: {:?}", insert_dur);
-        let update_dur = run_txs_no_repair(&update_ops, &mut table_no_repair)?;
-        println!("No repair update duration: {:?}", update_dur);
-        let get_dur_1 = run_txs_no_repair(&get_ops, &mut table_no_repair)?;
-        println!("No repair get duration 1: {:?}", get_dur_1);
-        let get_dur_2 = run_txs_no_repair(&get_ops, &mut table_no_repair)?;
-        println!("No repair get duration 2: {:?}", get_dur_2);
-        let get_dur_3 = run_txs_no_repair(&get_ops, &mut table_no_repair)?;
-        println!("No repair get duration 3: {:?}", get_dur_3);
+        bench.run_all_txs_no_repair(&mut table_no_repair);
     }
 
     println!();
     println!("Read Repair");
     // read_repair
     {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 1);
+
         let mut table_read_repair = match hash_table_t {
             HashTableType::RecentHistoryChained => Box::new(
                 ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
@@ -575,22 +1133,16 @@ fn main() -> Result<()> {
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
             ) as BoxMvccIndexMemPool,
         };
-        let insert_dur = run_txs_read_repair(&insert_ops, &mut table_read_repair)?;
-        println!("Read repair insert duration: {:?}", insert_dur);
-        let update_dur = run_txs_read_repair(&update_ops, &mut table_read_repair)?;
-        println!("Read repair update duration: {:?}", update_dur);
-        let get_dur_1 = run_txs_read_repair(&get_ops, &mut table_read_repair)?;
-        println!("Read repair get duration 1: {:?}", get_dur_1);
-        let get_dur_2 = run_txs_read_repair(&get_ops, &mut table_read_repair)?;
-        println!("Read repair get duration 2: {:?}", get_dur_2);
-        let get_dur_3 = run_txs_read_repair(&get_ops, &mut table_read_repair)?;
-        println!("Read repair get duration 3: {:?}", get_dur_3);
+        bench.run_all_txs_read_repair(&mut table_read_repair);
     }
 
     println!();
     println!("Write Repair");
     // write_repair
     {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 2);
+
         let mut table_write_repair = match hash_table_t {
             HashTableType::RecentHistoryChained => Box::new(
                 ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
@@ -614,16 +1166,7 @@ fn main() -> Result<()> {
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
             ) as BoxMvccIndexMemPool,
         };
-        let insert_dur = run_txs_write_repair(&insert_ops, &mut table_write_repair)?;
-        println!("Write repair insert duration: {:?}", insert_dur);
-        let update_dur = run_txs_write_repair(&update_ops, &mut table_write_repair)?;
-        println!("Write repair update duration: {:?}", update_dur);
-        let get_dur_1 = run_txs_write_repair(&get_ops, &mut table_write_repair)?;
-        println!("Write repair get duration 1: {:?}", get_dur_1);
-        let get_dur_2 = run_txs_write_repair(&get_ops, &mut table_write_repair)?;
-        println!("Write repair get duration 2: {:?}", get_dur_2);
-        let get_dur_3 = run_txs_write_repair(&get_ops, &mut table_write_repair)?;
-        println!("Write repair get duration 3: {:?}", get_dur_3);
+        bench.run_all_txs_write_repair(&mut table_write_repair);
     }
 
     Ok(())
