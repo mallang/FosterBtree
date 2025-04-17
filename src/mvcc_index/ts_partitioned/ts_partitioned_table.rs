@@ -125,13 +125,6 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         ts_partitions.read().unwrap().delete(*ts, pkey)
     }
 
-    // pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
-    //     for bucket in &self.bucket_entries {
-    //         bucket.garbage_collect(ts)?;
-    //     }
-    //     Ok(())
-    // }
-
     fn get_bucket_index(&self, key: &[u8]) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
@@ -315,8 +308,12 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
-        todo!("Implement garbage_collect for TsPartitionedTable")
+        for chain_bucket in &self.bucket_entries {
+            chain_bucket.read().unwrap().garbage_collect(safe_ts)?;
+        }
+        Ok(())
     }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -326,9 +323,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     {
         Ok(Self::new(c_key, mem_pool))
     }
+
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error> {
         self.split_at_ts(ts)
     }
+
     fn create_with_bucket_num(
         c_key: ContainerKey,
         mem_pool: Arc<T>,

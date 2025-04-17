@@ -204,6 +204,20 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
         }
     }
 
+    pub fn history_garbage_collect(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
+        let readguard = self.buckets.read();
+        let buckets = &readguard;
+        let buckets_num = buckets.len();
+        for i in 0..buckets_num {
+            let pid = buckets[i].page_id();
+            let fid = buckets[i].frame_id();
+            let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
+            let mut write_page = write_page(&*self.mem_pool, page_f_key);
+            <Page as HashJoinPage>::chained_hash_garbage_collect(&mut *write_page, &ts)?;
+        }
+        Ok(())
+    }
+
     pub fn get(
         &self,
         key: &[u8],

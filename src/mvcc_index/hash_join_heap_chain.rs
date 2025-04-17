@@ -230,6 +230,7 @@ impl<T: MemPool> HeapHashChain<T> {
         }
     }
 
+    // TODO: use read_repair_vec instread
     pub fn read_repair(&self, versions: &BTreeMap<Timestamp, MvccEntryLoc>) {
         for (ts, loc) in versions.iter() {
             let next_entry = versions.range((Excluded(*ts), Unbounded)).next();
@@ -240,6 +241,19 @@ impl<T: MemPool> HeapHashChain<T> {
                 slot.set_end_ts(*next_ts);
                 <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
             }
+        }
+    }
+
+    pub fn read_repair_vec(&self, versions: &Vec<(Timestamp, MvccEntryLoc)>) {
+        let len = versions.len();
+        for i in 0..len - 1 {
+            let (ts, loc) = &versions[i];
+            let (next_ts, _) = versions[i + 1];
+            let page_key = PageFrameKey::new(self.c_key, loc.page_id());
+            let mut current_page = write_page(&*self.mem_pool, page_key);
+            let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
+            slot.set_end_ts(next_ts);
+            <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
         }
     }
 
@@ -448,11 +462,69 @@ impl<T: MemPool> HeapHashChain<T> {
         }
     }
 
-    /// Runs garbage collection on every page in the history chain.
+    /*
+        (key1, 1), (key2, 2), (key1, 3), (key2, 4), (key3, 5) |gc at 6| (key3, 8)
+        Before GC:
+            (key1, 1), (key1, 3),
+            (key2, 2), (key2, 4),
+            (key3, 5), (key3, 8)
+
+        After GC:
+            (key1, 3),
+            (key2, 4),
+            (key3, 5), (key3, 8),
+    */
+    pub fn gc_collect_versions(
+        &self,
+        ts: &Timestamp,
+        best_map: &mut HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc)>>,
+    ) -> Result<(), AccessMethodError> {
+        let mut break_flag = false;
+
+        // pkey, st, mvccentry
+        // let mut best_map: HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc)>> = HashMap::new();
+        {
+            let mut current_page = self.first_page();
+            loop {
+                current_page.scan_all_for_gc_read_repair(best_map);
+
+                if break_flag {
+                    break;
+                }
+                if let Some((next_pid, next_fid)) = current_page.next_page() {
+                    let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                        self.c_key, next_pid, next_fid,
+                    ));
+                    if next_page.frame_id() != next_fid {
+                        log_debug!(
+                            "Frame of the next page has been changed. Trying to fix the frame id"
+                        );
+                        let new_frame_key = PageFrameKey::new_with_frame_id(
+                            self.c_key,
+                            next_pid,
+                            next_page.frame_id(),
+                        );
+                        let _ = fix_frame_id(current_page, &new_frame_key);
+                    }
+
+                    if next_page.slot(next_page.slot_count() - 1).start_ts() > *ts {
+                        break_flag = true;
+                    }
+                    current_page = next_page;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Runs garbage collection on every page in the heap chain.
     /// For each page, if the page is fully eligible for GC (i.e. its slot_count is 0 or
     /// its last slot's end_ts is ≤ `ts`), then the entire page is removed.
     /// Otherwise, partial GC is applied on that page.
-    pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
+    pub fn gc_truncate_entries_before_ts(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         let mut prev_page: Option<FrameWriteGuard> = None;
 
@@ -460,8 +532,7 @@ impl<T: MemPool> HeapHashChain<T> {
             let gc_whole_page = if current_page.slot_count() == 0 {
                 true
             } else {
-                let last_slot = current_page.slot(current_page.slot_count() - 1);
-                last_slot.end_ts() <= *ts
+                current_page.max_end_ts() <= *ts
             };
 
             if gc_whole_page {
@@ -501,7 +572,7 @@ impl<T: MemPool> HeapHashChain<T> {
                 let mut writable_page = current_page
                     .try_upgrade(true)
                     .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
-                writable_page.garbage_collect(ts)?;
+                writable_page.heap_hash_garbage_collect(ts)?;
                 // Keep this page as the previous page (for updating pointers) in case the next page(s)
                 // are also fully eligible.
                 prev_page = Some(writable_page);
@@ -696,7 +767,8 @@ impl<T: MemPool> HeapHashChain<T> {
         use std::collections::HashMap;
 
         // pkey, st, mvccentry
-        let mut best_map = HashMap::new();
+        let mut best_map: HashMap<Vec<u8>, BTreeMap<u64, (MvccEntryLoc, MvccEntry)>> =
+            HashMap::new();
         {
             let mut current_page = self.first_page();
             loop {

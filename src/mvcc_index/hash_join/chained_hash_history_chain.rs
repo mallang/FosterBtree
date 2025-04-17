@@ -255,7 +255,7 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
                 let mut writable_page = current_page
                     .try_upgrade(true)
                     .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
-                writable_page.garbage_collect(ts)?;
+                writable_page.chained_hash_garbage_collect(ts)?;
                 // Keep this page as the previous page (for updating pointers) in case the next page(s)
                 // are also fully eligible.
                 prev_page = Some(writable_page);

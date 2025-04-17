@@ -267,7 +267,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
-        todo!()
+        self.history.history_garbage_collect(safe_ts)
     }
 
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error> {

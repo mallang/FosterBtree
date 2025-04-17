@@ -228,19 +228,12 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
     }
 
     pub fn scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
-        // let mut best_candidates = HashMap::new();
-        // for p in self.partitions.iter().rev() {
-        //     let partition_scanner = p.chain.scan_all()?;
-        //     // Iterate over all entries from the chain.
-        //     for entry in partition_scanner {
-        //         let (pkey, value) = entry;
-        //         best_candidates
-        //             .entry(pkey)
-        //             .or_insert(value);
-        //     }
-        // }
-        // Ok(best_candidates.into_iter().collect())
-        todo!()
+        let mut res = vec![];
+        for p in self.partitions.iter().rev() {
+            let partition_scanner = p.chain.scan_all()?;
+            res.extend(partition_scanner);
+        }
+        Ok(res)
     }
 
     pub fn scan_delta(
@@ -281,10 +274,31 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         }))
     }
 
-    // pub fn garbage_collect(&mut self, watermark: Timestamp) {
-    //     self.partitions.retain(|p| p.range.1 > watermark);
-    //     for part in &mut self.partitions {
-    //         part.chain.garbage_collect(&watermark).ok();
-    //     }
-    // }
+    pub fn garbage_collect(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
+        let mut best_map = HashMap::new();
+        for part in &self.partitions {
+            part.chain.gc_collect_versions(&ts, &mut best_map)?;
+        }
+        for map in best_map.into_values() {
+            self.read_repair_vec(&map);
+        }
+        for part in &self.partitions {
+            part.chain.gc_truncate_entries_before_ts(&ts)?;
+        }
+
+        Ok(())
+    }
+
+    fn read_repair_vec(&self, versions: &Vec<(Timestamp, MvccEntryLoc)>) {
+        let len = versions.len();
+        for i in 0..len - 1 {
+            let (_ts, loc) = &versions[i];
+            let (next_ts, _) = versions[i + 1];
+            let page_key = PageFrameKey::new(self.c_key, loc.page_id());
+            let mut current_page = write_page(&*self.mem_pool, page_key);
+            let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
+            slot.set_end_ts(next_ts);
+            <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
+        }
+    }
 }

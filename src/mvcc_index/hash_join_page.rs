@@ -581,8 +581,8 @@ pub trait HashJoinPage {
         slot_id: usize,
     ) -> Result<MvccEntry, AccessMethodError>;
 
-    fn garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError>;
-
+    fn chained_hash_garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError>;
+    fn heap_hash_garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError>;
     fn search_slot(&self, sort_key: &[u8]) -> (bool, usize) {
         self.binary_search(sort_key)
         // self.linear_search(sort_key)
@@ -757,6 +757,13 @@ pub trait HashJoinPage {
         ts: &Timestamp,
         best_map: &mut HashMap<Vec<u8>, BTreeMap<Timestamp, (MvccEntryLoc, MvccEntry)>>,
     );
+
+    fn scan_all_for_gc_read_repair(
+        &self,
+        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc)>>,
+    );
+
+    fn max_end_ts(&self) -> Timestamp;
 }
 
 impl HashJoinPage for Page {
@@ -1210,7 +1217,7 @@ impl HashJoinPage for Page {
         Ok(old_entry)
     }
 
-    fn garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError> {
+    fn chained_hash_garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError> {
         let end_idx = self.binary_search_by_end_ts(*ts);
 
         let mut total_deleted_rec_size = 0;
@@ -1237,6 +1244,41 @@ impl HashJoinPage for Page {
             let dest_offset = self.slot_offset(0);
             self.copy_within(src_start..src_end, dest_offset);
 
+            self.set_slot_count(current_slot_count - deleted_slots);
+        }
+
+        HashJoinPage::decrease_total_bytes_used(
+            self,
+            deleted_slots * SLOT_SIZE + total_deleted_rec_size,
+        );
+        Ok(())
+    }
+
+    fn heap_hash_garbage_collect(&mut self, safe_ts: &Timestamp) -> Result<(), AccessMethodError> {
+        let mut total_deleted_rec_size = 0;
+        let mut deleted_slots = 0;
+        let mut next_valid_slot_idx = 0;
+        for idx in 0..self.slot_count() as usize {
+            let slot = self.slot(idx);
+            if slot.end_ts() > *safe_ts {
+                // keep
+                self.set_slot(next_valid_slot_idx, &slot);
+                next_valid_slot_idx += 1;
+                continue;
+            }
+            // delete
+            // TODO: I think there maybe some bug on rec_start_offset, but I have no time to fix it.
+            let rec = self.record(idx);
+            total_deleted_rec_size += rec.size();
+            deleted_slots += 1;
+            if slot.offset() == self.rec_start_offset() {
+                self.set_rec_start_offset(slot.offset() + rec.size());
+            }
+        }
+
+        let current_slot_count = self.slot_count();
+        assert_eq!(deleted_slots, current_slot_count - next_valid_slot_idx);
+        if deleted_slots > 0 {
             self.set_slot_count(current_slot_count - deleted_slots);
         }
 
@@ -1674,6 +1716,33 @@ impl HashJoinPage for Page {
         }
     }
 
+    fn scan_all_for_gc_read_repair(
+        &self,
+        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc)>>,
+    ) {
+        let page_id = self.get_id();
+
+        // For each slot:
+        for slot_idx in 0..self.slot_count() {
+            let slot = self.slot(slot_idx);
+            if slot.end_ts() != Timestamp::MAX {
+                continue;
+            }
+
+            let rec = self.record_from_slot(&slot);
+            let pk = rec.pkey();
+
+            let get_res = best_map.get_mut(pk);
+            if let Some(vec) = get_res {
+                vec.push((slot.start_ts(), MvccEntryLoc::new(page_id, slot_idx as u32)));
+            } else {
+                let mut vec = Vec::new();
+                vec.push((slot.start_ts(), MvccEntryLoc::new(page_id, slot_idx as u32)));
+                best_map.insert(pk.to_vec(), vec);
+            }
+        }
+    }
+
     fn scan_key_recent_into(
         &self,
         search_pkey: &[u8],
@@ -1770,6 +1839,22 @@ impl HashJoinPage for Page {
                 }
             }
         }
+    }
+
+    fn max_end_ts(&self) -> Timestamp {
+        let mut max_ts = Timestamp::MIN;
+        for slot_idx in 0..self.slot_count() {
+            let slot = self.slot(slot_idx);
+            let et = slot.end_ts();
+            if et > max_ts {
+                max_ts = et;
+            }
+
+            if et == Timestamp::MAX {
+                break;
+            }
+        }
+        max_ts
     }
 }
 
@@ -2790,7 +2875,7 @@ mod tests {
         // Define the garbage collection timestamp.
         // We choose gc_ts = 220. This means any history entry with end_ts <= 220 should be collected.
         let gc_ts: Timestamp = 220;
-        let gc_res = HashJoinPage::garbage_collect(&mut page, &gc_ts);
+        let gc_res = HashJoinPage::chained_hash_garbage_collect(&mut page, &gc_ts);
         assert!(
             gc_res.is_ok(),
             "garbage_collect failed with ts {}: {:?}",

@@ -172,13 +172,6 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
     //     heap_chain.delete(pkey, ts)
     // }
 
-    pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
-        for bucket in &self.bucket_entries {
-            bucket.garbage_collect(ts)?;
-        }
-        Ok(())
-    }
-
     /// Read page with given PageFrameKey
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         loop {
@@ -404,8 +397,19 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
-        todo!("Implement garbage_collect for HashHeapTable")
+        for chain_bucket in &self.bucket_entries {
+            let mut best_map = HashMap::new();
+            chain_bucket.gc_collect_versions(&safe_ts, &mut best_map)?;
+
+            for map in best_map.into_values() {
+                chain_bucket.read_repair_vec(&map);
+            }
+
+            chain_bucket.gc_truncate_entries_before_ts(&safe_ts)?;
+        }
+        Ok(())
     }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
