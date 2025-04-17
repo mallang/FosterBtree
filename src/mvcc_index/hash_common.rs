@@ -9,6 +9,7 @@ use crate::{
     bp::{FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
     page::PageId,
+    prelude::Timestamp,
 };
 
 pub(crate) const SUBTABLE_HASHER_SEED: u32 = 233;
@@ -141,5 +142,61 @@ pub fn try_read_page<T: MemPool + 'static>(
         Err(e) => {
             panic!("Unexpected error: {:?}", e);
         }
+    }
+}
+
+/*
+   tools used in scan_delta
+*/
+#[derive(Clone, Default, PartialEq)]
+pub struct KVWithTs {
+    k: Vec<u8>,
+    v: Vec<u8>,
+    start_ts: Timestamp,
+}
+
+impl KVWithTs {
+    pub fn get_k(&self) -> &[u8] {
+        &self.k[..]
+    }
+    pub fn get_v(&self) -> &[u8] {
+        &self.v[..]
+    }
+    pub fn get_start_ts(&self) -> Timestamp {
+        self.start_ts
+    }
+
+    pub fn cmp_and_swap(&mut self, new_st: Timestamp, new_k: &[u8], new_v: &[u8]) {
+        if new_st >= self.start_ts {
+            self.k = new_k.to_vec();
+            self.v = new_v.to_vec();
+            self.start_ts = new_st;
+        }
+    }
+}
+
+pub struct RowDelta {
+    from: KVWithTs,
+    to: KVWithTs,
+}
+
+impl RowDelta {
+    pub fn new() -> Self {
+        Self {
+            from: KVWithTs::default(),
+            to: KVWithTs::default(),
+        }
+    }
+
+    pub fn from(&mut self) -> &mut KVWithTs {
+        &mut self.from
+    }
+
+    pub fn to(&mut self) -> &mut KVWithTs {
+        &mut self.to
+    }
+
+    pub fn split(self) -> (KVWithTs, KVWithTs) {
+        (self.from, self.to)
     }
 }

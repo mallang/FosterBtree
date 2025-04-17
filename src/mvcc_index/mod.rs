@@ -279,27 +279,19 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
 }
 
 /// Represents a change (delta) in the value of a key-primary key tuple.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Delta<V> {
     Inserted(V),
     Updated(V),
     Deleted,
 }
 
-/// Represents a change (delta) in the value of a key-primary key tuple.
-#[derive(Clone, Debug)]
-pub struct DeltaEntry<V> {
-    pub value_delta: Delta<V>,
-    pub key: Vec<u8>,
-    pub pkey: Vec<u8>,
-}
-
-impl<V> DeltaEntry<V> {
-    pub fn new(key: Vec<u8>, pkey: Vec<u8>, value_delta: Delta<V>) -> Self {
-        Self {
-            value_delta,
-            key,
-            pkey,
+impl<V> Delta<V> {
+    pub fn get_value(&self) -> Option<&V> {
+        match self {
+            Self::Inserted(v) => Some(v),
+            Self::Updated(v) => Some(v),
+            Self::Deleted => None,
         }
     }
 }

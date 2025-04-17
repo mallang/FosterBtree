@@ -251,7 +251,12 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        todo!("Implement delta_scan for TsPartitionedTable")
+        let mut all_entries = Vec::new();
+        for bucket in &self.bucket_entries {
+            let entries = bucket.read().unwrap().scan_delta(from_ts, to_ts);
+            all_entries.extend(entries);
+        }
+        Ok(Box::new(all_entries.into_iter()))
     }
 
     fn scan(

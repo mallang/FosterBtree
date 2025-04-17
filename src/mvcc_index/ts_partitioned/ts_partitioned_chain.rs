@@ -7,11 +7,12 @@ use std::{
 
 use crate::{
     bp::{ContainerKey, MemPool, PageFrameKey},
+    log_warn,
     mvcc_index::{
-        hash_common::{write_page, MvccEntryLoc},
+        hash_common::{write_page, KVWithTs, MvccEntryLoc, RowDelta},
         hash_join_heap_chain::HeapHashChain,
         hash_join_page::HashJoinPage,
-        MvccEntry,
+        Delta, MvccEntry,
     },
     page::Page,
     prelude::{AccessMethodError, Timestamp},
@@ -171,6 +172,7 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
                 let partition_scanner = p.chain.scan_unique(ts).unwrap();
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
+                    log_warn!("ts parti scan: get entry: {:?}", entry);
                     let pkey = entry.pkey().to_vec();
                     best_candidates
                         .entry(pkey)
@@ -239,6 +241,44 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         // }
         // Ok(best_candidates.into_iter().collect())
         todo!()
+    }
+
+    pub fn scan_delta(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>> {
+        let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
+        for p in self.partitions.iter() {
+            p.chain.scan_delta(from, to, &mut delta_map);
+        }
+
+        Box::new(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
+            let (from_kv, to_kv) = from_to_delta.split();
+            if &to_kv == &KVWithTs::default() {
+                // both invalid
+                None
+            } else if &from_kv == &KVWithTs::default() {
+                // from is invalid but to is valid
+                Some((
+                    to_kv.get_k().to_vec(),
+                    pk,
+                    Delta::Inserted(to_kv.get_v().to_vec()),
+                ))
+            } else {
+                // both is valid
+                if from_kv.get_v() == to_kv.get_v() {
+                    // no change
+                    None
+                } else {
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Updated(to_kv.get_v().to_vec()),
+                    ))
+                }
+            }
+        }))
     }
 
     // pub fn garbage_collect(&mut self, watermark: Timestamp) {

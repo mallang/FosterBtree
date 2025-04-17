@@ -16,12 +16,15 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
-    mvcc_index::{hash_join_page::HashJoinPage, MvccEntry},
+    mvcc_index::{hash_common::KVWithTs, hash_join_page::HashJoinPage, MvccEntry},
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
     prelude::Timestamp,
 };
 
-use super::hash_common::{write_page, MvccEntryLoc};
+use super::{
+    hash_common::{write_page, MvccEntryLoc, RowDelta},
+    Delta,
+};
 
 pub struct HeapHashChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -53,17 +56,6 @@ impl<T: MemPool> HeapHashChain<T> {
             last_frame_id: AtomicU32::new(first_frame_id),
         }
     }
-
-    // pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, pid: PageId) -> Self {
-    //     Self {
-    //         mem_pool,
-    //         c_key,
-    //         first_page_id: AtomicU32::new(pid),
-    //         first_frame_id: AtomicU32::new(u32::MAX),
-    //         last_page_id: AtomicU32::new(pid),
-    //         last_frame_id: AtomicU32::new(u32::MAX),
-    //     }
-    // }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let entry = &mut entry.clone();
@@ -668,6 +660,34 @@ impl<T: MemPool> HeapHashChain<T> {
             .collect::<Vec<(Vec<u8>, Vec<u8>)>>()
     }
 
+    pub fn scan_delta(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        delta_map: &mut HashMap<Vec<u8>, RowDelta>,
+    ) {
+        let mut current_page = self.first_page();
+        loop {
+            current_page.scan_delta_heap(&from, &to, delta_map);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
+                    log_debug!(
+                        "Frame of the next page has been changed. Trying to fix the frame id"
+                    );
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn scan_key_vec_read_repair(
         &self,
         search_key: &[u8],
@@ -810,19 +830,19 @@ fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> F
     }
 }
 
-// Implement Clone for MvccHashJoinHistoryChain to allow cloning
-impl<T: MemPool> Clone for HeapHashChain<T> {
-    fn clone(&self) -> Self {
-        Self {
-            mem_pool: Arc::clone(&self.mem_pool),
-            c_key: self.c_key,
-            first_page_id: AtomicU32::new(self.first_page_id()),
-            first_frame_id: AtomicU32::new(self.first_frame_id()),
-            last_page_id: AtomicU32::new(self.last_page_id()),
-            last_frame_id: AtomicU32::new(self.last_frame_id()),
-        }
-    }
-}
+// // Implement Clone for MvccHashJoinHistoryChain to allow cloning
+// impl<T: MemPool> Clone for HeapHashChain<T> {
+//     fn clone(&self) -> Self {
+//         Self {
+//             mem_pool: Arc::clone(&self.mem_pool),
+//             c_key: self.c_key,
+//             first_page_id: AtomicU32::new(self.first_page_id()),
+//             first_frame_id: AtomicU32::new(self.first_frame_id()),
+//             last_page_id: AtomicU32::new(self.last_page_id()),
+//             last_frame_id: AtomicU32::new(self.last_frame_id()),
+//         }
+//     }
+// }
 
 pub struct HeapChainScanner<T: MemPool> {
     chain: Arc<HeapHashChain<T>>,

@@ -1,7 +1,10 @@
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{hash_common::MvccEntryLoc, Delta, MvccEntry, MvccIndex, TxId},
+    mvcc_index::{
+        hash_common::{KVWithTs, MvccEntryLoc, RowDelta},
+        Delta, MvccEntry, MvccIndex, TxId,
+    },
     page::{Page, PageId},
     prelude::{AccessMethodError, Timestamp},
 };
@@ -202,12 +205,6 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.bucket_count
     }
-
-    // pub fn scan_key(&self, key: &[u8], ts: Timestamp) -> Vec<MvccEntry> {
-    //     let index = self.get_bucket_index(key);
-    //     let bucket = &self.bucket_entries[index];
-    //     bucket.scan_key(key, &ts)
-    // }
 }
 
 impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
@@ -305,7 +302,41 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        todo!("Implement delta_scan for HashHeapTable")
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
+            bucket.scan_delta(from_ts, to_ts, &mut delta_map);
+
+            let iter = Box::new(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
+                let (from_kv, to_kv) = from_to_delta.split();
+                if &to_kv == &KVWithTs::default() {
+                    // both invalid
+                    None
+                } else if &from_kv == &KVWithTs::default() {
+                    // from is invalid but to is valid
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Inserted(to_kv.get_v().to_vec()),
+                    ))
+                } else {
+                    // both is valid
+                    if from_kv.get_v() == to_kv.get_v() {
+                        // no change
+                        None
+                    } else {
+                        Some((
+                            to_kv.get_k().to_vec(),
+                            pk,
+                            Delta::Updated(to_kv.get_v().to_vec()),
+                        ))
+                    }
+                }
+            }));
+
+            result.extend(iter);
+        }
+        Ok(Box::new(result.into_iter()))
     }
 
     fn scan(

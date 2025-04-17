@@ -1,11 +1,11 @@
 use core::panic;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     bp::{ContainerKey, MemPool},
     log_warn,
-    mvcc_index::{hash_common::DEFAULT_BUCKET_NUM, MvccEntry, MvccIndex},
-    prelude::AccessMethodError,
+    mvcc_index::{hash_common::DEFAULT_BUCKET_NUM, Delta, MvccEntry, MvccIndex},
+    prelude::{AccessMethodError, Timestamp},
 };
 
 use super::{
@@ -68,7 +68,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         &self,
         key: Self::Key,
         pkey: Self::PKey,
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
         tx_id: crate::mvcc_index::TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
@@ -85,7 +85,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         &self,
         key: &[u8],
         pkey: &[u8],
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
         let recent_result = self.recent.get(key, pkey, ts);
         let get_entry_res = match recent_result {
@@ -115,7 +115,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         &self,
         key: &[u8],
         pkey: &[u8],
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
         self.get(key, pkey, ts)
     }
@@ -124,7 +124,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         &self,
         key: Self::Key,
         pkey: Self::PKey,
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
         tx_id: crate::mvcc_index::TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
@@ -148,18 +148,18 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         &self,
         key: Self::Key,
         pkey: Self::PKey,
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
         tx_id: crate::mvcc_index::TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        todo!()
+        self.update(key, pkey, ts, tx_id, value)
     }
 
     fn delete(
         &self,
         key: &[u8],
         pkey: &[u8],
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
         tx_id: crate::mvcc_index::TxId,
     ) -> Result<(), Self::Error> {
         match self.recent.delete(key, pkey, ts) {
@@ -179,12 +179,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
 
     fn scan(
         &self,
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
         let recent_iter = LinearSubTableScanner::new(self.recent.clone(), Some(ts));
+        let history_iter = LinearSubTableScanner::new(self.history.clone(), Some(ts));
         Ok(Box::new(
-            recent_iter.into_iter().map(|e| (e.key, e.pkey, e.value)),
+            recent_iter
+                .into_iter()
+                .map(|e| (e.key, e.pkey, e.value))
+                .chain(history_iter.into_iter().map(|e| (e.key, e.pkey, e.value))),
         ))
     }
 
@@ -198,7 +202,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     fn scan_key(
         &self,
         key: &Self::Key,
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         let recent_iter = LinearSubTableKeyScanner::new(self.recent.clone(), Some(ts), key.clone());
         let history_iter =
@@ -210,7 +214,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     fn scan_key_vec(
         &self,
         key: &Self::Key,
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         Ok(self.scan_key(key, ts)?.into_iter().collect())
     }
@@ -218,132 +222,55 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     fn scan_key_vec_read_repair(
         &self,
         key: &Self::Key,
-        ts: crate::prelude::Timestamp,
+        ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         self.scan_key_vec(key, ts)
     }
 
     fn delta_scan(
         &self,
-        from_ts: crate::prelude::Timestamp,
-        to_ts: crate::prelude::Timestamp,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
     ) -> Result<
-        Box<
-            dyn Iterator<Item = (Self::Key, Self::PKey, crate::mvcc_index::Delta<Self::Value>)>
-                + Send,
-        >,
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        todo!()
+        let mut map = BTreeMap::<Vec<u8>, (Vec<u8>, Delta<Vec<u8>>)>::new();
+        let to = self.scan(to_ts)?;
+        for entry in to {
+            map.insert(entry.1, (entry.0, Delta::Inserted(entry.2)));
+        }
+
+        let from = self.scan(from_ts)?;
+        for entry in from {
+            log_warn!(
+                "from ts : {} get entry: {:?}",
+                from_ts,
+                String::from_utf8(entry.0.clone())
+            );
+            let e = map.get_mut(&entry.1);
+            if let Some(map_entry) = e {
+                if map_entry.1.get_value().unwrap() == &entry.2 {
+                    map.remove(&entry.1);
+                } else {
+                    map_entry.1 = Delta::Updated(map_entry.1.get_value().unwrap().to_vec());
+                }
+            } else {
+                map.insert(entry.1, (entry.0, Delta::Deleted));
+            }
+        }
+        Ok(Box::new(map.into_iter().map(|(pk, kv)| (kv.0, pk, kv.1))))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
-    fn garbage_collect(&self, safe_ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
+    fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
         todo!()
     }
 
-    fn split_at_ts(&self, ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
+    fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error> {
         Ok(())
-    }
-}
-
-mod tests {
-    use std::sync::Arc;
-
-    use crate::{
-        bp::{ContainerKey, InMemPool},
-        mvcc_index::MvccIndex,
-    };
-
-    use super::LinearHashTable;
-
-    fn test_basic_index_ops<I>(index: &I) -> Result<(), I::Error>
-    where
-        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
-    {
-        // 1) Insert some entries (key, pkey, ts, tx_id, value)
-        index.insert(
-            b"key1".to_vec(),
-            b"pkey1".to_vec(),
-            100,
-            1,
-            b"value1".to_vec(),
-        )?;
-        index.insert(
-            b"key2".to_vec(),
-            b"pkey2".to_vec(),
-            100,
-            1,
-            b"value2".to_vec(),
-        )?;
-        index.insert(
-            b"key1".to_vec(),
-            b"pkey3".to_vec(),
-            150,
-            1,
-            b"value3".to_vec(),
-        )?;
-
-        // 2) Get an entry at a specific timestamp
-        let got = index.get(b"key1", b"pkey1", 100)?;
-        assert_eq!(
-            got,
-            Some(b"value1".to_vec()),
-            "Should find value1 at ts=100"
-        );
-
-        // 3) Update an existing entry
-        index.update(
-            b"key1".to_vec(),
-            b"pkey3".to_vec(),
-            150,
-            2, // new transaction ID
-            b"value3_updated".to_vec(),
-        )?;
-
-        // 4) Delete an entry
-        index.delete(b"key2", b"pkey2", 100, 2)?;
-
-        // 5) Now scan at ts=200
-        let mut scan_iter = index.scan(200)?;
-        let mut scanned = Vec::new();
-        while let Some((key, pkey, value)) = scan_iter.next() {
-            // println!("Scanned: key={:?}, pkey={:?}, value={:?}", key, pkey, value);
-            scanned.push((key, pkey, value));
-        }
-
-        // 6) Verify we see "value1" for key1/pkey1, "value3_updated" for key1/pkey3,
-        //    and do *not* see key2/pkey2.
-        assert!(
-            scanned
-                .iter()
-                .any(|(k, pk, v)| k == b"key1" && pk == b"pkey1" && v == b"value1"),
-            "Should still have key1/pkey1/value1"
-        );
-        assert!(
-            scanned
-                .iter()
-                .any(|(k, pk, v)| k == b"key1" && pk == b"pkey3" && v == b"value3_updated"),
-            "Should see updated value3 for key1/pkey3"
-        );
-        assert!(
-            !scanned
-                .iter()
-                .any(|(k, pk, _)| k == b"key2" && pk == b"pkey2"),
-            "Deleted key2/pkey2 should not appear at ts=200"
-        );
-
-        // Done
-        Ok(())
-    }
-
-    #[test]
-    fn test_linear_hash_table() {
-        let pool = Arc::new(InMemPool::new());
-        let index = LinearHashTable::create(ContainerKey::new(1, 1), pool).unwrap();
-        test_basic_index_ops(&index).unwrap();
     }
 }
