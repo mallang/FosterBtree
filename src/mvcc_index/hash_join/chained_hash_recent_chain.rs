@@ -648,11 +648,10 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
     /// We call each page’s `scan_key_recent` method to do the local scan,
     /// gather the results, and move on to the next page.
     pub fn scan_key_into(&self, search_key: &[u8], ts: &Timestamp, results: &mut Vec<MvccEntry>) {
-        let mut results = Vec::new();
         let mut current_page = self.first_page();
 
         loop {
-            let page_matches = current_page.scan_key_recent_into(search_key, ts, &mut results);
+            current_page.scan_key_recent_into(search_key, ts, results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
                 let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key, next_pid, next_fid,
