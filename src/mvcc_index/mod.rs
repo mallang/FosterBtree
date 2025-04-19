@@ -231,6 +231,12 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>;
 
+    /// Scans the index and returns an iterator over key-primary key-value tuples valid at the given timestamp.
+    fn scan_read_repair(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>;
+
     /// Scans all entries with the given key at the specified timestamp.
     /// Returns an iterator over primary key and value pairs.
     fn scan_key(
@@ -258,6 +264,17 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     /// Delta scan between two timestamps.
     /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.
     fn delta_scan(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    >;
+
+    /// Delta scan between two timestamps.
+    /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.
+    fn delta_scan_read_repair(
         &self,
         from_ts: Timestamp,
         to_ts: Timestamp,

@@ -22,7 +22,7 @@ use crate::{
 };
 
 use super::{
-    hash_common::{write_page, MvccEntryLoc, RowDelta},
+    hash_common::{read_repair_vec, write_page, MvccEntryLoc, RowDelta},
     Delta,
 };
 
@@ -178,7 +178,7 @@ impl<T: MemPool> HeapHashChain<T> {
         &self,
         pkey: &[u8],
         ts: &Timestamp,
-        versions: &mut BTreeMap<Timestamp, MvccEntryLoc>,
+        versions: &mut BTreeMap<Timestamp, (MvccEntryLoc, bool)>,
     ) -> Result<MvccEntry, AccessMethodError> {
         let mut best_candidate: Option<MvccEntry> = None;
         let mut current_page = self.first_page();
@@ -227,33 +227,6 @@ impl<T: MemPool> HeapHashChain<T> {
         match best_candidate {
             Some(entry) => Ok(entry),
             None => Err(AccessMethodError::KeyNotFound),
-        }
-    }
-
-    // TODO: use read_repair_vec instread
-    pub fn read_repair(&self, versions: &BTreeMap<Timestamp, MvccEntryLoc>) {
-        for (ts, loc) in versions.iter() {
-            let next_entry = versions.range((Excluded(*ts), Unbounded)).next();
-            if let Some((next_ts, _)) = next_entry {
-                let page_key = PageFrameKey::new(self.c_key, loc.page_id());
-                let mut current_page = write_page(&*self.mem_pool, page_key);
-                let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
-                slot.set_end_ts(*next_ts);
-                <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
-            }
-        }
-    }
-
-    pub fn read_repair_vec(&self, versions: &Vec<(Timestamp, MvccEntryLoc)>) {
-        let len = versions.len();
-        for i in 0..len - 1 {
-            let (ts, loc) = &versions[i];
-            let (next_ts, _) = versions[i + 1];
-            let page_key = PageFrameKey::new(self.c_key, loc.page_id());
-            let mut current_page = write_page(&*self.mem_pool, page_key);
-            let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
-            slot.set_end_ts(next_ts);
-            <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
         }
     }
 
@@ -477,20 +450,15 @@ impl<T: MemPool> HeapHashChain<T> {
     pub fn gc_collect_versions(
         &self,
         ts: &Timestamp,
-        best_map: &mut HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc)>>,
+        versions_map: &mut HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>,
     ) -> Result<(), AccessMethodError> {
-        let mut break_flag = false;
-
         // pkey, st, mvccentry
         // let mut best_map: HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc)>> = HashMap::new();
         {
             let mut current_page = self.first_page();
             loop {
-                current_page.scan_all_for_gc_read_repair(best_map);
+                current_page.scan_all_for_gc_read_repair(versions_map);
 
-                if break_flag {
-                    break;
-                }
                 if let Some((next_pid, next_fid)) = current_page.next_page() {
                     let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                         self.c_key, next_pid, next_fid,
@@ -506,10 +474,13 @@ impl<T: MemPool> HeapHashChain<T> {
                         );
                         let _ = fix_frame_id(current_page, &new_frame_key);
                     }
-
-                    if next_page.slot(next_page.slot_count() - 1).start_ts() > *ts {
-                        break_flag = true;
+                    let slot_cnt = next_page.slot_count();
+                    if slot_cnt > 0 {
+                        if next_page.slot(0).start_ts() > *ts {
+                            break;
+                        }
                     }
+
                     current_page = next_page;
                 } else {
                     break;
@@ -659,10 +630,6 @@ impl<T: MemPool> HeapHashChain<T> {
         first_page
     }
 
-    pub fn scan(self: &Arc<Self>, ts: Timestamp) -> Result<HeapChainScanner<T>, AccessMethodError> {
-        Ok(HeapChainScanner::new(self, ts))
-    }
-
     pub fn scan_all(self: &Arc<Self>) -> Result<HeapChainScanner<T>, AccessMethodError> {
         // TODO: result is incorrect
         // (end ts of mvccentry is incorrect)
@@ -677,7 +644,7 @@ impl<T: MemPool> HeapHashChain<T> {
         ts: Timestamp,
     ) -> Result<Vec<MvccEntry>, AccessMethodError> {
         // Get the full scanner (which iterates over all entries that pass the ts filter)
-        let scanner = self.scan(ts)?;
+        let scanner = HeapChainScanner::new(self, ts);
         let mut best_candidates: HashMap<Vec<u8>, MvccEntry> = HashMap::new();
 
         // Iterate over all entries from the chain.
@@ -697,15 +664,47 @@ impl<T: MemPool> HeapHashChain<T> {
         Ok(best_candidates.into_values().collect())
     }
 
-    pub fn scan_key_vec(&self, search_key: &[u8], ts: &Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+    /// Scan for all entries visible at `ts` and return only the best candidate
+    /// per primary key. The “best” is defined here as the entry with the highest
+    /// start timestamp that is visible at `ts`.
+    pub fn scan_unique_read_repair(
+        self: &Arc<Self>,
+        ts: Timestamp,
+        versions_map: &mut HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>,
+    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
+        // Get the full scanner (which iterates over all entries that pass the ts filter)
+        let mut scanner = HeapChainScanner::new_with_read_repair(self, ts, versions_map);
+        let mut best_candidates: HashMap<Vec<u8>, MvccEntry> = HashMap::new();
+
+        // Iterate over all entries from the chain.
+        while !scanner.is_end() {
+            if let Some(entry) = scanner.next() {
+                let pkey = entry.pkey().to_vec();
+                best_candidates.insert(pkey, entry);
+            }
+        }
+
+        // Return the best candidate for each key. If order matters you might want to sort them.
+        Ok(best_candidates.into_values().collect())
+    }
+
+    pub fn scan_key_vec(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         use std::collections::HashMap;
 
         // pkey, st, mvccentry
-        let mut best_map: HashMap<Vec<u8>, (Timestamp, MvccEntry)> = HashMap::new();
+        let mut best_map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
 
         let mut current_page = self.first_page();
         loop {
-            current_page.scan_key_heap_into_best(search_key, ts, &mut best_map);
+            let page_result = current_page.scan_key_heap_into_best(search_key, ts)?;
+            for (pkey, val) in page_result {
+                best_map.insert(pkey, val);
+            }
+
             if let Some((next_pid, next_fid)) = current_page.next_page() {
                 let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key, next_pid, next_fid,
@@ -718,6 +717,11 @@ impl<T: MemPool> HeapHashChain<T> {
                         PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
                     let _ = fix_frame_id(current_page, &new_frame_key);
                 }
+
+                if next_page.slot_count() > 0 && next_page.slot(0).start_ts() > *ts {
+                    break;
+                }
+
                 current_page = next_page;
             } else {
                 break;
@@ -725,54 +729,95 @@ impl<T: MemPool> HeapHashChain<T> {
         }
 
         // return pkey, val from entry
-        best_map
-            .into_values()
-            .map(|(_st, entry)| (entry.pkey().to_vec(), entry.value().to_vec()))
-            .collect::<Vec<(Vec<u8>, Vec<u8>)>>()
+        Ok(best_map.into_iter().collect::<Vec<(Vec<u8>, Vec<u8>)>>())
     }
 
     pub fn scan_delta(
-        &self,
+        self: &Arc<Self>,
         from: Timestamp,
         to: Timestamp,
         delta_map: &mut HashMap<Vec<u8>, RowDelta>,
     ) {
-        let mut current_page = self.first_page();
-        loop {
-            current_page.scan_delta_heap(&from, &to, delta_map);
-            if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
-                if next_page.frame_id() != next_fid {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+        // Get the full scanner (which iterates over all entries that pass the ts filter)
+        let mut scanner = HeapChainScanner::new(self, to);
+
+        // Iterate over all entries from the chain.
+        while !scanner.is_end() {
+            if let Some(entry) = scanner.next() {
+                let st = entry.start_ts();
+                // 2) If prefix matches, load the record
+
+                let delta_entry = delta_map.get_mut(entry.pkey());
+                if let Some(entry_v) = delta_entry {
+                    entry_v.to().cmp_and_swap(st, entry.key(), entry.value());
+                } else {
+                    let mut row_delta = RowDelta::new();
+                    row_delta.to().cmp_and_swap(st, entry.key(), entry.value());
+                    delta_map.insert(entry.pkey().to_vec(), row_delta);
                 }
-                current_page = next_page;
-            } else {
-                break;
+                if st <= from {
+                    let delta_entry = delta_map.get_mut(entry.pkey());
+                    if let Some(entry_v) = delta_entry {
+                        entry_v.from().cmp_and_swap(st, entry.key(), entry.value());
+                    }
+                }
             }
         }
     }
 
+    pub fn scan_delta_read_repair(
+        self: &Arc<Self>,
+        from: Timestamp,
+        to: Timestamp,
+        delta_map: &mut HashMap<Vec<u8>, RowDelta>,
+        versions: &mut HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>,
+    ) {
+        // Get the full scanner (which iterates over all entries that pass the ts filter)
+        let mut scanner = HeapChainScanner::new_with_read_repair(self, to, versions);
+
+        // Iterate over all entries from the chain.
+        while !scanner.is_end() {
+            if let Some(entry) = scanner.next() {
+                let st = entry.start_ts();
+                // 2) If prefix matches, load the record
+
+                let delta_entry = delta_map.get_mut(entry.pkey());
+                if let Some(entry_v) = delta_entry {
+                    entry_v.to().cmp_and_swap(st, entry.key(), entry.value());
+                } else {
+                    delta_map.insert(entry.pkey().to_vec(), RowDelta::new());
+                }
+                if st <= from {
+                    let delta_entry = delta_map.get_mut(entry.pkey());
+                    if let Some(entry_v) = delta_entry {
+                        entry_v.from().cmp_and_swap(st, entry.key(), entry.value());
+                    }
+                }
+            }
+        }
+    }
+
+    /// in chain, iterate in increasing order of start_ts
+    /// => tail is newer than head
     pub fn scan_key_vec_read_repair(
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        use std::collections::HashMap;
-
-        // pkey, st, mvccentry
-        let mut best_map: HashMap<Vec<u8>, BTreeMap<u64, (MvccEntryLoc, MvccEntry)>> =
-            HashMap::new();
+        versions_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let mut res: BTreeMap<Vec<u8>, Vec<u8>>/*pkey -> value */ = BTreeMap::new();
         {
             let mut current_page = self.first_page();
             loop {
-                current_page.scan_key_heap_into_best_read_repair(search_key, ts, &mut best_map);
+                let page_result = current_page.scan_key_heap_into_best_read_repair(
+                    search_key,
+                    ts,
+                    versions_map,
+                )?;
+                for (pkey, value) in page_result {
+                    res.insert(pkey, value);
+                }
+
                 if let Some((next_pid, next_fid)) = current_page.next_page() {
                     let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                         self.c_key, next_pid, next_fid,
@@ -795,27 +840,7 @@ impl<T: MemPool> HeapHashChain<T> {
             }
         }
 
-        // return pkey, val from entry
-        let res = best_map
-            .values()
-            .map(|bmap| bmap.last_key_value().unwrap().1 .1.to_owned())
-            .map(|e| (e.pkey, e.value))
-            .collect::<Vec<(Vec<u8>, Vec<u8>)>>();
-
-        let bmap_colle = best_map
-            .into_values()
-            .map(|btmap| {
-                btmap
-                    .into_iter()
-                    .map(|(k, v)| (k, v.0))
-                    .collect::<BTreeMap<u64, MvccEntryLoc>>()
-            })
-            .collect::<Vec<_>>();
-        for btmap in bmap_colle {
-            self.read_repair(&btmap);
-        }
-
-        return res;
+        return Ok(res.into_iter().collect());
     }
 
     /// Traverse the chain and return a human‑readable status string.
@@ -902,21 +927,7 @@ fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> F
     }
 }
 
-// // Implement Clone for MvccHashJoinHistoryChain to allow cloning
-// impl<T: MemPool> Clone for HeapHashChain<T> {
-//     fn clone(&self) -> Self {
-//         Self {
-//             mem_pool: Arc::clone(&self.mem_pool),
-//             c_key: self.c_key,
-//             first_page_id: AtomicU32::new(self.first_page_id()),
-//             first_frame_id: AtomicU32::new(self.first_frame_id()),
-//             last_page_id: AtomicU32::new(self.last_page_id()),
-//             last_frame_id: AtomicU32::new(self.last_frame_id()),
-//         }
-//     }
-// }
-
-pub struct HeapChainScanner<T: MemPool> {
+pub struct HeapChainScanner<'a, T: MemPool> {
     chain: Arc<HeapHashChain<T>>,
     ts: Timestamp,
     filter_by_ts: bool,
@@ -926,9 +937,11 @@ pub struct HeapChainScanner<T: MemPool> {
 
     initialized: bool,
     finished: bool,
+
+    repair: Option<&'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
 }
 
-impl<T: MemPool> HeapChainScanner<T> {
+impl<'a, T: MemPool> HeapChainScanner<'a, T> {
     pub fn new(chain: &Arc<HeapHashChain<T>>, ts: Timestamp) -> Self {
         Self {
             chain: chain.clone(),
@@ -938,6 +951,24 @@ impl<T: MemPool> HeapChainScanner<T> {
             current_slot_id: 0,
             initialized: false,
             finished: false,
+            repair: None,
+        }
+    }
+
+    pub fn new_with_read_repair(
+        chain: &Arc<HeapHashChain<T>>,
+        ts: Timestamp,
+        versions: &'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Self {
+        Self {
+            chain: chain.clone(),
+            ts,
+            filter_by_ts: true,
+            current_page: None,
+            current_slot_id: 0,
+            initialized: false,
+            finished: false,
+            repair: Some(versions),
         }
     }
 
@@ -950,6 +981,7 @@ impl<T: MemPool> HeapChainScanner<T> {
             current_slot_id: 0,
             initialized: false,
             finished: false,
+            repair: None,
         }
     }
 
@@ -966,9 +998,13 @@ impl<T: MemPool> HeapChainScanner<T> {
         self.finished = true;
         self.current_page = None;
     }
+
+    pub fn is_end(&self) -> bool {
+        self.finished
+    }
 }
 
-impl<T: MemPool> Iterator for HeapChainScanner<T> {
+impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
     type Item = MvccEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -992,6 +1028,19 @@ impl<T: MemPool> Iterator for HeapChainScanner<T> {
                 let entry = current_page
                     .get_entry_at_slot_id(self.current_slot_id)
                     .unwrap();
+
+                if let Some(repair) = &mut self.repair {
+                    let pkey = entry.pkey();
+                    (*repair)
+                        .entry(pkey.to_vec())
+                        .or_insert_with(Vec::new)
+                        .push((
+                            entry.start_ts(),
+                            MvccEntryLoc::new(current_page.get_id(), self.current_slot_id as u32),
+                            entry.end_ts() == Timestamp::MAX,
+                        ));
+                }
+
                 self.current_slot_id += 1;
                 if self.filter_by_ts {
                     if self.ts < entry.start_ts()
@@ -1012,6 +1061,14 @@ impl<T: MemPool> Iterator for HeapChainScanner<T> {
                         next_pid,
                         next_fid,
                     ));
+                    // early termination if the first entry of the next page is greater than ts in ful
+                    if self.filter_by_ts && next_page.slot_count() > 0 {
+                        if next_page.slot(0).start_ts() > self.ts {
+                            drop(next_page);
+                            self.finish();
+                            return None;
+                        }
+                    }
                     let next_page = unsafe {
                         std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
                     };

@@ -5,12 +5,13 @@ mod test_ops {
     use crate::bp::{get_in_mem_pool, ContainerKey, InMemPool};
 
     use crate::log_warn;
-    use crate::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
+    use crate::mvcc_index::hash_heap::hash_heap_table::{self, HeapHashTable};
     use crate::mvcc_index::hash_join::chained_hash_table::ChainedHashTable;
     use crate::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
     use crate::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-    use crate::mvcc_index::{Delta, MvccIndex};
+    use crate::mvcc_index::{hash_join, Delta, MvccIndex};
     use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
+    use crate::prelude::Timestamp;
     use core::str;
     use std::marker::PhantomData;
     use std::sync::Arc;
@@ -33,10 +34,15 @@ mod test_ops {
 
     #[test]
     fn test_delta_scan() {
-        test_delta_scan_op::<LinearHashTable<_>>();
-        test_delta_scan_op::<ChainedHashTable<_>>();
-        test_delta_scan_op::<HeapHashTable<_>>();
-        test_delta_scan_op::<TsPartitionedTable<_>>();
+        test_delta_scan_op0::<LinearHashTable<_>>();
+        test_delta_scan_op0::<ChainedHashTable<_>>();
+        test_delta_scan_op0::<HeapHashTable<_>>();
+        test_delta_scan_op0::<TsPartitionedTable<_>>();
+
+        test_delta_scan_op1::<TsPartitionedTable<_>>();
+        test_delta_scan_op1::<ChainedHashTable<_>>();
+        test_delta_scan_op1::<HeapHashTable<_>>();
+        test_delta_scan_op1::<TsPartitionedTable<_>>();
     }
 
     #[test]
@@ -45,6 +51,287 @@ mod test_ops {
         test_garbage_collection::<ChainedHashTable<_>>();
         test_garbage_collection::<HeapHashTable<_>>();
         test_garbage_collection::<TsPartitionedTable<_>>();
+    }
+
+    #[test]
+    fn test_read_repair() {
+        test_read_repair_ops::<LinearHashTable<_>>();
+        test_read_repair_ops::<ChainedHashTable<_>>();
+        test_read_repair_ops::<TsPartitionedTable<_>>();
+        test_read_repair_ops::<HeapHashTable<_>>();
+    }
+
+    fn test_read_repair_ops<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        test_get_read_repair::<I>();
+        test_scan_read_repair::<I>();
+        test_scan_delta_read_repair::<I>();
+        test_scan_key_vec_read_repair::<I>();
+    }
+
+    fn test_get_read_repair<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let num = 100;
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 16).unwrap());
+
+        // 0..num inserts
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
+        }
+
+        hash_join_table.split_at_ts(2).unwrap();
+
+        // 0..num updates
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i + 10000).into_bytes();
+            hash_join_table.update(key, pkey, 3, 1, value).unwrap();
+        }
+
+        hash_join_table.split_at_ts(4).unwrap();
+
+        // 0..num updates
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i + 20000).into_bytes();
+            hash_join_table.update(key, pkey, 4, 1, value).unwrap();
+        }
+
+        // 0..num updates
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i + 30000).into_bytes();
+            hash_join_table.update(key, pkey, 5, 1, value).unwrap();
+        }
+
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            // let value = format!("value{}", i + 20000).into_bytes();
+            let a = hash_join_table.get_read_repair(&key, &pkey, 6).unwrap();
+            assert_eq!(a, Some(format!("value{}", i + 30000).as_bytes().to_vec()));
+        }
+
+        for entry in hash_join_table.scan_all().unwrap() {
+            if entry.start_ts() == 4 {
+                assert_eq!(entry.end_ts(), 5, "entry: {:?}", entry);
+            }
+        }
+    }
+
+    fn test_scan_delta_read_repair<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let num = 100;
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 16).unwrap());
+
+        // 0..num inserts
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
+        }
+
+        hash_join_table.split_at_ts(2).unwrap();
+
+        // 0..num updates
+        for i in (0..num - 1).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i + 10000).into_bytes();
+            hash_join_table.update(key, pkey, 3, 1, value).unwrap();
+        }
+
+        hash_join_table.split_at_ts(4).unwrap();
+
+        {
+            let i = num;
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            hash_join_table.insert(key, pkey, 6, 1, value).unwrap();
+        }
+
+        for entry in hash_join_table.delta_scan_read_repair(1, 6).unwrap() {
+            if &entry.0 == format!("key{}", num - 1).as_bytes() {
+                // no delta
+                assert!(false, "should not exist in delta");
+            } else if &entry.0 == format!("key{}", num).as_bytes() {
+                assert_eq!(
+                    &entry.2,
+                    &Delta::Inserted(format!("value{}", num).as_bytes().to_vec())
+                );
+            } else {
+                let i_str = &entry.0[3..];
+                let i = std::str::from_utf8(i_str)
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert_eq!(
+                    &entry.2,
+                    &Delta::Updated(format!("value{}", i + 10000).as_bytes().to_vec())
+                );
+            }
+        }
+
+        for entry in hash_join_table.scan_all().unwrap() {
+            if entry.start_ts() == 1 || entry.start_ts() == 6 {
+                if entry.key() == format!("key{}", num - 1).as_bytes() {
+                    assert_eq!(entry.end_ts(), Timestamp::MAX);
+                } else if entry.key() == format!("key{}", num).as_bytes() {
+                    assert_eq!(entry.end_ts(), Timestamp::MAX);
+                } else {
+                    assert_eq!(entry.end_ts(), 3, "entry: {:?}", entry);
+                }
+            }
+        }
+    }
+
+    fn test_scan_key_vec_read_repair<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 16).unwrap());
+
+        // 1..100 inserts
+        for i in (0..100).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey1 = format!("pkey{}", i + 1000).into_bytes();
+            let value1 = format!("value{}", i + 1000).into_bytes();
+            hash_join_table
+                .insert(key.clone(), pkey1.clone(), 1, 1, value1)
+                .unwrap();
+
+            let pkey2 = format!("pkey{}", i + 2000).into_bytes();
+            let value2 = format!("value{}", i + 2000).into_bytes();
+            hash_join_table
+                .insert(key.clone(), pkey2.clone(), 1, 1, value2)
+                .unwrap();
+
+            let new_value1 = format!("new_value{}", i + 1000).into_bytes();
+            hash_join_table
+                .update(key.clone(), pkey1.clone(), 20, 1, new_value1)
+                .unwrap();
+            let new_value2 = format!("new_value{}", i + 2000).into_bytes();
+            hash_join_table
+                .update(key.clone(), pkey2.clone(), 20, 1, new_value2)
+                .unwrap();
+        }
+
+        hash_join_table.split_at_ts(21).unwrap();
+
+        // 1..100 inserts
+        for i in (0..100).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey1 = format!("pkey{}", i + 1000).into_bytes();
+            let pkey2 = format!("pkey{}", i + 2000).into_bytes();
+
+            let new_value1 = format!("new_new_value{}", i + 1000).into_bytes();
+            hash_join_table
+                .update(key.clone(), pkey1.clone(), 30, 1, new_value1)
+                .unwrap();
+            let new_value2 = format!("new_new_value{}", i + 2000).into_bytes();
+            hash_join_table
+                .update(key.clone(), pkey2.clone(), 30, 1, new_value2)
+                .unwrap();
+        }
+
+        for i in (0..100).into_iter() {
+            let key = format!("key{}", i).into_bytes();
+            let t = hash_join_table.scan_key_vec_read_repair(&key, 30).unwrap();
+
+            assert!(t
+                .iter()
+                .any(|x| x.0 == format!("pkey{}", i + 1000).into_bytes()));
+            assert!(t
+                .iter()
+                .any(|x| x.0 == format!("pkey{}", i + 2000).into_bytes()));
+        }
+
+        for e in hash_join_table.scan_all().unwrap() {
+            if e.start_ts() == 10 {
+                assert_eq!(e.end_ts(), 20);
+            } else if e.start_ts() == 20 {
+                assert_eq!(e.end_ts(), 30);
+            } else if e.start_ts() == 30 {
+                assert_eq!(e.end_ts(), Timestamp::MAX);
+            }
+        }
+    }
+
+    fn test_scan_read_repair<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = I::create_with_bucket_num(c_key, mem_pool, 16).unwrap();
+
+        hash_join_table
+            .insert(vec![1], vec![1], 1, 1, vec![1])
+            .unwrap();
+        hash_join_table
+            .insert(vec![2], vec![2], 2, 1, vec![2])
+            .unwrap();
+        hash_join_table
+            .update(vec![1], vec![1], 3, 1, vec![3])
+            .unwrap();
+
+        hash_join_table.split_at_ts(4).unwrap();
+
+        hash_join_table
+            .update(vec![2], vec![2], 4, 1, vec![4])
+            .unwrap();
+        hash_join_table
+            .insert(vec![3], vec![3], 5, 1, vec![5])
+            .unwrap();
+        hash_join_table
+            .update(vec![3], vec![3], 8, 1, vec![8])
+            .unwrap();
+        let scan_iter = hash_join_table.scan_read_repair(10).unwrap();
+        for entry in scan_iter {
+            let key = entry.0;
+            let value = entry.2;
+            if key == &[1] {
+                assert_eq!(value, vec![3]);
+            } else if key == &[2] {
+                assert_eq!(value, vec![4]);
+            } else if key == &[3] {
+                assert_eq!(value, vec![8]);
+            } else {
+                assert!(false, "should not reach here, key: {:?}", key);
+            }
+        }
+
+        // after repair
+        let scan_iter = hash_join_table.scan_all().unwrap();
+        for entry in scan_iter {
+            if entry.key() == &[1] && entry.start_ts() == 1 {
+                assert_eq!(entry.end_ts(), 3);
+            } else if entry.key() == &[2] && entry.start_ts() == 2 {
+                assert_eq!(entry.end_ts(), 4);
+            } else if entry.key() == &[3] && entry.start_ts() == 5 {
+                assert_eq!(entry.end_ts(), 8);
+            }
+        }
     }
 
     /*
@@ -223,9 +510,10 @@ mod test_ops {
         test_many_inserts_and_reads::<I>();
         test_simple_update_different_timestamp::<I>();
         test_update_twice::<I>();
+        test_insert_and_scan::<I>();
     }
 
-    fn test_delta_scan_op<I>()
+    fn test_delta_scan_op0<I>()
     where
         I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
@@ -242,7 +530,7 @@ mod test_ops {
             hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
         }
 
-        hash_join_table.split_at_ts(2);
+        hash_join_table.split_at_ts(2).unwrap();
 
         // 0..num updates
         for i in (0..num - 1).into_iter().step_by(1) {
@@ -280,6 +568,46 @@ mod test_ops {
                     &Delta::Updated(format!("value{}", i + 10000).as_bytes().to_vec())
                 );
             }
+        }
+    }
+
+    fn test_delta_scan_op1<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
+        let num = 100;
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 16).unwrap());
+
+        // 0..num inserts
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
+        }
+
+        hash_join_table.split_at_ts(2).unwrap();
+
+       // 0..num inserts
+        for i in (0..num).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("new_value{}", i).into_bytes();
+            hash_join_table.update(key, pkey, 3, 1, value).unwrap();
+        }
+
+        for entry in hash_join_table.delta_scan(1, 3).unwrap() {
+            let i_str = &entry.0[3..];
+            let i = std::str::from_utf8(i_str)
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            assert_eq!(
+                &entry.2,
+                &Delta::Updated(format!("new_value{}", i).as_bytes().to_vec())
+            );
         }
     }
 
@@ -333,7 +661,7 @@ mod test_ops {
     }
 
     /// no concurrent support
-    fn test_concurrent_inserts_and_reads<I>()
+    fn _test_concurrent_inserts_and_reads<I>()
     where
         I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
     {
@@ -505,7 +833,7 @@ mod test_ops {
             hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
         }
 
-        // 0..1000 deletes
+        // 0..1000 updates
         for i in (0..1000).into_iter().step_by(1) {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
@@ -528,11 +856,13 @@ mod test_ops {
         assert_eq!(cnt, 2000);
     }
 
-    #[test]
-    fn test_insert_and_scan() {
+    fn test_insert_and_scan<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 16).unwrap());
 
         // 1..100 inserts
         for i in (0..100).into_iter().step_by(1) {

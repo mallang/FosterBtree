@@ -669,17 +669,19 @@ impl TxBench {
             }
             OperationType::ScanKey => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.scan_key_vec(&op.join_key, op.read_ts).unwrap();
+                    let _ = hash_join_table
+                        .scan_key_vec(&op.join_key, op.read_ts)
+                        .unwrap();
                 }
             }
             OperationType::Scan => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.scan(op.read_ts).unwrap();
+                    let _ = hash_join_table.scan(op.read_ts).unwrap();
                 }
             }
             OperationType::DeltaScan => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
+                    let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
                 }
             }
         }
@@ -750,17 +752,21 @@ impl TxBench {
             }
             OperationType::ScanKey => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.scan_key_vec_read_repair(&op.join_key, op.read_ts).unwrap();
+                    let _ = hash_join_table
+                        .scan_key_vec_read_repair(&op.join_key, op.read_ts)
+                        .unwrap();
                 }
             }
             OperationType::Scan => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.scan(op.read_ts).unwrap();
+                    let _ = hash_join_table.scan_read_repair(op.read_ts).unwrap();
                 }
             }
             OperationType::DeltaScan => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
+                    let _ = hash_join_table
+                        .delta_scan_read_repair(op.read_ts, op.tx_ts)
+                        .unwrap();
                 }
             }
         }
@@ -831,17 +837,19 @@ impl TxBench {
             }
             OperationType::ScanKey => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.scan_key_vec(&op.join_key, op.read_ts).unwrap();
+                    let _ = hash_join_table
+                        .scan_key_vec(&op.join_key, op.read_ts)
+                        .unwrap();
                 }
             }
             OperationType::Scan => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.scan(op.read_ts).unwrap();
+                    let _ = hash_join_table.scan(op.read_ts).unwrap();
                 }
             }
             OperationType::DeltaScan => {
                 for op in &tx.ops {
-                    // let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
+                    let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
                 }
             }
         }

@@ -9,7 +9,9 @@ use crate::{
     bp::{ContainerKey, MemPool, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hash_common::{write_page, KVWithTs, MvccEntryLoc, RowDelta},
+        hash_common::{
+            read_repair_btree, read_repair_vec, write_page, KVWithTs, MvccEntryLoc, RowDelta,
+        },
         hash_join_heap_chain::HeapHashChain,
         hash_join_page::HashJoinPage,
         Delta, MvccEntry,
@@ -107,39 +109,28 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         pkey: &[u8],
         ts: Timestamp,
     ) -> Result<MvccEntry, AccessMethodError> {
-        let mut versions: BTreeMap<u64, MvccEntryLoc> = BTreeMap::new();
+        let mut versions: BTreeMap<u64, (MvccEntryLoc, bool)> = BTreeMap::new();
 
+        // MUST reverse order
+        let mut ret = Err(AccessMethodError::KeyNotFound);
         for p in self.partitions.iter().rev() {
             if ts >= p.range.0 && ts < p.range.1 {
                 match p.chain.get_read_repair(pkey, &ts, &mut versions) {
                     Ok(entry) => {
-                        self.read_repair(&versions);
-                        return Ok(entry);
+                        ret = Ok(entry);
+                        break;
                     }
                     Err(AccessMethodError::KeyNotFound) => continue,
                     Err(e) => {
-                        self.read_repair(&versions);
-                        return Err(e);
+                        ret = Err(e);
+                        break;
                     }
                 }
             }
         }
 
-        self.read_repair(&versions);
-        Err(AccessMethodError::KeyNotFound)
-    }
-
-    pub fn read_repair(&self, versions: &BTreeMap<u64, MvccEntryLoc>) {
-        for (ts, loc) in versions.iter() {
-            let next_entry = versions.range((Excluded(*ts), Unbounded)).next();
-            if let Some((next_ts, _)) = next_entry {
-                let page_key = PageFrameKey::new(self.c_key, loc.page_id());
-                let mut current_page = write_page(&*self.mem_pool, page_key);
-                let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
-                slot.set_end_ts(*next_ts);
-                <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
-            }
-        }
+        read_repair_btree(&self.mem_pool, &versions, self.c_key);
+        ret
     }
 
     pub fn update(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
@@ -167,12 +158,36 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
 
     pub fn scan_unique(&self, ts: Timestamp) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut best_candidates = HashMap::new();
-        for p in self.partitions.iter().rev() {
+        for p in self.partitions.iter() {
             if ts >= p.range.0 && ts < p.range.1 {
                 let partition_scanner = p.chain.scan_unique(ts).unwrap();
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
-                    log_warn!("ts parti scan: get entry: {:?}", entry);
+                    // log_warn!("ts parti scan: get entry: {:?}", entry);
+                    let pkey = entry.pkey().to_vec();
+                    best_candidates.insert(pkey, entry);
+                }
+            }
+        }
+        Ok(best_candidates.into_values().collect())
+    }
+
+    pub fn scan_unique_read_repair(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
+        let mut best_candidates = HashMap::new();
+        let mut versions_map = HashMap::new();
+        // iterate in natural order
+        for p in self.partitions.iter() {
+            if ts >= p.range.0 && ts < p.range.1 {
+                let partition_scanner = p
+                    .chain
+                    .scan_unique_read_repair(ts, &mut versions_map)
+                    .unwrap();
+                // Iterate over all entries from the chain.
+                for entry in partition_scanner {
+                    // log_warn!("ts parti scan: get entry: {:?}", entry);
                     let pkey = entry.pkey().to_vec();
                     best_candidates
                         .entry(pkey)
@@ -186,6 +201,11 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
                 }
             }
         }
+
+        for versions in versions_map.into_values() {
+            read_repair_vec(&self.mem_pool, &versions, self.c_key);
+        }
+
         Ok(best_candidates.into_values().collect())
     }
 
@@ -195,9 +215,9 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         key: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let mut best_candidates = HashMap::new();
-        for p in self.partitions.iter().rev() {
+        for p in self.partitions.iter() {
             if ts >= p.range.0 && ts < p.range.1 {
-                let partition_scanner = p.chain.scan_key_vec(key, &ts);
+                let partition_scanner = p.chain.scan_key_vec(key, &ts)?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
                     let (pkey, value) = entry;
@@ -214,36 +234,53 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         key: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let mut best_candidates: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-        for p in self.partitions.iter().rev() {
+        let mut versions_map = HashMap::new();
+        // iterate in natural order
+        for p in self.partitions.iter() {
             if ts >= p.range.0 && ts < p.range.1 {
-                let partition_scanner = p.chain.scan_key_vec_read_repair(key, &ts);
+                let partition_scanner =
+                    p.chain
+                        .scan_key_vec_read_repair(key, &ts, &mut versions_map)?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
-                    let (pkey, value) = entry;
-                    best_candidates.entry(pkey).or_insert(value);
+                    best_candidates.insert(entry.0, entry.1);
                 }
             }
         }
+
+        for versions in versions_map.into_values() {
+            read_repair_vec(&self.mem_pool, &versions, self.c_key);
+        }
+
         Ok(best_candidates.into_iter().collect())
     }
 
     pub fn scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut res = vec![];
-        for p in self.partitions.iter().rev() {
-            let partition_scanner = p.chain.scan_all()?;
+        for p in self.partitions.iter() {
+            let partition_scanner: crate::mvcc_index::hash_join_heap_chain::HeapChainScanner<
+                '_,
+                T,
+            > = p.chain.scan_all()?;
             res.extend(partition_scanner);
         }
         Ok(res)
     }
 
-    pub fn scan_delta(
+    pub fn scan_delta_read_repair(
         &self,
         from: Timestamp,
         to: Timestamp,
     ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>> {
         let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
+        let mut versions_map = HashMap::new();
         for p in self.partitions.iter() {
-            p.chain.scan_delta(from, to, &mut delta_map);
+            p.chain
+                .scan_delta_read_repair(from, to, &mut delta_map, &mut versions_map);
+        }
+
+        for versions in versions_map.values() {
+            read_repair_vec(&self.mem_pool, versions, self.c_key);
         }
 
         Box::new(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
@@ -274,31 +311,59 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         }))
     }
 
+    pub fn scan_delta(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>> {
+        let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
+        for p in self.partitions.iter() {
+            p.chain.scan_delta(from, to, &mut delta_map);
+        }
+
+        Box::new(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
+            let (from_kv, to_kv) = from_to_delta.split();
+            if &to_kv == &KVWithTs::default() {
+                // both invalid
+                None
+            } else if &from_kv == &KVWithTs::default() {
+                // from is invalid but to is valid
+                Some((
+                    to_kv.get_k().to_vec(),
+                    pk,
+                    Delta::Inserted(to_kv.get_v().to_vec()),
+                ))
+            } else {
+                // println!("both is valid, from: {:?}, to: {:?}", std::str::from_utf8(from_kv.get_v()), std::str::from_utf8(to_kv.get_v()));
+                // both is valid
+                if from_kv.get_v() == to_kv.get_v() {
+                    // no change
+                    None
+                } else {
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Updated(to_kv.get_v().to_vec()),
+                    ))
+                }
+            }
+        }))
+    }
+
     pub fn garbage_collect(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
         let mut best_map = HashMap::new();
         for part in &self.partitions {
             part.chain.gc_collect_versions(&ts, &mut best_map)?;
         }
+
         for map in best_map.into_values() {
-            self.read_repair_vec(&map);
+            read_repair_vec(&self.mem_pool, &map, self.c_key);
         }
+
         for part in &self.partitions {
             part.chain.gc_truncate_entries_before_ts(&ts)?;
         }
 
         Ok(())
-    }
-
-    fn read_repair_vec(&self, versions: &Vec<(Timestamp, MvccEntryLoc)>) {
-        let len = versions.len();
-        for i in 0..len - 1 {
-            let (_ts, loc) = &versions[i];
-            let (next_ts, _) = versions[i + 1];
-            let page_key = PageFrameKey::new(self.c_key, loc.page_id());
-            let mut current_page = write_page(&*self.mem_pool, page_key);
-            let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
-            slot.set_end_ts(next_ts);
-            <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
-        }
     }
 }

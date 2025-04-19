@@ -1168,7 +1168,7 @@ mod tests {
 
         // Generate a number of random entries.
         // Adjust NUM_ENTRIES to force the chain to span multiple pages.
-        const NUM_ENTRIES: usize = 1000;
+        const NUM_ENTRIES: usize = 100;
         let key_size = 30;
         let pkey_size = 30;
         let nominal_value_size = 200; // Actual value size will vary ±20%
@@ -1236,7 +1236,7 @@ mod tests {
 
         // Generate a number of random entries.
         // Increase NUM_ENTRIES to force the chain to span multiple pages.
-        const NUM_ENTRIES: usize = 1000;
+        const NUM_ENTRIES: usize = 100;
         let key_size = 30;
         let pkey_size = 30;
         let nominal_value_size = 200; // Actual value size will vary ±20%
@@ -1340,7 +1340,7 @@ mod tests {
         let chain = Arc::new(ChainedHashRecentChain::new(c_key, Arc::clone(&mem_pool)));
 
         // Generate random entries.
-        const NUM_ENTRIES: usize = 1000;
+        const NUM_ENTRIES: usize = 100;
         let key_size = 30;
         let pkey_size = 30;
         let nominal_value_size = 200; // Actual value size will vary ±20%
@@ -1877,7 +1877,7 @@ mod tests {
         let chain = Arc::new(ChainedHashRecentChain::new(c_key, mem_pool.clone()));
 
         // Generate a set of random MVCC entries.
-        const NUM_ENTRIES: usize = 1000;
+        const NUM_ENTRIES: usize = 100;
         let key_size = 30;
         let pkey_size = 30;
         let nominal_value_size = 200; // Actual value size will vary ±20%

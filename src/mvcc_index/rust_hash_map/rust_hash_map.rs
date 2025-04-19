@@ -6,6 +6,7 @@ use std::{
 use crate::{
     bp::MemPool,
     mvcc_index::{MvccEntry, MvccIndex},
+    prelude::Timestamp,
 };
 
 pub struct MvccRustHashMap {
@@ -187,6 +188,15 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
             .collect();
         Ok(Box::new(result.into_iter()))
     }
+
+    fn scan_read_repair(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        <MvccRustHashMap as MvccIndex<T>>::scan(&self, ts)
+    }
+
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
         let table = self.table.read().unwrap();
         let result: Vec<MvccEntry> = table
@@ -210,6 +220,20 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
         Self::Error,
     > {
         todo!()
+    }
+
+    fn delta_scan_read_repair(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<
+        Box<
+            dyn Iterator<Item = (Self::Key, Self::PKey, crate::mvcc_index::Delta<Self::Value>)>
+                + Send,
+        >,
+        Self::Error,
+    > {
+        <MvccRustHashMap as MvccIndex<T>>::delta_scan(&self, from_ts, to_ts)
     }
     fn garbage_collect(&self, safe_ts: crate::prelude::Timestamp) -> Result<(), Self::Error> {
         todo!()

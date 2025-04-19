@@ -2,7 +2,7 @@ use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hash_common::{KVWithTs, MvccEntryLoc, RowDelta},
+        hash_common::{read_repair_btree, read_repair_vec, KVWithTs, MvccEntryLoc, RowDelta},
         Delta, MvccEntry, MvccIndex, TxId,
     },
     page::{Page, PageId},
@@ -130,11 +130,11 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
     ) -> Result<MvccEntry, AccessMethodError> {
         let index = self.get_bucket_index(key);
         let heap_chain = &self.bucket_entries[index];
-        let mut versions: BTreeMap<u64, MvccEntryLoc> = BTreeMap::new();
+        let mut versions: BTreeMap<u64, (MvccEntryLoc, bool)> = BTreeMap::new();
 
-        let res = heap_chain.get_read_repair(pkey, ts, &mut versions);
-        heap_chain.read_repair(&mut versions);
-        return res;
+        let res = heap_chain.get_read_repair(pkey, ts, &mut versions)?;
+        read_repair_btree(&self.mem_pool, &versions, self.c_key);
+        Ok(res)
     }
 
     /// Updates an existing key-value pair in the hash join table.
@@ -332,6 +332,56 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Ok(Box::new(result.into_iter()))
     }
 
+    fn delta_scan_read_repair(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    > {
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
+            let mut versions_map = HashMap::new();
+
+            bucket.scan_delta_read_repair(from_ts, to_ts, &mut delta_map, &mut versions_map);
+            for versions in versions_map.values() {
+                read_repair_vec(&self.mem_pool, versions, self.c_key);
+            }
+
+            let iter = Box::new(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
+                let (from_kv, to_kv) = from_to_delta.split();
+                if &to_kv == &KVWithTs::default() {
+                    // both invalid
+                    None
+                } else if &from_kv == &KVWithTs::default() {
+                    // from is invalid but to is valid
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Inserted(to_kv.get_v().to_vec()),
+                    ))
+                } else {
+                    // both is valid
+                    if from_kv.get_v() == to_kv.get_v() {
+                        // no change
+                        None
+                    } else {
+                        Some((
+                            to_kv.get_k().to_vec(),
+                            pk,
+                            Delta::Updated(to_kv.get_v().to_vec()),
+                        ))
+                    }
+                }
+            }));
+
+            result.extend(iter);
+        }
+        Ok(Box::new(result.into_iter()))
+    }
+
     fn scan(
         &self,
         ts: Timestamp,
@@ -355,9 +405,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
 
-        let pk_v = chain.scan_key_vec(key, &ts);
+        let pk_v = chain.scan_key_vec(key, &ts)?;
 
-        let mapped = pk_v.into_iter();
+        let mapped: IntoIter<(Vec<u8>, Vec<u8>)> = pk_v.into_iter();
 
         Ok(Box::new(mapped))
     }
@@ -370,7 +420,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
 
-        let mvccs = chain.scan_key_vec(key, &ts);
+        let mvccs = chain.scan_key_vec(key, &ts)?;
 
         Ok(mvccs)
     }
@@ -382,8 +432,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
+        let mut versions_map = HashMap::new();
 
-        let mvccs = chain.scan_key_vec_read_repair(key, &ts);
+        let mvccs = chain.scan_key_vec_read_repair(key, &ts, &mut versions_map)?;
+
+        for btmap in versions_map.into_values() {
+            read_repair_vec(&self.mem_pool, &btmap, self.c_key);
+        }
+
         Ok(mvccs)
     }
 
@@ -402,7 +458,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
             chain_bucket.gc_collect_versions(&safe_ts, &mut best_map)?;
 
             for map in best_map.into_values() {
-                chain_bucket.read_repair_vec(&map);
+                read_repair_vec(&self.mem_pool, &map, self.c_key);
             }
 
             chain_bucket.gc_truncate_entries_before_ts(&safe_ts)?;
@@ -431,6 +487,27 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Self: Sized,
     {
         Ok(Self::new_with_bucket_num(c_key, mem_pool, num_buckets))
+    }
+
+    fn scan_read_repair(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let mut versions_map = HashMap::new();
+            let bucket_chain_result = bucket.scan_unique_read_repair(ts, &mut versions_map)?;
+
+            for versions in versions_map.into_values() {
+                read_repair_vec(&self.mem_pool, &versions, self.c_key);
+            }
+
+            result.extend(bucket_chain_result);
+        }
+        Ok(Box::new(
+            result.into_iter().map(|e| (e.key, e.pkey, e.value)),
+        ))
     }
 }
 

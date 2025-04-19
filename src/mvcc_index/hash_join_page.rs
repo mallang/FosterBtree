@@ -565,7 +565,7 @@ pub trait HashJoinPage {
         &self,
         pkey: &[u8],
         ts: &Timestamp,
-        versions: &mut BTreeMap<Timestamp, MvccEntryLoc>,
+        versions: &mut BTreeMap<Timestamp, (MvccEntryLoc, bool)>, // is_need_repair
     ) -> Result<MvccEntry, AccessMethodError>;
     fn get_history(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn get_entry_at_slot_id(&self, slot_id: usize) -> Result<MvccEntry, AccessMethodError>;
@@ -734,8 +734,7 @@ pub trait HashJoinPage {
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        best_map: &mut std::collections::HashMap<Vec<u8>, (Timestamp, MvccEntry)>,
-    );
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError>;
 
     /// used in scan_delta
     fn scan_delta_heap(
@@ -764,12 +763,12 @@ pub trait HashJoinPage {
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        best_map: &mut HashMap<Vec<u8>, BTreeMap<Timestamp, (MvccEntryLoc, MvccEntry)>>,
-    );
+        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError>;
 
     fn scan_all_for_gc_read_repair(
         &self,
-        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc)>>,
+        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
     );
 
     fn max_end_ts(&self) -> Timestamp;
@@ -989,7 +988,7 @@ impl HashJoinPage for Page {
         &self,
         pkey: &[u8],
         ts: &Timestamp,
-        versions: &mut BTreeMap<Timestamp, MvccEntryLoc>,
+        versions: &mut BTreeMap<Timestamp, (MvccEntryLoc, bool)>, // is_need_repair
     ) -> Result<MvccEntry, AccessMethodError> {
         let mut best_candidate: Option<(usize, Timestamp)> = None;
 
@@ -1000,9 +999,11 @@ impl HashJoinPage for Page {
                 let slot = self.slot(i);
                 let start = slot.start_ts();
 
-                versions.insert(start, MvccEntryLoc::new(self.get_id(), i as u32));
+                let e = versions
+                    .entry(start)
+                    .or_insert((MvccEntryLoc::new(self.get_id(), i as u32), true));
                 if slot.end_ts() != u64::MAX {
-                    versions.retain(|&key, _| key <= start);
+                    e.1 = false;
                 }
                 if start <= *ts {
                     // If this start_ts is the largest we've seen so far (still ≤ ts),
@@ -1572,8 +1573,9 @@ impl HashJoinPage for Page {
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        best_map: &mut std::collections::HashMap<Vec<u8>, (Timestamp, MvccEntry)>,
-    ) {
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let mut res: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let page_id = self.get_id();
         let ts = *ts;
         // For each slot:
         for slot_idx in 0..self.slot_count() {
@@ -1590,46 +1592,20 @@ impl HashJoinPage for Page {
             if slot_prefix != input_prefix {
                 continue;
             }
-            let st = slot.start_ts();
-            let et = slot.end_ts();
-            if ts < st || et <= ts {
-                continue;
-            }
 
             // 2) If prefix matches, load the record
             let rec = self.record_from_slot(&slot);
             if rec.key() == search_key {
-                let pkey = rec.pkey();
-                match best_map.get_mut(pkey) {
-                    Some((old_st, old_e)) => {
-                        if old_e.end_ts() != Timestamp::MAX {
-                            continue;
-                        }
-                        if st > *old_st {
-                            *old_st = st;
-                            let new_entry = MvccEntry::new(
-                                rec.key().to_vec(),
-                                rec.pkey().to_vec(),
-                                rec.val().to_vec(),
-                                st,
-                                et,
-                            );
-                            *old_e = new_entry;
-                        }
-                    }
-                    None => {
-                        let new_entry = MvccEntry::new(
-                            rec.key().to_vec(),
-                            rec.pkey().to_vec(),
-                            rec.val().to_vec(),
-                            st,
-                            et,
-                        );
-                        best_map.insert(pkey.to_vec(), (st, new_entry));
-                    }
+                let start_ts = slot.start_ts();
+                if start_ts <= ts {
+                    let pkey = rec.pkey();
+
+                    res.insert(pkey.to_vec(), rec.val().to_vec());
                 }
             }
         }
+
+        Ok(res.into_iter().collect())
     }
 
     fn scan_delta_heap(
@@ -1671,8 +1647,9 @@ impl HashJoinPage for Page {
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        best_map: &mut HashMap<Vec<u8>, BTreeMap<Timestamp, (MvccEntryLoc, MvccEntry)>>,
-    ) {
+        versions_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let mut res: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         let page_id = self.get_id();
         let ts = *ts;
         // For each slot:
@@ -1694,40 +1671,40 @@ impl HashJoinPage for Page {
             // 2) If prefix matches, load the record
             let rec = self.record_from_slot(&slot);
             if rec.key() == search_key {
-                let st = slot.start_ts();
-                let et = slot.end_ts();
-                if st <= ts {
+                let start_ts = slot.start_ts();
+                if start_ts <= ts {
                     let pkey = rec.pkey();
-                    let new_entry = MvccEntry::new(
-                        rec.key().to_vec(),
-                        rec.pkey().to_vec(),
-                        rec.val().to_vec(),
-                        st,
-                        et,
-                    );
-                    match best_map.get_mut(pkey) {
-                        Some(map) => {
-                            map.insert(
-                                st,
-                                (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry),
-                            );
+
+                    res.insert(pkey.to_vec(), rec.val().to_vec());
+
+                    match versions_map.get_mut(pkey) {
+                        Some(versions_vec_of_pkey) => {
+                            versions_vec_of_pkey.push((
+                                start_ts,
+                                MvccEntryLoc::new(page_id, slot_idx as u32),
+                                slot.end_ts() == Timestamp::MAX,
+                            ));
                         }
                         None => {
-                            let value = best_map.entry(pkey.to_vec()).or_insert(BTreeMap::new());
-                            value.insert(
-                                st,
-                                (MvccEntryLoc::new(page_id, slot_idx as u32), new_entry),
-                            );
+                            let versions_vec_of_pkey =
+                                versions_map.entry(pkey.to_vec()).or_insert(Vec::new());
+                            versions_vec_of_pkey.push((
+                                start_ts,
+                                MvccEntryLoc::new(page_id, slot_idx as u32),
+                                slot.end_ts() == Timestamp::MAX,
+                            ));
                         }
                     }
                 }
             }
         }
+
+        Ok(res.into_iter().collect())
     }
 
     fn scan_all_for_gc_read_repair(
         &self,
-        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc)>>,
+        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
     ) {
         let page_id = self.get_id();
 
@@ -1743,10 +1720,17 @@ impl HashJoinPage for Page {
 
             let get_res = best_map.get_mut(pk);
             if let Some(vec) = get_res {
-                vec.push((slot.start_ts(), MvccEntryLoc::new(page_id, slot_idx as u32)));
+                vec.push((
+                    slot.start_ts(),
+                    MvccEntryLoc::new(page_id, slot_idx as u32),
+                    slot.end_ts() == Timestamp::MAX,
+                ));
             } else {
-                let mut vec = Vec::new();
-                vec.push((slot.start_ts(), MvccEntryLoc::new(page_id, slot_idx as u32)));
+                let vec = vec![(
+                    slot.start_ts(),
+                    MvccEntryLoc::new(page_id, slot_idx as u32),
+                    slot.end_ts() == Timestamp::MAX,
+                )];
                 best_map.insert(pk.to_vec(), vec);
             }
         }

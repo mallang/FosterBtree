@@ -262,6 +262,25 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         Ok(Box::new(map.into_iter().map(|(pk, kv)| (kv.0, pk, kv.1))))
     }
 
+    fn scan_read_repair(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        self.scan(ts)
+    }
+
+    fn delta_scan_read_repair(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    > {
+        self.delta_scan(from_ts, to_ts)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

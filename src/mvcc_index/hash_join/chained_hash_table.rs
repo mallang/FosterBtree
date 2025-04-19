@@ -112,7 +112,6 @@ impl<T: MemPool> ChainedHashTable<T> {
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(entry.key());
         let second_table = &self.bucket_entries[index];
-
         second_table.insert(entry)
     }
 
@@ -515,6 +514,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         Ok(Box::new(iter))
     }
 
+    fn scan_read_repair(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        self.scan(ts)
+    }
+
     fn scan_key_vec(
         &self,
         key: &Self::Key,
@@ -569,6 +576,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
             }
         }
         Ok(Box::new(map.into_iter().map(|(pk, kv)| (kv.0, pk, kv.1))))
+    }
+
+    fn delta_scan_read_repair(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    > {
+        self.delta_scan(from_ts, to_ts)
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {

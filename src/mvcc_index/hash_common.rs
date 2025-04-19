@@ -1,16 +1,20 @@
 use core::fmt;
 use std::{
+    collections::BTreeMap,
     hash::{Hash, Hasher, SipHasher},
+    ops::Bound::{Excluded, Unbounded},
     sync::{atomic::AtomicU32, Arc, Mutex},
     time::Duration,
 };
 
 use crate::{
-    bp::{FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
+    bp::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    page::PageId,
+    page::{Page, PageId},
     prelude::Timestamp,
 };
+
+use super::hash_join_page::HashJoinPage;
 
 pub(crate) const SUBTABLE_HASHER_SEED: u32 = 233;
 
@@ -19,6 +23,7 @@ pub fn get_hashed_bucket_index(key: &[u8], total_size: u32) -> usize {
     (farmhash::hash32_with_seed(key, SUBTABLE_HASHER_SEED) % total_size) as usize
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct MvccEntryLoc(PageId, u32);
 
 impl MvccEntryLoc {
@@ -148,7 +153,7 @@ pub fn try_read_page<T: MemPool + 'static>(
 /*
    tools used in scan_delta
 */
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub struct KVWithTs {
     k: Vec<u8>,
     v: Vec<u8>,
@@ -175,6 +180,7 @@ impl KVWithTs {
     }
 }
 
+#[derive(Clone, Default, PartialEq, Debug)]
 pub struct RowDelta {
     from: KVWithTs,
     to: KVWithTs,
@@ -198,5 +204,51 @@ impl RowDelta {
 
     pub fn split(self) -> (KVWithTs, KVWithTs) {
         (self.from, self.to)
+    }
+}
+
+pub fn read_repair_btree(
+    mem_pool: &Arc<impl MemPool>,
+    versions: &BTreeMap<Timestamp, (MvccEntryLoc, bool)>,
+    c_key: ContainerKey,
+) {
+    for (ts, loc_and_is_need_repair) in versions.iter() {
+        let (loc, is_need_repair) = loc_and_is_need_repair;
+        if !*is_need_repair {
+            continue;
+        }
+        let next_entry = versions.range((Excluded(*ts), Unbounded)).next();
+        if let Some((next_ts, _)) = next_entry {
+            let page_key = PageFrameKey::new(c_key, loc.page_id());
+            let mut current_page = write_page(&**mem_pool, page_key);
+            let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
+            slot.set_end_ts(*next_ts);
+            <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
+        }
+    }
+}
+
+pub fn read_repair_vec(
+    mem_pool: &Arc<impl MemPool>,
+    versions: &Vec<(Timestamp, MvccEntryLoc, bool)>,
+    c_key: ContainerKey,
+) {
+    for idx in 0..versions.len() - 1 {
+        let (_ts, loc_and_need_repair, is_need_repair) = &versions[idx];
+        if !is_need_repair {
+            continue;
+        }
+        let next_entry = &versions[idx + 1];
+        let (next_ts, _, _) = next_entry;
+        let page_key = PageFrameKey::new(c_key, loc_and_need_repair.page_id());
+        let mut current_page = write_page(&**mem_pool, page_key);
+        let mut slot =
+            <Page as HashJoinPage>::slot(&*current_page, loc_and_need_repair.slot_id() as usize);
+        slot.set_end_ts(*next_ts);
+        <Page as HashJoinPage>::set_slot(
+            &mut current_page,
+            loc_and_need_repair.slot_id() as usize,
+            &slot,
+        );
     }
 }

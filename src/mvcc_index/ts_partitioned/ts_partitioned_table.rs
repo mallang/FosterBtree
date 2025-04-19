@@ -140,6 +140,18 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         Ok(unique_keys)
     }
 
+    fn _scan_unique_read_repair(
+        &self,
+        ts: &Timestamp,
+    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
+        let mut unique_keys = Vec::new();
+        for bucket in &self.bucket_entries {
+            let keys = bucket.read().unwrap().scan_unique_read_repair(*ts)?;
+            unique_keys.extend(keys);
+        }
+        Ok(unique_keys)
+    }
+
     fn _scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut all_entries = Vec::new();
         for bucket in &self.bucket_entries {
@@ -252,6 +264,25 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Ok(Box::new(all_entries.into_iter()))
     }
 
+    fn delta_scan_read_repair(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<
+        Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
+        Self::Error,
+    > {
+        let mut all_entries = Vec::new();
+        for bucket in &self.bucket_entries {
+            let entries = bucket
+                .read()
+                .unwrap()
+                .scan_delta_read_repair(from_ts, to_ts);
+            all_entries.extend(entries);
+        }
+        Ok(Box::new(all_entries.into_iter()))
+    }
+
     fn scan(
         &self,
         ts: Timestamp,
@@ -264,6 +295,24 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
                 entry.value().to_vec(),
             )
         })))
+    }
+
+    fn scan_read_repair(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    {
+        Ok(Box::new(
+            self._scan_unique_read_repair(&ts)?
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.key().to_vec(),
+                        entry.pkey().to_vec(),
+                        entry.value().to_vec(),
+                    )
+                }),
+        ))
     }
 
     fn scan_key(
@@ -288,6 +337,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
             .scan_key(key, ts)
             .map(|iter| iter.collect::<Vec<_>>())?)
     }
+
     fn scan_key_vec_read_repair(
         &self,
         key: &Self::Key,
