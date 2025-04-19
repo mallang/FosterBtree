@@ -1,13 +1,8 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    ops::Bound::{Excluded, Unbounded},
-    sync::{
+    collections::{BTreeMap, HashMap}, f32::consts::E, ops::Bound::{Excluded, Unbounded}, sync::{
         atomic::{self, AtomicU32, Ordering},
         Arc,
-    },
-    thread::current,
-    time::Duration,
-    vec::IntoIter,
+    }, thread::current, time::Duration, vec::IntoIter
 };
 
 use dashmap::mapref::entry;
@@ -289,7 +284,7 @@ impl<T: MemPool> HeapHashChain<T> {
         self.insert(entry)
     }
 
-    pub fn update_write_repair(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    pub fn update_write_repair_heap(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         let mut inserted = false;
         let mut repaired = false;
@@ -327,6 +322,7 @@ impl<T: MemPool> HeapHashChain<T> {
                     self.c_key, next_pid, next_fid,
                 ));
             } else {
+                // first versions => ok if !repaired
                 if inserted {
                     return Ok(());
                 }
@@ -341,6 +337,102 @@ impl<T: MemPool> HeapHashChain<T> {
             }
         }
     }
+
+    pub fn update_write_repair_ts_partition_except_last(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        let mut inserted = true;
+        let mut repaired = false;
+
+        loop {
+            let next_page_info = current_page.next_page();
+            let upgrade = current_page.try_upgrade(true);
+            let mut write_page = match upgrade {
+                Ok(p) => p,
+                Err(_) => return Err(AccessMethodError::PageWriteLatchFailed),
+            };
+
+            match write_page.update_heap_write_repair(entry, inserted, repaired) {
+                Ok(()) => return Ok(()),
+                Err(AccessMethodError::UpdateReapiredButNotInseted) => {
+                    repaired = true;
+                    drop(write_page);
+                }
+                Err(AccessMethodError::UpdateInsertedButNotReapired) => {
+                    inserted = true;
+                    drop(write_page);
+                }
+                Err(AccessMethodError::OutOfSpace) => {
+                    drop(write_page);
+                }
+                Err(e) => return Err(e),
+            }
+
+            if repaired && inserted {
+                return Ok(());
+            }
+
+            if let Some((next_pid, next_fid)) = next_page_info {
+                current_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+            } else {
+                if repaired {
+                    return Ok(());
+                } else {
+                    return Err(AccessMethodError::RepairedNotFound);
+                }
+            }
+        }
+    }
+
+    pub fn update_write_repair_ts_partition_last(&self, entry: &MvccEntry, mut repaired: bool) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+
+        loop {
+            let next_page_info = current_page.next_page();
+            
+            if !repaired {
+                let upgrade = current_page.try_upgrade(true);
+                let mut write_page = match upgrade {
+                    Ok(p) => p,
+                    Err(_) => return Err(AccessMethodError::PageWriteLatchFailed),
+                };
+
+                match write_page.update_heap_write_repair(entry, true, false) {
+                    Ok(()) => return Ok(()),
+                    Err(AccessMethodError::UpdateReapiredButNotInseted) => {
+                        repaired = true;
+                        drop(write_page);
+                    }
+                    Err(AccessMethodError::UpdateInsertedButNotReapired) => {
+                        drop(write_page);
+                    }
+                    Err(AccessMethodError::OutOfSpace) => {
+                        drop(write_page);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            if let Some((next_pid, next_fid)) = next_page_info {
+                current_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+            } else {
+                // reach last page
+                let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key)?;
+                new_page.init();
+                new_page.insert_heap_no_repair(entry)?;
+                self.last_page_id
+                    .store(new_page.get_id(), Ordering::Release);
+                self.last_frame_id
+                    .store(new_page.frame_id(), Ordering::Release);
+                return Ok(());
+            }
+        }
+    }
+
+    
 
     pub fn delete(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         self.traverse_to_endofchain_for_delete(self.first_key(), pkey, ts)

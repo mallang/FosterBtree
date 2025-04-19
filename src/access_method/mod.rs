@@ -25,6 +25,7 @@ pub enum AccessMethodError {
     // for partitioned chain
     TsPartitionNotFound,
     Rehash(u32), // new bucket num
+    RepairedNotFound,
     // for write-repair
     UpdateReapiredButNotInseted,
     UpdateInsertedButNotReapired,
@@ -120,6 +121,7 @@ impl fmt::Display for AccessMethodError {
             AccessMethodError::Other(msg) => write!(f, "{}", msg),
             AccessMethodError::NotEnoughMemory => write!(f, "Not enough memory"),
             AccessMethodError::TsPartitionNotFound => write!(f, "Timestamp partition not found"),
+            AccessMethodError::RepairedNotFound => write!(f, "Repaired not found"),
             AccessMethodError::Rehash(new_bucket_num) => {
                 write!(f, "Rehash to new bucket num: {}", new_bucket_num)
             }

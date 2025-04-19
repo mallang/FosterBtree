@@ -161,7 +161,8 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         let heap_chain = &self.bucket_entries[index];
 
         // TODO: (JUN) now assume key is not changed, need to handle key change later
-        heap_chain.update_write_repair(entry)
+        let _ = heap_chain.update_write_repair_heap(entry)?;
+        Ok(())
     }
 
     /// Deletes a key-value pair from the hash join table.

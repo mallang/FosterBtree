@@ -136,12 +136,23 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
     pub fn update(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let partition = self
             .partitions
-            .iter()
-            .rev()
-            .find(|p| ts >= p.range.0 && ts < p.range.1)
+            .last()
             .unwrap();
 
         partition.chain.update_no_repair(entry.pkey(), entry)
+    }
+
+    pub fn update_write_repair(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+        let mut repaired = false;
+        for partition in self.partitions.iter().take(self.partitions.len() - 1) {
+            match partition.chain.update_write_repair_ts_partition_except_last(entry) {
+                Ok(_) => {repaired = true; break},
+                Err(AccessMethodError::RepairedNotFound) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        self.partitions.last().unwrap().chain.update_write_repair_ts_partition_last(entry, repaired)?;
+        Ok(())
     }
 
     pub fn delete(&self, ts: Timestamp, pkey: &[u8]) -> Result<(), AccessMethodError> {

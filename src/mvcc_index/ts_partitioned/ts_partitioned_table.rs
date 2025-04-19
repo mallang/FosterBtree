@@ -19,7 +19,7 @@ use dashmap::mapref::entry;
 use rand::seq::index;
 use serde::{Deserialize, Serialize};
 
-use super::ts_partitioned_chain::TimestampPartitionCollection;
+use super::ts_partitioned_collection::TimestampPartitionCollection;
 
 pub struct TsPartitionedTable<T: MemPool + 'static> {
     c_key: ContainerKey,
@@ -95,7 +95,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     }
 
     /// Updates an existing key-value pair in the hash join table.
-    pub fn _update(
+    fn _update(
         &self,
         key: &[u8],
         pkey: &[u8],
@@ -109,6 +109,23 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             .read()
             .unwrap()
             .update(entry.start_ts(), entry)
+    }
+
+    /// Updates an existing key-value pair in the hash join table.
+    fn _update_write_repair(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        entry: &MvccEntry,
+    ) -> Result<(), AccessMethodError> {
+        let index = self.get_bucket_index(key);
+        let ts_partitions = &self.bucket_entries[index];
+
+        // TODO: (JUN) now assume key is not changed, need to handle key change later
+        ts_partitions
+            .read()
+            .unwrap()
+            .update_write_repair(entry.start_ts(), entry)
     }
 
     // Deletes a key-value pair from the hash join table.
@@ -232,7 +249,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
-        self._update(&entry.key(), &entry.pkey(), &entry)
+        self._update_write_repair(&entry.key(), &entry.pkey(), &entry)
     }
 
     fn delete(

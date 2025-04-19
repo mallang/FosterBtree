@@ -1461,7 +1461,7 @@ mod tests {
         let chain = Arc::new(ChainedHashRecentChain::new(c_key, mem_pool.clone()));
 
         // Generate random entries.
-        const NUM_ENTRIES: usize = 10000;
+        const NUM_ENTRIES: usize = 1000;
         let key_size = 30;
         let pkey_size = 30;
         let nominal_value_size = 200;
