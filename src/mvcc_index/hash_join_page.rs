@@ -1184,12 +1184,12 @@ impl HashJoinPage for Page {
             }
         }
 
-        // 3. 결과
+        // 3. result
         match (did_repair, did_insert) {
             (true, true) => Ok(()),
             (true, false) => Err(AccessMethodError::UpdateReapiredButNotInseted),
             (false, true) => Err(AccessMethodError::UpdateInsertedButNotReapired),
-            (false, false) => Err(AccessMethodError::OutOfSpace),
+            (false, false) => Err(AccessMethodError::KeyNotFound),
         }
     }
 

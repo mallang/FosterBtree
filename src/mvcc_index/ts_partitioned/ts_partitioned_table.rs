@@ -95,12 +95,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     }
 
     /// Updates an existing key-value pair in the hash join table.
-    fn _update(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-        entry: &MvccEntry,
-    ) -> Result<(), AccessMethodError> {
+    fn _update(&self, key: &[u8], pkey: &[u8], entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(key);
         let ts_partitions = &self.bucket_entries[index];
 

@@ -590,7 +590,7 @@ mod test_ops {
 
         hash_join_table.split_at_ts(2).unwrap();
 
-       // 0..num inserts
+        // 0..num inserts
         for i in (0..num).into_iter().step_by(1) {
             let key = format!("key{}", i).into_bytes();
             let pkey = format!("pkey{}", i).into_bytes();
