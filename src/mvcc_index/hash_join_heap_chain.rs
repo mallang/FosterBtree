@@ -349,7 +349,7 @@ impl<T: MemPool> HeapHashChain<T> {
         entry: &MvccEntry,
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
-        let mut inserted = true;
+        let inserted = true;
         let mut repaired = false;
 
         loop {
@@ -361,22 +361,17 @@ impl<T: MemPool> HeapHashChain<T> {
             };
 
             match write_page.update_heap_write_repair(entry, inserted, repaired) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {repaired = true;},
                 Err(AccessMethodError::UpdateReapiredButNotInseted) => {
                     repaired = true;
-                    drop(write_page);
                 }
-                Err(AccessMethodError::UpdateInsertedButNotReapired) => {
-                    inserted = true;
-                    drop(write_page);
-                }
-                Err(AccessMethodError::KeyNotFound) => {
-                    drop(write_page);
-                }
+                Err(AccessMethodError::UpdateInsertedButNotReapired) => {}
+                Err(AccessMethodError::KeyNotFound) => {}
                 Err(e) => return Err(e),
             }
 
             if repaired && inserted {
+                drop(write_page);
                 return Ok(());
             }
 
@@ -384,12 +379,15 @@ impl<T: MemPool> HeapHashChain<T> {
                 current_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key, next_pid, next_fid,
                 ));
+                drop(write_page);
             } else {
-                if repaired {
-                    return Ok(());
-                } else {
-                    return Err(AccessMethodError::RepairedNotFound);
-                }
+                drop(write_page);
+                return 
+                    if repaired {
+                        Ok(())
+                    } else {
+                        return Err(AccessMethodError::RepairedNotFound)
+                    };
             }
         }
     }
@@ -400,29 +398,19 @@ impl<T: MemPool> HeapHashChain<T> {
         mut repaired: bool,
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
-
         loop {
             let next_page_info = current_page.next_page();
-
+            let upgrade = current_page.try_upgrade(true);
+            let mut write_page = match upgrade {
+                Ok(p) => p,
+                Err(_) => return Err(AccessMethodError::PageWriteLatchFailed),
+            };
             if !repaired {
-                let upgrade = current_page.try_upgrade(true);
-                let mut write_page = match upgrade {
-                    Ok(p) => p,
-                    Err(_) => return Err(AccessMethodError::PageWriteLatchFailed),
-                };
-
                 match write_page.update_heap_write_repair(entry, true, false) {
-                    Ok(()) => return Ok(()),
-                    Err(AccessMethodError::UpdateReapiredButNotInseted) => {
-                        repaired = true;
-                        drop(write_page);
-                    }
-                    Err(AccessMethodError::UpdateInsertedButNotReapired) => {
-                        drop(write_page);
-                    }
-                    Err(AccessMethodError::KeyNotFound) => {
-                        drop(write_page);
-                    }
+                    Ok(()) => {repaired = true;}
+                    Err(AccessMethodError::UpdateReapiredButNotInseted) => {repaired = true;}
+                    Err(AccessMethodError::UpdateInsertedButNotReapired) => {}
+                    Err(AccessMethodError::KeyNotFound) => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -431,15 +419,26 @@ impl<T: MemPool> HeapHashChain<T> {
                 current_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key, next_pid, next_fid,
                 ));
+                drop(write_page);
             } else {
                 // reach last page
-                let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key)?;
-                new_page.init();
-                new_page.insert_heap_no_repair(entry)?;
-                self.last_page_id
-                    .store(new_page.get_id(), Ordering::Release);
-                self.last_frame_id
-                    .store(new_page.frame_id(), Ordering::Release);
+                match write_page.insert_heap_no_repair(entry) {
+                    Ok(()) => {
+                        return Ok(());
+                    }
+                    Err(AccessMethodError::OutOfSpace) => {
+                        let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key)?;
+                        new_page.init();
+                        new_page.insert_heap_no_repair(entry)?;
+                        write_page.set_next_page(new_page.get_id(), new_page.frame_id());
+                        self.last_page_id
+                            .store(new_page.get_id(), Ordering::Release);
+                        self.last_frame_id
+                            .store(new_page.frame_id(), Ordering::Release);
+                        drop(write_page);
+                    }
+                    Err(e) => return Err(e),
+                }
                 return Ok(());
             }
         }

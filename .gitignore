@@ -3,3 +3,4 @@ log*
 .DS_Store
 output/
 benches/hash_join/csv/
+*archive
