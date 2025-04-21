@@ -605,7 +605,7 @@ impl TxBench {
         let update_tx_count = (self.row_count as f64 * self.cli.update_ratio).ceil() as usize;
         self.gen_txs_with_ratio(
             20,
-            0.2,
+            0.5,
             0.0,
             0,
             1.0,
@@ -614,8 +614,8 @@ impl TxBench {
             0,
             0.8,
             1.0,
-            1.0,
-            1.0,
+            5.0,
+            0.0,
         );
     }
 
@@ -772,7 +772,7 @@ impl TxBench {
         }
         let elapsed = start.elapsed();
         println!(
-            "[Read Repair] idx : {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
+            "[Read Repair] idx: {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
             txs_idx,
             tx.tx_id,
             format!("{:?}", tx.tx_type),
@@ -855,7 +855,7 @@ impl TxBench {
         }
         let elapsed = start.elapsed();
         println!(
-            "[Write Repair] idx : {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
+            "[Write Repair] idx: {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
             txs_idx,
             tx.tx_id,
             format!("{:?}", tx.tx_type),

@@ -361,7 +361,9 @@ impl<T: MemPool> HeapHashChain<T> {
             };
 
             match write_page.update_heap_write_repair(entry, inserted, repaired) {
-                Ok(()) => {repaired = true;},
+                Ok(()) => {
+                    repaired = true;
+                }
                 Err(AccessMethodError::UpdateReapiredButNotInseted) => {
                     repaired = true;
                 }
@@ -382,12 +384,11 @@ impl<T: MemPool> HeapHashChain<T> {
                 drop(write_page);
             } else {
                 drop(write_page);
-                return 
-                    if repaired {
-                        Ok(())
-                    } else {
-                        return Err(AccessMethodError::RepairedNotFound)
-                    };
+                return if repaired {
+                    Ok(())
+                } else {
+                    return Err(AccessMethodError::RepairedNotFound);
+                };
             }
         }
     }
@@ -407,8 +408,12 @@ impl<T: MemPool> HeapHashChain<T> {
             };
             if !repaired {
                 match write_page.update_heap_write_repair(entry, true, false) {
-                    Ok(()) => {repaired = true;}
-                    Err(AccessMethodError::UpdateReapiredButNotInseted) => {repaired = true;}
+                    Ok(()) => {
+                        repaired = true;
+                    }
+                    Err(AccessMethodError::UpdateReapiredButNotInseted) => {
+                        repaired = true;
+                    }
                     Err(AccessMethodError::UpdateInsertedButNotReapired) => {}
                     Err(AccessMethodError::KeyNotFound) => {}
                     Err(e) => return Err(e),
