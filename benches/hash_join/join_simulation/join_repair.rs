@@ -494,6 +494,15 @@ impl TxBench {
         self.txs.push(tx);
     }
 
+    pub fn gen_scan_tx_with_ts(&mut self, read_ts: Timestamp) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        self.read_ts_candidates.push(tx_ts);
+        let op = TxOperation::new_scan_all(tx_id, tx_ts, read_ts);
+        let tx = Tx::new(OperationType::Scan, tx_id, tx_ts, vec![op.clone()]);
+        self.read_txs.push(tx.clone());
+        self.txs.push(tx);
+    }
+
     pub fn gen_delta_scan_tx(&mut self) {
         let tx_ts = self.gen_new_ts();
 
@@ -600,6 +609,14 @@ impl TxBench {
         }
     }
 
+    pub fn gen_txs(&mut self) {
+        if self.cli.manual_txs.is_none() {
+            self.gen_random_txs();
+        } else {
+            self.gen_manual_txs();
+        }
+    }
+
     pub fn gen_random_txs(&mut self) {
         self.gen_initial_insert_from_cli();
         let insert_tx_count =
@@ -622,6 +639,64 @@ impl TxBench {
             self.cli.scan_all_tx_ratio,
             self.cli.delta_scan_tx_ratio,
         );
+    }
+
+    pub fn gen_manual_txs(&mut self) {
+        if self.cli.manual_txs.is_none() {
+            panic!("manual_txs is not given");
+        }
+        self.gen_initial_insert_from_cli();
+
+        let row_count = self.cli.row_count;
+        let txs_raw = self.cli.manual_txs.clone().unwrap();
+
+        let txs: Vec<String> = txs_raw
+            .split_whitespace()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        for tx in txs {
+            let parts: Vec<_> = tx.split(',').map(|s| s.trim()).collect();
+            if parts.len() != 2 {
+                panic!("Invalid manual tx format: '{}'", tx);
+            }
+
+            let op = parts[0].to_lowercase();
+            let param = parts[1];
+
+            match op.as_str() {
+                "i" | "insert" => {
+                    let count = (row_count as f64 * param.parse::<f64>().unwrap()) as usize;
+                    self.gen_insert_tx(count);
+                }
+                "u" | "update" => {
+                    let count = (row_count as f64 * param.parse::<f64>().unwrap()) as usize;
+                    self.gen_update_tx(count);
+                }
+                "d" | "delete" => {
+                    let count = (row_count as f64 * param.parse::<f64>().unwrap()) as usize;
+                    self.gen_delete_tx(count);
+                }
+                "g" | "get" => {
+                    let count = (row_count as f64 * param.parse::<f64>().unwrap()) as usize;
+                    self.gen_get_tx(count, self.cli.recent_get_ratio.unwrap_or(1.0));
+                }
+                "scan_key" => {
+                    todo!("manual scan_key not implemented");
+                }
+                "scan" => {
+                    let ts = param.parse::<usize>().unwrap();
+                    self.gen_scan_tx_with_ts(ts as Timestamp);
+                }
+                "delta_scan" => {
+                    todo!("manual delta_scan not implemented");
+                }
+                _ => {
+                    panic!("Unknown op: '{}'", op);
+                }
+            }
+        }
     }
 
     pub fn run_tx_no_repair(
@@ -1185,6 +1260,10 @@ pub struct Cli {
     /// Seed for random number generation
     #[arg(short = 's', long = "seed")]
     seed: Option<u64>,
+
+    /// Manually specify txs like "u,0.1 scan,3"
+    #[arg(long = "manual-txs")]
+    manual_txs: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -1192,7 +1271,7 @@ fn main() -> Result<()> {
 
     // Generate benchmark data
     let mut bench = TxBench::new(cli);
-    bench.gen_random_txs();
+    bench.gen_txs();
     bench.print_cli();
     bench.print_txs();
 
