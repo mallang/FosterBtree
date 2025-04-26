@@ -505,7 +505,7 @@ impl TxBench {
             OperationType::ScanKey => old_tx.ops[0].read_ts,
             OperationType::Scan => old_tx.ops[0].read_ts,
             OperationType::DeltaScan => old_tx.ops[0].tx_ts,
-            _ => panic!("Invalid tx type for delta scan"),
+            _ => panic!("Invalid tx_type for delta scan"),
         };
 
         // remove read_ts from read_ts_candidates
@@ -602,20 +602,25 @@ impl TxBench {
 
     pub fn gen_random_txs(&mut self) {
         self.gen_initial_insert_from_cli();
-        let update_tx_count = (self.row_count as f64 * self.cli.update_ratio).ceil() as usize;
+        let insert_tx_count =
+            ((self.cli.row_count as f64) * self.cli.insert_count_ratio).ceil() as usize;
+        let update_tx_count =
+            ((self.cli.row_count as f64) * self.cli.update_count_ratio).ceil() as usize;
+        let delete_tx_count =
+            ((self.cli.row_count as f64) * self.cli.delete_count_ratio).ceil() as usize;
         self.gen_txs_with_ratio(
-            20,
-            0.5,
-            0.0,
-            0,
-            1.0,
+            self.cli.num_tx,
+            self.cli.write_tx_ratio,
+            self.cli.insert_tx_ratio,
+            insert_tx_count,
+            self.cli.update_tx_ratio,
             update_tx_count,
-            0.0,
-            0,
-            0.8,
-            1.0,
-            5.0,
-            0.0,
+            self.cli.delete_tx_ratio,
+            delete_tx_count,
+            self.cli.read_tx_ratio,
+            self.cli.scan_key_tx_ratio,
+            self.cli.scan_all_tx_ratio,
+            self.cli.delta_scan_tx_ratio,
         );
     }
 
@@ -686,13 +691,39 @@ impl TxBench {
             }
         }
         let elapsed = start.elapsed();
-        println!(
-            "[No Repair] idx: {:>3}, tx id: {:>3}, tx type: {:>10}, duration: {:?}",
+        print!(
+            "[No Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
             txs_idx,
             tx.tx_id,
             format!("{:?}", tx.tx_type),
             elapsed
         );
+        match tx.tx_type {
+            OperationType::Insert => {
+                println!(" Insert count: {:?}", tx.ops.len());
+            }
+            OperationType::Update => {
+                println!(" Update count: {:?}", tx.ops.len());
+            }
+            OperationType::Delete => {
+                println!(" Delete count: {:?}", tx.ops.len());
+            }
+            OperationType::Get => {
+                println!(" Get count: {:?}", tx.ops.len());
+            }
+            OperationType::ScanKey => {
+                println!(" read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::Scan => {
+                println!(" read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::DeltaScan => {
+                println!(
+                    " from read_ts: {:?} to tx_ts: {:?}",
+                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                );
+            }
+        }
         Ok(elapsed)
     }
 
@@ -771,13 +802,39 @@ impl TxBench {
             }
         }
         let elapsed = start.elapsed();
-        println!(
-            "[Read Repair] idx: {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
+        print!(
+            "[Read Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
             txs_idx,
             tx.tx_id,
             format!("{:?}", tx.tx_type),
             elapsed
         );
+        match tx.tx_type {
+            OperationType::Insert => {
+                println!(" Insert count: {:?}", tx.ops.len());
+            }
+            OperationType::Update => {
+                println!(" Update count: {:?}", tx.ops.len());
+            }
+            OperationType::Delete => {
+                println!(" Delete count: {:?}", tx.ops.len());
+            }
+            OperationType::Get => {
+                println!(" Get count: {:?}", tx.ops.len());
+            }
+            OperationType::ScanKey => {
+                println!(" read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::Scan => {
+                println!(" read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::DeltaScan => {
+                println!(
+                    " from read_ts: {:?} to tx_ts: {:?}",
+                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                );
+            }
+        }
         Ok(elapsed)
     }
 
@@ -854,13 +911,39 @@ impl TxBench {
             }
         }
         let elapsed = start.elapsed();
-        println!(
-            "[Write Repair] idx: {:>3}, tx_id: {:>3}, tx type: {:>10}, duration: {:?}",
+        print!(
+            "[Write Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
             txs_idx,
             tx.tx_id,
             format!("{:?}", tx.tx_type),
             elapsed
         );
+        match tx.tx_type {
+            OperationType::Insert => {
+                println!(" Insert count: {:?}", tx.ops.len());
+            }
+            OperationType::Update => {
+                println!(" Update count: {:?}", tx.ops.len());
+            }
+            OperationType::Delete => {
+                println!(" Delete count: {:?}", tx.ops.len());
+            }
+            OperationType::Get => {
+                println!(" Get count: {:?}", tx.ops.len());
+            }
+            OperationType::ScanKey => {
+                println!(" read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::Scan => {
+                println!(" read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::DeltaScan => {
+                println!(
+                    " from read_ts: {:?} to tx_ts: {:?}",
+                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                );
+            }
+        }
         Ok(elapsed)
     }
 
@@ -893,13 +976,13 @@ impl TxBench {
         println!("Pkey size: {}", cli.pkey_size);
         println!("Value size: {}", cli.value_size);
         println!();
-        println!("Update ratio: {}", cli.update_ratio);
+        println!("Update ratio: {}", cli.update_tx_ratio);
         println!(
             "Number of transactions (max Timestamp value): {}",
             cli.num_tx
         );
         println!();
-        println!("Get ratio: {}", cli.get_ratio);
+        println!("Get ratio: {}", cli.get_count_ratio);
         println!("Recent get ratio: {:?}", cli.recent_get_ratio);
         println!("-----------------------------------------------------------------------");
         println!();
@@ -910,7 +993,7 @@ impl TxBench {
         // print idx, tx_id, tx_type
         for (idx, tx) in self.txs.iter().enumerate() {
             print!(
-                "idx: {:>3}, tx id: {:>3}, tx_ts: {:>3}, tx type: {:>10}, ",
+                "idx: {:>3}, tx_id: {:>3}, tx_ts: {:>3}, tx_type: {:>10}, ",
                 idx,
                 tx.tx_id,
                 tx.tx_ts,
@@ -948,7 +1031,7 @@ impl TxBench {
         println!("read_txs:");
         for tx in &self.read_txs {
             print!(
-                "Tx id: {:>3}, tx type: {:>10}, ",
+                "tx_id: {:>3}, tx_type: {:>10}, ",
                 tx.tx_id,
                 format!("{:?}", tx.tx_type)
             );
@@ -1012,7 +1095,7 @@ fn parse_human_readable_usize(s: &str) -> Result<usize, String> {
 #[derive(Parser, Debug)]
 pub struct Cli {
     /// Row count (number of insert ops for creating the table)
-    #[arg(short = 'r', long = "row-count", default_value = "100K", value_parser = parse_human_readable_usize)]
+    #[arg(short = 'r', long = "row-count", default_value = "1M", value_parser = parse_human_readable_usize)]
     row_count: usize,
 
     /// Number of distinct join-keys to generate
@@ -1039,17 +1122,61 @@ pub struct Cli {
     #[arg(short = 'n', long = "num-tx", default_value = "10")]
     num_tx: usize,
 
-    /// Update ratio
-    #[arg(short = 'u', long = "update-ratio", default_value = "2.0")]
-    update_ratio: f64,
+    /// Write tx ratio
+    #[arg(short = 'w', long = "write-tx-ratio", default_value = "0.7")]
+    write_tx_ratio: f64,
 
-    /// Get ratio
-    #[arg(short = 'g', long = "get-ratio", default_value = "0.1")]
-    get_ratio: f64,
+    /// Update tx ratio
+    #[arg(short = 'u', long = "update-tx-ratio", default_value = "1.0")]
+    update_tx_ratio: f64,
+
+    /// Update count ratio
+    #[arg(long = "update-count-ratio", default_value = "0.1")]
+    update_count_ratio: f64,
+
+    /// Insert ratio
+    #[arg(long = "insert-tx-ratio", default_value = "0.0")]
+    insert_tx_ratio: f64,
+
+    /// Insert count ratio
+    #[arg(long = "insert-count-ratio", default_value = "0.1")]
+    insert_count_ratio: f64,
+
+    /// Delete ratio
+    #[arg(long = "delete-tx-ratio", default_value = "0.0")]
+    delete_tx_ratio: f64,
+
+    /// Delete count ratio
+    #[arg(long = "delete-count-ratio", default_value = "0.1")]
+    delete_count_ratio: f64,
+
+    /// Get tx ratio
+    #[arg(long = "get-tx-ratio", default_value = "0.0")]
+    get_tx_ratio: f64,
+
+    /// Get count ratio
+    #[arg(long = "get-count-ratio", default_value = "0.1")]
+    get_count_ratio: f64,
 
     /// Recent get ratio (0.0 - 1.0)
     #[arg(long = "recent-get-ratio")]
     recent_get_ratio: Option<f64>,
+
+    /// Read tx ratio
+    #[arg(short = 'r', long = "read-tx-ratio", default_value = "0.3")]
+    read_tx_ratio: f64,
+
+    /// Scan key tx ratio
+    #[arg(long = "scan-key-tx-ratio", default_value = "1.0")]
+    scan_key_tx_ratio: f64,
+
+    /// Scan all tx ratio
+    #[arg(long = "scan-all-tx-ratio", default_value = "0.0")]
+    scan_all_tx_ratio: f64,
+
+    /// Delta scan tx ratio
+    #[arg(long = "delta-scan-tx-ratio", default_value = "0.0")]
+    delta_scan_tx_ratio: f64,
 
     /// Bucket_num
     #[arg(short = 'b', long = "bucket-num")]
@@ -1079,6 +1206,39 @@ fn main() -> Result<()> {
     };
     let bucket_num = bench.cli.bucket_num.unwrap();
 
+    println!("No Repair");
+    // no_repair
+    {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+
+        let mut table_no_repair = match hash_table_t {
+            HashTableType::RecentHistoryChained => Box::new(
+                ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
+            ) as BoxMvccIndexMemPool,
+            HashTableType::HeapTable => Box::new(HeapHashTable::create_with_bucket_num(
+                c_key,
+                mem_pool.clone(),
+                bucket_num,
+            )?) as BoxMvccIndexMemPool,
+            HashTableType::RustHashMap => Box::new(MvccRustHashMap::create_with_bucket_num(
+                c_key,
+                mem_pool.clone(),
+                bucket_num,
+            )?) as BoxMvccIndexMemPool,
+            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
+                c_key,
+                mem_pool.clone(),
+                bucket_num,
+            )?) as BoxMvccIndexMemPool,
+            HashTableType::TsPartitionChained => Box::new(
+                TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
+            ) as BoxMvccIndexMemPool,
+        };
+        bench.run_all_txs_no_repair(&mut table_no_repair);
+    }
+
+    println!();
     println!("No Repair");
     // no_repair
     {
