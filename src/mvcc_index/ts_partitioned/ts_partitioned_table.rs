@@ -10,7 +10,10 @@ use std::{
     error::Error,
     fmt::Debug,
     hash::{Hash, Hasher},
-    sync::{atomic::AtomicU32, Arc, RwLock},
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc, RwLock,
+    },
     time::Duration,
     vec::IntoIter,
 };
@@ -27,6 +30,7 @@ pub struct TsPartitionedTable<T: MemPool + 'static> {
 
     bucket_count: usize,
     bucket_entries: Vec<Arc<RwLock<TimestampPartitionCollection<T>>>>,
+    repair_ts: AtomicU64,
 }
 
 impl<T: MemPool + 'static> TsPartitionedTable<T> {
@@ -55,6 +59,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             c_key,
             bucket_count: num_buckets,
             bucket_entries,
+            repair_ts: AtomicU64::new(0),
         }
     }
 
@@ -284,12 +289,25 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
+        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
+        let is_need_repair = if to_ts > repair_ts {
+            self.repair_ts.store(to_ts, Ordering::SeqCst);
+            true
+        } else {
+            false
+        };
+
         let mut all_entries = Vec::new();
         for bucket in &self.bucket_entries {
-            let entries = bucket
-                .read()
-                .unwrap()
-                .scan_delta_read_repair(from_ts, to_ts);
+            let entries = if is_need_repair {
+                bucket
+                    .read()
+                    .unwrap()
+                    .scan_delta_read_repair(from_ts, to_ts)
+            } else {
+                bucket.read().unwrap().scan_delta(from_ts, to_ts)
+            };
+
             all_entries.extend(entries);
         }
         Ok(Box::new(all_entries.into_iter()))
@@ -314,17 +332,34 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
-        Ok(Box::new(
-            self._scan_unique_read_repair(&ts)?
-                .into_iter()
-                .map(|entry| {
-                    (
-                        entry.key().to_vec(),
-                        entry.pkey().to_vec(),
-                        entry.value().to_vec(),
-                    )
-                }),
-        ))
+        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts {
+            self.repair_ts.store(ts, Ordering::SeqCst);
+            true
+        } else {
+            false
+        };
+        Ok(if is_need_repair {
+            Box::new(
+                self._scan_unique_read_repair(&ts)?
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.key().to_vec(),
+                            entry.pkey().to_vec(),
+                            entry.value().to_vec(),
+                        )
+                    }),
+            )
+        } else {
+            Box::new(self._scan_unique(&ts)?.into_iter().map(|entry| {
+                (
+                    entry.key().to_vec(),
+                    entry.pkey().to_vec(),
+                    entry.value().to_vec(),
+                )
+            }))
+        })
     }
 
     fn scan_key(
@@ -355,13 +390,19 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts { true } else { false };
         let idx = self.get_bucket_index(key);
         let partitions = &self.bucket_entries[idx];
 
-        let mvccs = partitions
-            .read()
-            .unwrap()
-            .scan_with_key_read_repair(ts, key)?;
+        let mvccs = if is_need_repair {
+            partitions
+                .read()
+                .unwrap()
+                .scan_with_key_read_repair(ts, key)?
+        } else {
+            partitions.read().unwrap().scan_with_key(ts, key)?
+        };
         Ok(mvccs)
     }
 

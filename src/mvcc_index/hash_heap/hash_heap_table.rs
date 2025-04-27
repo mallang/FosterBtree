@@ -13,7 +13,10 @@ use std::{
     error::Error,
     fmt::Debug,
     hash::{Hash, Hasher},
-    sync::{atomic::AtomicU32, Arc},
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
     vec::IntoIter,
 };
@@ -37,6 +40,7 @@ pub struct HeapHashTable<T: MemPool + 'static> {
     bucket_count: usize,
     bucket_entries: Vec<Arc<HeapHashChain<T>>>,
     // tx_status: HashMap<TxId, TxInfo>, // Neet to written down to disk later...
+    repair_ts: AtomicU64,
 }
 
 impl<T: MemPool + 'static> HeapHashTable<T> {
@@ -65,6 +69,7 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
             meta_frame_id,
             bucket_count: num_buckets,
             bucket_entries,
+            repair_ts: AtomicU64::new(0),
         }
     }
 
@@ -341,14 +346,27 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
+        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
+        let is_need_repair = if to_ts > repair_ts {
+            self.repair_ts.store(to_ts, Ordering::SeqCst);
+            true
+        } else {
+            false
+        };
+
         let mut result = vec![];
         for bucket in &self.bucket_entries {
             let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
-            let mut versions_map = HashMap::new();
 
-            bucket.scan_delta_read_repair(from_ts, to_ts, &mut delta_map, &mut versions_map);
-            for versions in versions_map.values() {
-                read_repair_vec(&self.mem_pool, versions, self.c_key);
+            if is_need_repair {
+                let mut versions_map = HashMap::new();
+
+                bucket.scan_delta_read_repair(from_ts, to_ts, &mut delta_map, &mut versions_map);
+                for versions in versions_map.values() {
+                    read_repair_vec(&self.mem_pool, versions, self.c_key);
+                }
+            } else {
+                bucket.scan_delta(from_ts, to_ts, &mut delta_map);
             }
 
             let iter = Box::new(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
@@ -431,15 +449,27 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts {
+            // scan key can not repair the whole table
+            true
+        } else {
+            false
+        };
+
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
-        let mut versions_map = HashMap::new();
 
-        let mvccs = chain.scan_key_vec_read_repair(key, &ts, &mut versions_map)?;
-
-        for btmap in versions_map.into_values() {
-            read_repair_vec(&self.mem_pool, &btmap, self.c_key);
-        }
+        let mvccs = if is_need_repair {
+            let mut versions_map = HashMap::new();
+            let rett = chain.scan_key_vec_read_repair(key, &ts, &mut versions_map)?;
+            for btmap in versions_map.into_values() {
+                read_repair_vec(&self.mem_pool, &btmap, self.c_key);
+            }
+            rett
+        } else {
+            chain.scan_key_vec(key, &ts)?
+        };
 
         Ok(mvccs)
     }
@@ -495,14 +525,26 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
+        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts {
+            self.repair_ts.store(ts, Ordering::SeqCst);
+            true
+        } else {
+            false
+        };
+
         let mut result = vec![];
         for bucket in &self.bucket_entries {
-            let mut versions_map = HashMap::new();
-            let bucket_chain_result = bucket.scan_unique_read_repair(ts, &mut versions_map)?;
-
-            for versions in versions_map.into_values() {
-                read_repair_vec(&self.mem_pool, &versions, self.c_key);
-            }
+            let bucket_chain_result = if is_need_repair {
+                let mut versions_map = HashMap::new();
+                let rett = bucket.scan_unique_read_repair(ts, &mut versions_map)?;
+                for versions in versions_map.into_values() {
+                    read_repair_vec(&self.mem_pool, &versions, self.c_key);
+                }
+                rett
+            } else {
+                bucket.scan_unique(ts)?
+            };
 
             result.extend(bucket_chain_result);
         }

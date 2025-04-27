@@ -712,6 +712,8 @@ pub trait HashJoinPage {
     /// Otherwise returns `None`.
     fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<Record>;
 
+    fn get_pkey_from_slot(&self, slot: &Slot) -> &[u8];
+
     /// Compare the slot’s pkey at slot_id with `search_key`.
     /// Returns Ordering::Less if slot’s pkey < search_key,
     ///         Ordering::Equal if slot’s pkey == search_key,
@@ -1492,6 +1494,17 @@ impl HashJoinPage for Page {
         }
     }
 
+    fn get_pkey_from_slot(&self, slot: &Slot) -> &[u8] {
+        // 2) Compare prefix
+        let prefix_len = std::cmp::min(SLOT_PKEY_PREFIX_SIZE, slot.pkey_size());
+        let slot_prefix = &slot.pkey_prefix()[..prefix_len];
+
+        let bytes = self.read_bytes(slot.offset(), slot.rec_size());
+        let key_size = slot.key_size();
+        let pkey_size = slot.pkey_size();
+        &bytes[key_size..key_size + pkey_size]
+    }
+
     /// Compare the slot’s pkey at slot_id with `search_key`.
     /// Returns Ordering::Less if slot’s pkey < search_key,
     ///         Ordering::Equal if slot’s pkey == search_key,
@@ -1944,6 +1957,10 @@ mod tests {
         assert_eq!(fetched_entry.value(), entry.value());
         assert_eq!(fetched_entry.start_ts(), entry.start_ts());
         assert_eq!(fetched_entry.end_ts(), entry.end_ts());
+
+        let slot = page.slot(0);
+        let pkey_from_slot = page.get_pkey_from_slot(&slot);
+        assert_eq!(pkey_from_slot, pkey);
     }
 
     #[test]
