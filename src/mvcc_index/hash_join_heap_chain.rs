@@ -1135,6 +1135,13 @@ impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
             let current_page = self.current_page.as_ref().unwrap();
 
             if self.current_slot_id < current_page.slot_count() {
+                {
+                    let slot = current_page.unsafe_slot(self.current_slot_id);
+                    if self.ts < slot.start_ts() || slot.end_ts() <= self.ts {
+                        self.current_slot_id += 1;
+                        continue;
+                    }
+                }
                 let entry = current_page
                     .get_entry_at_slot_id(self.current_slot_id)
                     .unwrap();
