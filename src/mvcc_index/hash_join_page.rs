@@ -679,6 +679,9 @@ pub trait HashJoinPage {
     fn slot(&self, slot_id: usize) -> Slot {
         Slot::from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
     }
+    fn unsafe_slot(&self, slot_id: usize) -> &Slot {
+        unsafe { Slot::unsafe_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) }
+    }
 
     fn record(&self, slot_id: usize) -> Record {
         let slot = self.slot(slot_id);
