@@ -188,14 +188,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
             recent_iter
                 .into_iter()
                 .map(|e| (e.key, e.pkey, e.value))
-                .chain(history_iter.into_iter().map(|e| (e.key, e.pkey, e.value))),
+                .chain(history_iter.into_iter().map(|e| (e.key, e.pkey, e.value)))
+                .collect::<Vec<_>>()
+                .into_iter()
         ))
     }
 
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {
         let recent_iter = LinearSubTableScanner::new(self.recent.clone(), None);
         let history_iter = LinearSubTableScanner::new(self.history.clone(), None);
-        let iter = Box::new(recent_iter.chain(history_iter));
+        let iter = Box::new(recent_iter.chain(history_iter).collect::<Vec<_>>().into_iter());
         Ok(iter)
     }
 
@@ -207,7 +209,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         let recent_iter = LinearSubTableKeyScanner::new(self.recent.clone(), Some(ts), key.clone());
         let history_iter =
             LinearSubTableKeyScanner::new(self.history.clone(), Some(ts), key.clone());
-        let iter = Box::new(recent_iter.chain(history_iter).map(|e| (e.pkey, e.value)));
+        let iter = Box::new(recent_iter.chain(history_iter).map(|e| (e.pkey, e.value)).collect::<Vec<_>>().into_iter());
         Ok(iter)
     }
 
