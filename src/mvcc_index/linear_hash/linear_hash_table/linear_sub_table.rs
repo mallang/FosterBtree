@@ -178,7 +178,7 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
                 let mut write_guard = RwLockUpgradableReadGuard::upgrade(readguard);
                 self._rehash(new_size, &mut *write_guard, true);
                 self._insert_with_guard(entry, &*write_guard).unwrap();
-                log_warn!("rehashing");
+                log_warn!("[rehashing] rehash to {:?}", new_size);
                 Ok(())
             }
             Err(e) => {

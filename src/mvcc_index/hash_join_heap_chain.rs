@@ -190,11 +190,11 @@ impl<T: MemPool> HeapHashChain<T> {
         loop {
             if let Some(entry) = current_page.heap_get_read_repair(pkey, ts, versions).ok() {
                 if entry.end_ts() != u64::MAX {
-                    log_warn!(
-                        "successfully find a entry: {:?} with end_ts: {}",
-                        entry,
-                        entry.end_ts()
-                    );
+                    // log_warn!(
+                    //     "successfully find a entry: {:?} with end_ts: {}",
+                    //     entry,
+                    //     entry.end_ts()
+                    // );
                     return Ok(entry);
                 }
 

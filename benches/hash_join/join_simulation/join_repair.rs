@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 const PKEY_PER_JOIN_KEY: usize = 500;
 const JOIN_KEY_PER_BUCKET: usize = 2;
-
+const LINEAR_BUCKET_NUM: usize = 2048;
 #[derive(Debug, Clone)]
 pub enum OperationType {
     Insert,
@@ -1308,7 +1308,7 @@ fn main() -> Result<()> {
             HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
                 c_key,
                 mem_pool.clone(),
-                bucket_num,
+                LINEAR_BUCKET_NUM,
             )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
@@ -1341,7 +1341,7 @@ fn main() -> Result<()> {
             HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
                 c_key,
                 mem_pool.clone(),
-                bucket_num,
+                LINEAR_BUCKET_NUM,
             )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
@@ -1374,7 +1374,7 @@ fn main() -> Result<()> {
             HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
                 c_key,
                 mem_pool.clone(),
-                bucket_num,
+                LINEAR_BUCKET_NUM,
             )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
@@ -1407,7 +1407,7 @@ fn main() -> Result<()> {
             HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
                 c_key,
                 mem_pool.clone(),
-                bucket_num,
+                LINEAR_BUCKET_NUM,
             )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
