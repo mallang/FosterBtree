@@ -132,6 +132,12 @@ impl<T: MemPool> FirstBucket<T> {
         }
     }
 
+    pub fn scan_into_vec(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
+        for bucket in &self.bucket_entries {
+            bucket.scan_into_vec(ts, results);
+        }
+    }
+
     /// Returns a human‑readable status string for the FirstBucket.
     /// It prints the stat() for each SecondBucket and then a summary for both the recent and history chains.
     pub fn stat(&self) -> String {

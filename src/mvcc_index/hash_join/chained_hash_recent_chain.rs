@@ -668,6 +668,31 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         }
     }
 
+    pub fn scan_into_vec(
+        &self,
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        loop {
+            current_page.scan_recent_into(ts, results);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Traverse the chain and return a human‑readable status string.
     ///
     /// The report includes, for each page:

@@ -219,6 +219,16 @@ impl<T: MemPool> ChainedHashTable<T> {
         results
     }
 
+    pub fn scan_into_vec(
+        &self,
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) -> Result<(), AccessMethodError> {
+        for bucket in &self.bucket_entries {
+            bucket.scan_into_vec(&ts, results);
+        }
+        Ok(())
+    }
     /// Returns a human‑readable status string for the ChainedHashTable.
     ///
     /// This aggregates statistics across:
@@ -488,13 +498,30 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         ChainedHashTable::delete(self, key.as_ref(), pkey.as_ref(), &ts)
     }
 
+    // fn scan(
+    //     &self,
+    //     ts: Timestamp,
+    // ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
+    // {
+    //     let chained_scanner = ChainedHashTable::scan(&Arc::new(self.clone()), ts)?; // This returns `ChainedHashTableScanner`, which yields MvccEntry
+    //     let iter = chained_scanner.map(|entry| {
+    //         (
+    //             entry.key().to_vec(),
+    //             entry.pkey().to_vec(),
+    //             entry.value().to_vec(),
+    //         )
+    //     });
+    //     Ok(Box::new(iter))
+    // }
+
     fn scan(
         &self,
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
-        let chained_scanner = ChainedHashTable::scan(&Arc::new(self.clone()), ts)?; // This returns `ChainedHashTableScanner`, which yields MvccEntry
-        let iter = chained_scanner.map(|entry| {
+        let mut results = Vec::new();
+        ChainedHashTable::scan_into_vec(self, &ts, &mut results)?;
+        let iter = results.into_iter().map(|entry| {
             (
                 entry.key().to_vec(),
                 entry.pkey().to_vec(),

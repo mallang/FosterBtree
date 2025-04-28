@@ -128,6 +128,15 @@ impl<T: MemPool> SecondBucket<T> {
         self.recent_chain.scan_key_into(search_key, ts, results);
         self.history_chain.scan_key_into(search_key, ts, results);
     }
+
+    pub fn scan_into_vec(
+        &self,
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) -> Result<(), AccessMethodError> {
+        self.recent_chain.scan_into_vec(ts, results)?;
+        self.history_chain.scan_into_vec(ts, results)
+    }
 }
 
 // test code

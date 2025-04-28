@@ -341,6 +341,34 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
         Ok(ChainedHashHistoryChainScanner::new(self, ts))
     }
 
+    pub fn scan_into_vec(
+        self: &Arc<Self>,
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        loop {
+            current_page.scan_history_into(ts, results);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
+                    log_debug!(
+                        "Frame of the next page has been changed. Trying to fix the frame id"
+                    );
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub fn scan_all(
         self: &Arc<Self>,
     ) -> Result<ChainedHashHistoryChainScanner<T>, AccessMethodError> {
