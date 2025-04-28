@@ -221,9 +221,8 @@ pub fn read_repair_btree(
         if let Some((next_ts, _)) = next_entry {
             let page_key = PageFrameKey::new(c_key, loc.page_id());
             let mut current_page = write_page(&**mem_pool, page_key);
-            let mut slot = <Page as HashJoinPage>::slot(&*current_page, loc.slot_id() as usize);
+            let slot = <Page as HashJoinPage>::unsafe_slot_mut(&mut *current_page, loc.slot_id() as usize);
             slot.set_end_ts(*next_ts);
-            <Page as HashJoinPage>::set_slot(&mut current_page, loc.slot_id() as usize, &slot);
         }
     }
 }
@@ -242,13 +241,8 @@ pub fn read_repair_vec(
         let (next_ts, _, _) = next_entry;
         let page_key = PageFrameKey::new(c_key, loc_and_need_repair.page_id());
         let mut current_page = write_page(&**mem_pool, page_key);
-        let mut slot =
-            <Page as HashJoinPage>::slot(&*current_page, loc_and_need_repair.slot_id() as usize);
+        let slot =
+            <Page as HashJoinPage>::unsafe_slot_mut(&mut *current_page, loc_and_need_repair.slot_id() as usize);
         slot.set_end_ts(*next_ts);
-        <Page as HashJoinPage>::set_slot(
-            &mut current_page,
-            loc_and_need_repair.slot_id() as usize,
-            &slot,
-        );
     }
 }

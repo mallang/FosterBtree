@@ -3,6 +3,7 @@ use crate::{
     mvcc_index::{MvccEntry, TxId},
     prelude::{Page, PageId, Timestamp, AVAILABLE_PAGE_SIZE},
 };
+use core::slice;
 use std::{
     collections::{BTreeMap, HashMap},
     result::Result::Ok,
@@ -238,13 +239,15 @@ mod header {
 use header::*;
 
 pub mod slot {
+    use std::fmt::Debug;
+
     use crate::{mvcc_index::TxId, prelude::Timestamp};
 
     pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
     pub const SLOT_KEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
     pub const SLOT_PKEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
 
-    #[derive(Debug, PartialEq)]
+    #[derive(PartialEq, Copy, Clone)]
     #[repr(C)]
     pub struct Slot {
         key_size: u32,
@@ -258,9 +261,29 @@ pub mod slot {
         offset: u32,
     }
 
+    impl Debug for Slot {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Slot")
+             .field("key_size", &self.key_size)
+             .field("key_prefix", &std::str::from_utf8(&self.key_prefix).unwrap())
+             .field("pkey_size", &self.pkey_size)
+            .field("pkey_prefix", &std::str::from_utf8(&self.pkey_prefix).unwrap())
+            .field("tx_id", &self.tx_id)
+            .field("start_ts", &self.start_ts)
+            .field("end_ts", &self.end_ts)
+            .field("val_size", &self.val_size)
+            .field("offset", &self.offset)
+            .finish()
+        }
+    }
+
     impl Slot {
         pub unsafe fn unsafe_from_bytes(bytes: &[u8]) -> &Slot {
             &*(bytes.as_ptr() as *const Slot)
+        }
+
+        pub unsafe fn unsafe_mut_from_bytes(bytes: &[u8]) -> &mut Slot {
+            &mut *(bytes.as_ptr() as *mut Slot)
         }
 
         pub unsafe fn unsafe_from_bytes_mut(bytes: &[u8]) -> &mut Slot {
@@ -677,14 +700,21 @@ pub trait HashJoinPage {
         PAGE_HEADER_SIZE + slot_id * SLOT_SIZE
     }
     fn slot(&self, slot_id: usize) -> Slot {
-        Slot::from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
+        // Slot::from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
+        self.unsafe_slot(slot_id).to_owned()
     }
+
+    fn unsafe_slot_mut(&mut self, slot_id: usize) -> &mut Slot {
+        // Slot::from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
+        unsafe { Slot::unsafe_mut_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) }
+    }
+
     fn unsafe_slot(&self, slot_id: usize) -> &Slot {
         unsafe { Slot::unsafe_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) }
     }
 
     fn record(&self, slot_id: usize) -> Record {
-        let slot = self.slot(slot_id);
+        let slot = self.unsafe_slot(slot_id);
         self.record_from_slot(&slot)
     }
     fn record_from_slot(&self, slot: &Slot) -> Record {
@@ -696,10 +726,13 @@ pub trait HashJoinPage {
         )
     }
     fn set_slot(&mut self, slot_id: usize, slot: &Slot) {
-        self.write_bytes(self.slot_offset(slot_id), &slot.to_bytes());
+        // self.write_bytes(self.slot_offset(slot_id), &slot.to_bytes());
+        let slot_mut_ref = unsafe { Slot::unsafe_mut_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) };
+        *slot_mut_ref = *slot;
     }
+    
     fn set_record_at_slot_id(&mut self, slot_id: usize, rec: &Record) {
-        let slot = self.slot(slot_id);
+        let slot = self.unsafe_slot(slot_id);
         self.write_bytes(slot.offset(), &rec.to_bytes());
     }
     fn set_record_at_offset(&mut self, offset: usize, rec: &Record) {
@@ -916,7 +949,7 @@ impl HashJoinPage for Page {
         if !found {
             return Err(AccessMethodError::KeyNotFound);
         }
-        let slot = self.slot(slot_id);
+        let slot = self.unsafe_slot(slot_id);
         if *ts < slot.start_ts() || slot.end_ts() <= *ts {
             return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
         }
@@ -926,7 +959,7 @@ impl HashJoinPage for Page {
         let start_idx = self.binary_search_by_end_ts(*ts);
         for idx in start_idx..self.slot_count() {
             // HISTORY_SLOT_CMP_CNT.fetch_add(1, Ordering::Relaxed);
-            let slot = self.slot(idx);
+            let slot = self.unsafe_slot(idx);
             if slot.start_ts() <= *ts {
                 if let Some(rec) = self.slot_pkey_matches(&slot, pkey) {
                     return Ok(MvccEntry::new(
@@ -942,7 +975,7 @@ impl HashJoinPage for Page {
         Err(AccessMethodError::KeyNotFound)
     }
     fn get_entry_at_slot_id(&self, slot_id: usize) -> Result<MvccEntry, AccessMethodError> {
-        let slot = self.slot(slot_id);
+        let slot = self.unsafe_slot(slot_id);
         let rec = self.record(slot_id);
         Ok(MvccEntry::new(
             rec.key().to_vec(),
@@ -957,7 +990,7 @@ impl HashJoinPage for Page {
         let mut best_candidate: Option<(usize, Timestamp)> = None;
 
         for i in 0..self.slot_count() {
-            let slot = self.slot(i);
+            let slot = self.unsafe_slot(i);
             let start = slot.start_ts();
             if start > *ts {
                 // This slot is too new; skip it.
@@ -970,7 +1003,7 @@ impl HashJoinPage for Page {
             }
 
             // Attempt a cheap pkey check first; if no match, skip it.
-            if let Some(_rec) = self.slot_pkey_matches(&self.slot(i), pkey) {
+            if let Some(_rec) = self.slot_pkey_matches(slot, pkey) {
                 // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
                 // we update the best candidate.
                 match best_candidate {
@@ -1003,9 +1036,9 @@ impl HashJoinPage for Page {
 
         for i in 0..self.slot_count() {
             // Attempt a cheap pkey check first; if no match, skip it.
-            if let Some(_rec) = self.slot_pkey_matches(&self.slot(i), pkey) {
+            let slot = &self.unsafe_slot(i);
+            if let Some(_rec) = self.slot_pkey_matches(slot, pkey) {
                 // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
-                let slot = self.slot(i);
                 let start = slot.start_ts();
 
                 let e = versions
@@ -1043,7 +1076,7 @@ impl HashJoinPage for Page {
         if !found {
             return Err(AccessMethodError::KeyNotFound);
         }
-        let slot = HashJoinPage::slot(&*self, slot_id);
+        let slot = HashJoinPage::unsafe_slot(&*self, slot_id);
         if slot.start_ts() > entry.start_ts() {
             return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
         }
@@ -1166,13 +1199,13 @@ impl HashJoinPage for Page {
         // 1. repair
         if !already_repaired {
             for i in 0..self.slot_count() {
-                let slot = self.slot(i);
+                let slot = self.unsafe_slot(i);
                 if slot.end_ts() != Timestamp::MAX {
                     continue;
                 }
                 if let Some(_) = self.slot_pkey_matches(&slot, pkey) {
                     if slot.start_ts() < st {
-                        let mut new_slot = slot;
+                        let mut new_slot = *slot;
                         new_slot.set_end_ts(st);
                         self.set_slot(i, &new_slot);
                         did_repair = true;
@@ -1243,7 +1276,7 @@ impl HashJoinPage for Page {
         let mut deleted_slots = 0;
 
         for idx in (0..end_idx).rev() {
-            let slot = self.slot(idx);
+            let slot = self.unsafe_slot(idx);
             if slot.end_ts() > *ts {
                 panic!("Page should be sorted by end_ts");
             }
@@ -1398,7 +1431,7 @@ impl HashJoinPage for Page {
         let mut high = self.slot_count();
         while low < high {
             let mid = low + (high - low) / 2;
-            let mid_end_ts = HashJoinPage::slot(self, mid).end_ts();
+            let mid_end_ts = HashJoinPage::unsafe_slot(self, mid).end_ts();
             if mid_end_ts <= target_end_ts {
                 // If the mid value is less than or equal to the target,
                 // then the first element greater than target must be to the right.
@@ -1519,7 +1552,7 @@ impl HashJoinPage for Page {
     fn slot_cmp_key(&self, slot_id: usize, search_key: &[u8]) -> std::cmp::Ordering {
         use std::cmp::Ordering;
 
-        let slot = self.slot(slot_id);
+        let slot = self.unsafe_slot(slot_id);
 
         // 1) First compare lengths
         let slot_len = slot.pkey_size();
@@ -1595,11 +1628,10 @@ impl HashJoinPage for Page {
         ts: &Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let mut res: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        let page_id = self.get_id();
         let ts = *ts;
         // For each slot:
         for slot_idx in 0..self.slot_count() {
-            let slot = self.slot(slot_idx);
+            let slot = self.unsafe_slot(slot_idx);
 
             // 1) Compare prefix, etc. (same as your existing logic)
             let slot_key_len = slot.key_size();
@@ -1636,7 +1668,7 @@ impl HashJoinPage for Page {
     ) {
         // For each slot:
         for slot_idx in 0..self.slot_count() {
-            let slot = self.slot(slot_idx);
+            let slot = self.unsafe_slot(slot_idx);
 
             let st = slot.start_ts();
             // 2) If prefix matches, load the record
@@ -1674,7 +1706,7 @@ impl HashJoinPage for Page {
         let ts = *ts;
         // For each slot:
         for slot_idx in 0..self.slot_count() {
-            let slot = self.slot(slot_idx);
+            let slot = self.unsafe_slot(slot_idx);
 
             // 1) Compare prefix, etc. (same as your existing logic)
             let slot_key_len = slot.key_size();
@@ -1730,7 +1762,7 @@ impl HashJoinPage for Page {
 
         // For each slot:
         for slot_idx in 0..self.slot_count() {
-            let slot = self.slot(slot_idx);
+            let slot = self.unsafe_slot(slot_idx);
             if slot.end_ts() != Timestamp::MAX {
                 continue;
             }
@@ -1766,7 +1798,7 @@ impl HashJoinPage for Page {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {
-            let slot = self.slot(i);
+            let slot = self.unsafe_slot(i);
 
             // 1) Check if this version is visible at time `ts`.
             let st = slot.start_ts();
@@ -1813,7 +1845,7 @@ impl HashJoinPage for Page {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {
-            let slot = self.slot(i);
+            let slot = self.unsafe_slot(i);
 
             // 1) Check if this version is visible at time `ts`.
             let st = slot.start_ts();
@@ -1841,7 +1873,7 @@ impl HashJoinPage for Page {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {
-            let slot = self.slot(i);
+            let slot = self.unsafe_slot(i);
 
             // 1) Check if this version is visible at time `ts`.
             let st = slot.start_ts();
@@ -1879,7 +1911,7 @@ impl HashJoinPage for Page {
         // let start_idx = 0;
 
         for slot_idx in start_idx..self.slot_count() {
-            let slot = self.slot(slot_idx);
+            let slot = self.unsafe_slot(slot_idx);
 
             // Check if st <= ts
             let st = slot.start_ts();
@@ -1913,7 +1945,7 @@ impl HashJoinPage for Page {
     fn max_end_ts(&self) -> Timestamp {
         let mut max_ts = Timestamp::MIN;
         for slot_idx in 0..self.slot_count() {
-            let slot = self.slot(slot_idx);
+            let slot = self.unsafe_slot(slot_idx);
             let et = slot.end_ts();
             if et > max_ts {
                 max_ts = et;
@@ -2992,4 +3024,40 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_slot_encode_decode() {
+        let mut page = Page::new_empty();
+        HashJoinPage::init(&mut page);
+
+        // --- Multiple Inserts ---
+        let num_entries = 10;
+        for i in 1..=num_entries {
+            let key = format!("key-large-{:03}-extra", i).into_bytes();
+            let pkey = format!("pkey-large-{:03}-extra", i).into_bytes();
+            let value = format!("value-large-{:03}-extra", i).into_bytes();
+            // For simplicity, set timestamps based on i.
+            let start_ts: Timestamp = 100 + i as Timestamp;
+            let end_ts: Timestamp = 200 + i as Timestamp;
+            let entry = MvccEntry::new(key, pkey.clone(), value, start_ts, end_ts);
+
+            let res = HashJoinPage::insert_recent_history(&mut page, &entry);
+            assert!(
+                res.is_ok(),
+                "Failed to insert entry for pkey {:?}: {:?}",
+                pkey,
+                res.err()
+            );
+        }
+
+        // let slot_slice = page.get_slot_slice(0);
+        // for slot in slot_slice {
+        //     println!("1slot: {:?}", slot);
+        // }
+        for id in 0..page.slot_count() {
+            let slot = HashJoinPage::unsafe_slot(&page, id);
+            println!("2slot: {:?}", slot);
+        }
+    }
+
 }

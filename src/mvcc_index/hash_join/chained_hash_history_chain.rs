@@ -214,7 +214,7 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
             let gc_whole_page = if current_page.slot_count() == 0 {
                 true
             } else {
-                let last_slot = current_page.slot(current_page.slot_count() - 1);
+                let last_slot = current_page.unsafe_slot(current_page.slot_count() - 1);
                 last_slot.end_ts() <= *ts
             };
 

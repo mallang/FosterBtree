@@ -586,7 +586,7 @@ impl<T: MemPool> HeapHashChain<T> {
                     }
                     let slot_cnt = next_page.slot_count();
                     if slot_cnt > 0 {
-                        if next_page.slot(0).start_ts() > *ts {
+                        if next_page.unsafe_slot(0).start_ts() > *ts {
                             break;
                         }
                     }
@@ -828,7 +828,7 @@ impl<T: MemPool> HeapHashChain<T> {
                     let _ = fix_frame_id(current_page, &new_frame_key);
                 }
 
-                if next_page.slot_count() > 0 && next_page.slot(0).start_ts() > *ts {
+                if next_page.slot_count() > 0 && next_page.unsafe_slot(0).start_ts() > *ts {
                     break;
                 }
 
@@ -1136,7 +1136,7 @@ impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
 
             if self.current_slot_id < current_page.slot_count() {
                 {
-                    let slot = current_page.slot(self.current_slot_id);
+                    let slot = current_page.unsafe_slot(self.current_slot_id);
                     if self.ts < slot.start_ts() || slot.end_ts() <= self.ts {
                         self.current_slot_id += 1;
                         continue;
@@ -1180,7 +1180,7 @@ impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
                     ));
                     // early termination if the first entry of the next page is greater than ts in ful
                     if self.filter_by_ts && next_page.slot_count() > 0 {
-                        if next_page.slot(0).start_ts() > self.ts {
+                        if next_page.unsafe_slot(0).start_ts() > self.ts {
                             drop(next_page);
                             self.finish();
                             return None;
