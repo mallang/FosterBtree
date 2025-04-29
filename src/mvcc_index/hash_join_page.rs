@@ -264,16 +264,22 @@ pub mod slot {
     impl Debug for Slot {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("Slot")
-             .field("key_size", &self.key_size)
-             .field("key_prefix", &std::str::from_utf8(&self.key_prefix).unwrap())
-             .field("pkey_size", &self.pkey_size)
-            .field("pkey_prefix", &std::str::from_utf8(&self.pkey_prefix).unwrap())
-            .field("tx_id", &self.tx_id)
-            .field("start_ts", &self.start_ts)
-            .field("end_ts", &self.end_ts)
-            .field("val_size", &self.val_size)
-            .field("offset", &self.offset)
-            .finish()
+                .field("key_size", &self.key_size)
+                .field(
+                    "key_prefix",
+                    &std::str::from_utf8(&self.key_prefix).unwrap(),
+                )
+                .field("pkey_size", &self.pkey_size)
+                .field(
+                    "pkey_prefix",
+                    &std::str::from_utf8(&self.pkey_prefix).unwrap(),
+                )
+                .field("tx_id", &self.tx_id)
+                .field("start_ts", &self.start_ts)
+                .field("end_ts", &self.end_ts)
+                .field("val_size", &self.val_size)
+                .field("offset", &self.offset)
+                .finish()
         }
     }
 
@@ -502,8 +508,46 @@ pub mod record {
         val: Vec<u8>,
     }
 
-    impl Record {
+    pub struct RecordRef<'a> {
+        pub key: &'a [u8],
+        pub pkey: &'a [u8],
+        pub val: &'a [u8],
+    }
+
+    impl<'a> RecordRef<'a> {
+        pub fn new(key: &'a [u8], pkey: &'a [u8], val: &'a [u8]) -> Self {
+            RecordRef { key, pkey, val }
+        }
+        pub fn key(&self) -> &'a [u8] {
+            self.key
+        }
+        pub fn pkey(&self) -> &'a [u8] {
+            self.pkey
+        }
+        pub fn val(&self) -> &'a [u8] {
+            self.val
+        }
+        pub fn size(&self) -> usize {
+            self.key.len() + self.pkey.len() + self.val.len()
+        }
+        pub fn sort_key(&self) -> &[u8] {
+            &self.pkey
+        }
         pub fn from_bytes(
+            bytes: &'a [u8],
+            key_size: usize,
+            pkey_size: usize,
+            val_size: usize,
+        ) -> Self {
+            let key = &bytes[..key_size];
+            let pkey = &bytes[key_size..key_size + pkey_size];
+            let val = &bytes[key_size + pkey_size..key_size + pkey_size + val_size];
+            Self { key, pkey, val }
+        }
+    }
+
+    impl Record {
+        pub fn _from_bytes(
             bytes: &[u8],
             key_size: usize,
             pkey_size: usize,
@@ -518,7 +562,7 @@ pub mod record {
             Record { key, pkey, val }
         }
 
-        pub fn to_bytes(&self) -> Vec<u8> {
+        pub fn _to_bytes(&self) -> Vec<u8> {
             let mut bytes = Vec::with_capacity(self.key.len() + self.pkey.len() + self.val.len());
 
             bytes.extend_from_slice(&self.key);
@@ -528,7 +572,7 @@ pub mod record {
             bytes
         }
 
-        pub fn new(key: &[u8], pkey: &[u8], val: &[u8]) -> Self {
+        pub fn _new(key: &[u8], pkey: &[u8], val: &[u8]) -> Self {
             Record {
                 key: key.to_vec(),
                 pkey: pkey.to_vec(),
@@ -626,6 +670,8 @@ pub trait HashJoinPage {
 
     fn read_bytes(&self, offset: usize, len: usize) -> &[u8];
     fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
+    // write vector of bytes into offset, skip using vector to collect bytes
+    fn write_bytes_slice(&mut self, offset: usize, bytes: &[&[u8]]);
 
     fn free_space_before_compaction(&self) -> usize {
         self.header().rec_start_offset() - self.slot_offset(self.slot_count())
@@ -634,7 +680,7 @@ pub trait HashJoinPage {
         AVAILABLE_PAGE_SIZE - self.header().total_bytes_used()
     }
     fn require_space(entry: &MvccEntry) -> usize {
-        SLOT_SIZE + Record::new(entry.key(), entry.pkey(), entry.value()).size()
+        SLOT_SIZE + RecordRef::new(entry.key(), entry.pkey(), entry.value()).size()
     }
 
     fn header(&self) -> Header;
@@ -706,19 +752,33 @@ pub trait HashJoinPage {
 
     fn unsafe_slot_mut(&mut self, slot_id: usize) -> &mut Slot {
         // Slot::from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
-        unsafe { Slot::unsafe_mut_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) }
+        unsafe {
+            Slot::unsafe_mut_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
+        }
     }
 
     fn unsafe_slot(&self, slot_id: usize) -> &Slot {
         unsafe { Slot::unsafe_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) }
     }
 
-    fn record(&self, slot_id: usize) -> Record {
+    fn _record_from_slotid(&self, slot_id: usize) -> Record {
         let slot = self.unsafe_slot(slot_id);
-        self.record_from_slot(&slot)
+        self._record_from_slot(&slot)
     }
-    fn record_from_slot(&self, slot: &Slot) -> Record {
-        Record::from_bytes(
+    fn record_ref_from_slotid(&self, slot_id: usize) -> RecordRef {
+        let slot = self.unsafe_slot(slot_id);
+        self.record_ref_from_slot(&slot)
+    }
+    fn _record_from_slot(&self, slot: &Slot) -> Record {
+        Record::_from_bytes(
+            self.read_bytes(slot.offset(), slot.rec_size()),
+            slot.key_size(),
+            slot.pkey_size(),
+            slot.val_size(),
+        )
+    }
+    fn record_ref_from_slot(&self, slot: &Slot) -> RecordRef {
+        RecordRef::from_bytes(
             self.read_bytes(slot.offset(), slot.rec_size()),
             slot.key_size(),
             slot.pkey_size(),
@@ -727,26 +787,35 @@ pub trait HashJoinPage {
     }
     fn set_slot(&mut self, slot_id: usize, slot: &Slot) {
         // self.write_bytes(self.slot_offset(slot_id), &slot.to_bytes());
-        let slot_mut_ref = unsafe { Slot::unsafe_mut_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) };
+        let slot_mut_ref = unsafe {
+            Slot::unsafe_mut_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
+        };
         *slot_mut_ref = *slot;
     }
-    
-    fn set_record_at_slot_id(&mut self, slot_id: usize, rec: &Record) {
+
+    fn _set_record_at_slot_id(&mut self, slot_id: usize, rec: &Record) {
         let slot = self.unsafe_slot(slot_id);
-        self.write_bytes(slot.offset(), &rec.to_bytes());
+        self.write_bytes(slot.offset(), &rec._to_bytes());
     }
-    fn set_record_at_offset(&mut self, offset: usize, rec: &Record) {
-        self.write_bytes(offset, &rec.to_bytes());
+
+    fn _set_record_at_offset(&mut self, offset: usize, rec: &Record) {
+        self.write_bytes(offset, &rec._to_bytes());
+    }
+
+    fn set_record_ref_at_offset(&mut self, offset: usize, rec: &RecordRef) {
+        // self.write_bytes(offset, &rec.to_bytes());
+        let bytes_slice = [rec.key(), rec.pkey(), rec.val()];
+        self.write_bytes_slice(offset, &bytes_slice);
     }
 
     fn insert_slot_at_id(&mut self, slot: &Slot, slot_id: usize);
     fn delete_slot_at_id(&mut self, slot_id: usize);
 
-    fn insert_rec_at_offset(&mut self, rec: &Record, offset: usize);
-
+    fn _insert_rec_at_offset(&mut self, rec: &Record, offset: usize);
+    fn insert_rec_ref_at_offset(&mut self, rec: &RecordRef, offset: usize);
     /// Returns `Some(Record)` if the slot's pkey exactly matches `pkey`.
     /// Otherwise returns `None`.
-    fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<Record>;
+    fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<RecordRef>;
 
     fn get_pkey_from_slot(&self, slot: &Slot) -> &[u8];
 
@@ -823,7 +892,7 @@ impl HashJoinPage for Page {
     }
 
     fn insert_recent_history(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
+        let new_rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
         let needed_space = SLOT_SIZE + new_rec.size();
         if needed_space > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
@@ -847,7 +916,7 @@ impl HashJoinPage for Page {
         entry: &MvccEntry,
         slot_id: usize,
     ) -> Result<(), AccessMethodError> {
-        let rec = Record::new(entry.key(), entry.pkey(), entry.value());
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
 
         let new_rec_start_offset = HashJoinPage::header(&*self).rec_start_offset() - rec.size();
         let slot = Slot::new(
@@ -861,13 +930,13 @@ impl HashJoinPage for Page {
         );
 
         HashJoinPage::insert_slot_at_id(&mut *self, &slot, slot_id);
-        HashJoinPage::insert_rec_at_offset(&mut *self, &rec, new_rec_start_offset);
+        HashJoinPage::insert_rec_ref_at_offset(&mut *self, &rec, new_rec_start_offset);
 
         Ok(())
     }
 
     fn insert_heap_no_repair(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let rec = Record::new(entry.key(), entry.pkey(), entry.value());
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
         if SLOT_SIZE + rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
         } else if SLOT_SIZE + rec.size() > HashJoinPage::free_space_before_compaction(&*self) {
@@ -882,8 +951,8 @@ impl HashJoinPage for Page {
 
     fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError> {
         // 1) Check record size constraints
-        let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
-        let needed_space = SLOT_SIZE + new_rec.size();
+        let new_rec_ref = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        let needed_space = SLOT_SIZE + new_rec_ref.size();
         if needed_space > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
         } else if needed_space > self.free_space_before_compaction() {
@@ -921,7 +990,7 @@ impl HashJoinPage for Page {
         // }
 
         // 3) Now insert the new record into the page.
-        let new_rec_offset = self.rec_start_offset() - new_rec.size();
+        let new_rec_offset = self.rec_start_offset() - new_rec_ref.size();
 
         // Build the slot for the new version
         let mut new_slot = Slot::new(
@@ -939,7 +1008,7 @@ impl HashJoinPage for Page {
         new_slot.set_offset(new_rec_offset);
 
         self.insert_slot_at_id(&new_slot, new_slot_idx);
-        self.insert_rec_at_offset(&new_rec, new_rec_offset);
+        self.insert_rec_ref_at_offset(&new_rec_ref, new_rec_offset);
 
         Ok(())
     }
@@ -976,7 +1045,7 @@ impl HashJoinPage for Page {
     }
     fn get_entry_at_slot_id(&self, slot_id: usize) -> Result<MvccEntry, AccessMethodError> {
         let slot = self.unsafe_slot(slot_id);
-        let rec = self.record(slot_id);
+        let rec = self.record_ref_from_slotid(slot_id);
         Ok(MvccEntry::new(
             rec.key().to_vec(),
             rec.pkey().to_vec(),
@@ -1003,7 +1072,7 @@ impl HashJoinPage for Page {
             }
 
             // Attempt a cheap pkey check first; if no match, skip it.
-            if let Some(_rec) = self.slot_pkey_matches(slot, pkey) {
+            if let Some(_) = self.slot_pkey_matches(slot, pkey) {
                 // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
                 // we update the best candidate.
                 match best_candidate {
@@ -1037,7 +1106,7 @@ impl HashJoinPage for Page {
         for i in 0..self.slot_count() {
             // Attempt a cheap pkey check first; if no match, skip it.
             let slot = &self.unsafe_slot(i);
-            if let Some(_rec) = self.slot_pkey_matches(slot, pkey) {
+            if let Some(_) = self.slot_pkey_matches(slot, pkey) {
                 // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
                 let start = slot.start_ts();
 
@@ -1103,9 +1172,9 @@ impl HashJoinPage for Page {
             entry.value(),
             0, // for temporary use
         );
-        let new_rec = Record::new(entry.key(), entry.pkey(), entry.value());
+        let new_rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
 
-        let old_rec = HashJoinPage::record(self, slot_id);
+        let old_rec = HashJoinPage::record_ref_from_slotid(self, slot_id);
 
         let old_rec_size = old_rec.size();
         let new_rec_size = new_rec.size();
@@ -1115,26 +1184,26 @@ impl HashJoinPage for Page {
         if old_rec.key() != new_rec.key() {
             return Err(AccessMethodError::KeyNotFound);
         }
+        let old_entry = MvccEntry::new(
+            old_rec.key().to_vec(),
+            old_rec.pkey().to_vec(),
+            old_rec.val().to_vec(),
+            old_slot.start_ts(),
+            entry.start_ts(),
+        );
         // Case 1: New value size is smaller or equal (or) Case 2: Offset matches `rec_start_offset`
         if new_rec_size <= old_rec_size || old_slot.offset() == HashJoinPage::rec_start_offset(self)
         {
             new_rec_offset = old_slot.offset() + old_rec_size - new_rec_size;
             if new_rec_offset < HashJoinPage::slot_end_offset(self) {
                 // TODO: Compact the page
-                let old_entry = MvccEntry::new(
-                    old_rec.key().to_vec(),
-                    old_rec.pkey().to_vec(),
-                    old_rec.val().to_vec(),
-                    old_slot.start_ts(),
-                    entry.start_ts(),
-                );
                 self.delete_slot_at_id(slot_id);
                 self.decrease_total_bytes_used(old_rec_size);
                 // Reach here means new_rec_size > old_rec_size and offset matches `rec_start_offset`
                 self.set_rec_start_offset(self.rec_start_offset() + old_rec_size);
                 return Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry));
             }
-            self.set_record_at_offset(new_rec_offset, &new_rec);
+            self.set_record_ref_at_offset(new_rec_offset, &new_rec);
             if new_rec_size < old_rec_size {
                 HashJoinPage::write_bytes(
                     self,
@@ -1152,19 +1221,12 @@ impl HashJoinPage for Page {
                 > HashJoinPage::rec_start_offset(self)
             {
                 // TODO: Compact the page
-                let old_entry = MvccEntry::new(
-                    old_rec.key().to_vec(),
-                    old_rec.pkey().to_vec(),
-                    old_rec.val().to_vec(),
-                    old_slot.start_ts(),
-                    entry.start_ts(),
-                );
                 self.delete_slot_at_id(slot_id);
                 self.decrease_total_bytes_used(old_rec_size);
                 return Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry));
             }
             new_rec_offset = HashJoinPage::rec_start_offset(self) - new_rec_size;
-            self.set_record_at_offset(new_rec_offset, &new_rec);
+            self.set_record_ref_at_offset(new_rec_offset, &new_rec);
             self.set_rec_start_offset(new_rec_offset);
         }
         new_slot.set_offset(new_rec_offset);
@@ -1172,15 +1234,6 @@ impl HashJoinPage for Page {
 
         HashJoinPage::increase_total_bytes_used(self, new_rec_size);
         HashJoinPage::decrease_total_bytes_used(self, old_rec_size);
-
-        let old_entry = MvccEntry::new(
-            old_rec.key().to_vec(),
-            old_rec.pkey().to_vec(),
-            old_rec.val().to_vec(),
-            old_slot.start_ts(),
-            entry.start_ts(),
-        );
-
         Ok(old_entry)
     }
 
@@ -1252,13 +1305,8 @@ impl HashJoinPage for Page {
         if slot.start_ts() > ts {
             return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
         }
-        let rec = self.record(slot_id);
-        if slot.offset() == self.rec_start_offset() {
-            self.set_rec_start_offset(slot.offset() + rec.size());
-        }
-        HashJoinPage::delete_slot_at_id(self, slot_id);
-        HashJoinPage::decrease_total_bytes_used(self, rec.size());
-
+        let rec = self.record_ref_from_slotid(slot_id);
+        let rec_size = rec.size();
         let old_entry = MvccEntry::new(
             rec.key().to_vec(),
             rec.pkey().to_vec(),
@@ -1266,6 +1314,12 @@ impl HashJoinPage for Page {
             slot.start_ts(),
             slot.end_ts(),
         );
+        if slot.offset() == self.rec_start_offset() {
+            self.set_rec_start_offset(slot.offset() + rec_size);
+        }
+        HashJoinPage::delete_slot_at_id(self, slot_id);
+        HashJoinPage::decrease_total_bytes_used(self, rec_size);
+
         Ok(old_entry)
     }
 
@@ -1280,7 +1334,7 @@ impl HashJoinPage for Page {
             if slot.end_ts() > *ts {
                 panic!("Page should be sorted by end_ts");
             }
-            let rec = self.record(idx);
+            let rec = self.record_ref_from_slotid(idx);
             total_deleted_rec_size += rec.size();
             deleted_slots += 1;
             if slot.offset() == self.rec_start_offset() {
@@ -1320,7 +1374,7 @@ impl HashJoinPage for Page {
             }
             // delete
             // TODO: I think there maybe some bug on rec_start_offset, but I have no time to fix it.
-            let rec = self.record(idx);
+            let rec = self.record_ref_from_slotid(idx);
             total_deleted_rec_size += rec.size();
             deleted_slots += 1;
             if slot.offset() == self.rec_start_offset() {
@@ -1340,47 +1394,6 @@ impl HashJoinPage for Page {
         );
         Ok(())
     }
-
-    // fn binary_search(&self, sort_key: &[u8]) -> (bool, usize) {
-    //     let mut high = self.slot_count();
-    //     if high == 0 {
-    //         return (false, 0);
-    //     }
-    //     high -= 1;
-
-    //     let high_rec = HashJoinPage::record(&*self, high);
-    //     let high_sort_key = high_rec.sort_key();
-    //     if sort_key > high_sort_key {
-    //         return (false, self.slot_count());
-    //     } else if sort_key == high_sort_key {
-    //         return (true, high);
-    //     } else if self.slot_count() == 1 {
-    //         return (false, 0);
-    //     }
-
-    //     let mut low = 0;
-    //     let low_rec = HashJoinPage::record(&*self, low);
-    //     let low_sort_key = low_rec.sort_key();
-    //     if sort_key < low_sort_key {
-    //         return (false, 0);
-    //     } else if sort_key == low_sort_key {
-    //         return (true, low);
-    //     }
-
-    //     while low < high {
-    //         let mid = low + (high - low) / 2;
-    //         let mid_rec = HashJoinPage::record(&*self, mid);
-    //         let mid_sort_key = mid_rec.sort_key();
-    //         if mid_sort_key == sort_key {
-    //             return (true, mid);
-    //         } else if mid_sort_key < sort_key {
-    //             low = mid + 1;
-    //         } else {
-    //             high = mid;
-    //         }
-    //     }
-    //     (false, low)
-    // }
 
     fn binary_search(&self, search_key: &[u8]) -> (bool, usize) {
         use std::cmp::Ordering;
@@ -1487,8 +1500,17 @@ impl HashJoinPage for Page {
         self.decrease_total_bytes_used(SLOT_SIZE);
     }
 
-    fn insert_rec_at_offset(&mut self, rec: &Record, offset: usize) {
-        HashJoinPage::write_bytes(&mut *self, offset, &rec.to_bytes());
+    fn _insert_rec_at_offset(&mut self, rec: &Record, offset: usize) {
+        HashJoinPage::write_bytes(&mut *self, offset, &rec._to_bytes());
+        self.increase_total_bytes_used(rec.size());
+        if offset < self.rec_start_offset() {
+            self.set_rec_start_offset(offset);
+        }
+    }
+
+    fn insert_rec_ref_at_offset(&mut self, rec: &RecordRef, offset: usize) {
+        let rec_bytes_slice = [rec.key(), rec.pkey(), rec.val()];
+        HashJoinPage::write_bytes_slice(&mut *self, offset, &rec_bytes_slice);
         self.increase_total_bytes_used(rec.size());
         if offset < self.rec_start_offset() {
             self.set_rec_start_offset(offset);
@@ -1497,7 +1519,7 @@ impl HashJoinPage for Page {
 
     /// Returns `Some(Record)` if the slot's pkey exactly matches `pkey`.
     /// Otherwise returns `None`.
-    fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<Record> {
+    fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<RecordRef> {
         // 1) Check pkey length first
         if pkey.len() != slot.pkey_size() {
             return None;
@@ -1516,7 +1538,7 @@ impl HashJoinPage for Page {
             // same length, same prefix => match
             // But we still need to read the record to return it.
             let rec_bytes = self.read_bytes(slot.offset(), slot.rec_size());
-            let rec = Record::from_bytes(
+            let rec = RecordRef::from_bytes(
                 rec_bytes,
                 slot.key_size(),
                 slot.pkey_size(),
@@ -1526,7 +1548,7 @@ impl HashJoinPage for Page {
         }
 
         // 3) pkey is longer than the prefix => compare the remainder.
-        let rec = self.record_from_slot(slot);
+        let rec = self.record_ref_from_slot(slot);
         if rec.pkey() == pkey {
             Some(rec)
         } else {
@@ -1588,7 +1610,7 @@ impl HashJoinPage for Page {
         }
 
         // 3) We must read the entire pkey from the record area, then compare it to `search_key`.
-        let rec = self.record_from_slot(&slot);
+        let rec = self.record_ref_from_slot(&slot);
         let slot_pkey = rec.pkey();
 
         slot_pkey.cmp(search_key)
@@ -1646,7 +1668,7 @@ impl HashJoinPage for Page {
             }
 
             // 2) If prefix matches, load the record
-            let rec = self.record_from_slot(&slot);
+            let rec = self.record_ref_from_slot(&slot);
             if rec.key() == search_key {
                 let start_ts = slot.start_ts();
                 if start_ts <= ts {
@@ -1674,7 +1696,7 @@ impl HashJoinPage for Page {
             // 2) If prefix matches, load the record
 
             if &st <= to_ts {
-                let rec = self.record_from_slot(&slot);
+                let rec = self.record_ref_from_slot(&slot);
 
                 let entry = delta_map.get_mut(rec.pkey());
                 if let Some(entry_v) = entry {
@@ -1721,7 +1743,7 @@ impl HashJoinPage for Page {
             }
 
             // 2) If prefix matches, load the record
-            let rec = self.record_from_slot(&slot);
+            let rec = self.record_ref_from_slot(&slot);
             if rec.key() == search_key {
                 let start_ts = slot.start_ts();
                 if start_ts <= ts {
@@ -1767,7 +1789,7 @@ impl HashJoinPage for Page {
                 continue;
             }
 
-            let rec = self.record_from_slot(&slot);
+            let rec = self.record_ref_from_slot(&slot);
             let pk = rec.pkey();
 
             let get_res = best_map.get_mut(pk);
@@ -1825,7 +1847,7 @@ impl HashJoinPage for Page {
             }
 
             // 3) If the prefix matches, read the entire record to confirm pkey equality.
-            let rec = self.record_from_slot(&slot);
+            let rec = self.record_ref_from_slot(&slot);
             if rec.key() == search_pkey {
                 // 4) Finally, build an MvccEntry
                 let entry = MvccEntry::new(
@@ -1855,7 +1877,7 @@ impl HashJoinPage for Page {
             }
 
             // 2) Read the entire record to confirm pkey equality.
-            let rec = self.record_from_slot(&slot);
+            let rec = self.record_ref_from_slot(&slot);
             // 4) Finally, build an MvccEntry
             let entry = MvccEntry::new(
                 rec.key().to_vec(),
@@ -1883,7 +1905,7 @@ impl HashJoinPage for Page {
             }
 
             // 2) Read the entire record to confirm pkey equality.
-            let rec = self.record_from_slot(&slot);
+            let rec = self.record_ref_from_slot(&slot);
             // 4) Finally, build an MvccEntry
             let entry = MvccEntry::new(
                 rec.key().to_vec(),
@@ -1927,7 +1949,7 @@ impl HashJoinPage for Page {
                 let input_prefix = &search_key[..prefix_len];
                 if slot_prefix == input_prefix {
                     // read the entire record
-                    let rec = self.record_from_slot(&slot);
+                    let rec = self.record_ref_from_slot(&slot);
                     if rec.key() == search_key {
                         results.push(MvccEntry::new(
                             rec.key().to_vec(),
@@ -1956,6 +1978,13 @@ impl HashJoinPage for Page {
             }
         }
         max_ts
+    }
+
+    fn write_bytes_slice(&mut self, mut offset: usize, bytes_vec: &[&[u8]]) {
+        for bytes in bytes_vec {
+            self[offset..offset + bytes.len()].copy_from_slice(bytes);
+            offset += bytes.len();
+        }
     }
 }
 
@@ -3059,5 +3088,4 @@ mod tests {
             println!("2slot: {:?}", slot);
         }
     }
-
 }
