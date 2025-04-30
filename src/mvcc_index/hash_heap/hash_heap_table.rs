@@ -408,8 +408,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
-            let iter = bucket.scan_unique(ts)?;
-            result.extend(iter);
+            let mut best_candidates = HashMap::new();
+            bucket.scan_unique(ts, &mut best_candidates)?;
+            result.extend(best_candidates.into_values());
         }
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
@@ -535,19 +536,22 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
 
         let mut result = vec![];
         for bucket in &self.bucket_entries {
+            let mut best_candidates = HashMap::new();
             let bucket_chain_result = if is_need_repair {
                 let mut versions_map = HashMap::new();
-                let rett = bucket.scan_unique_read_repair(ts, &mut versions_map)?;
+                bucket.scan_unique_read_repair(ts, &mut best_candidates, &mut versions_map)?;
                 for versions in versions_map.into_values() {
                     read_repair_vec(&self.mem_pool, &versions, self.c_key);
                 }
-                rett
+                best_candidates.into_values()
             } else {
-                bucket.scan_unique(ts)?
+                bucket.scan_unique(ts, &mut best_candidates)?;
+                best_candidates.into_values()
             };
 
             result.extend(bucket_chain_result);
         }
+
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
         ))

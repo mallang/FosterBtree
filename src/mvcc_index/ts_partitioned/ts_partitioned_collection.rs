@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ops::Bound::{Excluded, Unbounded},
     sync::Arc,
+    time::Instant,
 };
 
 use crate::{
@@ -40,8 +41,12 @@ impl<T: MemPool> TimestampPartition<T> {
         }
     }
 
-    pub fn get_range(&self) -> (Timestamp, Timestamp) {
-        self.range
+    pub fn get_range(&self) -> &(Timestamp, Timestamp) {
+        &self.range
+    }
+
+    pub fn chain(&self) -> &Arc<HeapHashChain<T>> {
+        &self.chain
     }
 }
 
@@ -59,17 +64,24 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
         }
     }
 
+    pub fn partitions(&self) -> &Vec<TimestampPartition<T>> {
+        &self.partitions
+    }
+
     pub fn split_last_partition_at(&mut self, new_ts: Timestamp) -> Result<(), AccessMethodError> {
         let last_idx = self.partitions.len().saturating_sub(1);
         let last_partition = &self.partitions[last_idx];
         let (start, end) = last_partition.get_range();
 
-        if new_ts <= start || new_ts >= end {
-            panic!("Invalid timestamp for partition split");
+        if &new_ts <= start || &new_ts >= end {
+            panic!(
+                "Invalid timestamp for partition split, start & end ts: ({} {}), new_ts: {}",
+                start, end, new_ts
+            );
         }
 
         let new_partition =
-            TimestampPartition::new(self.c_key, self.mem_pool.clone(), (new_ts, end));
+            TimestampPartition::new(self.c_key, self.mem_pool.clone(), (new_ts, *end));
 
         self.partitions.push(new_partition);
 
@@ -77,12 +89,7 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
     }
 
     pub fn insert(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let partition = self
-            .partitions
-            .iter()
-            .rev()
-            .find(|p| ts >= p.range.0 && ts < p.range.1)
-            .unwrap();
+        let partition = self.partitions.last().unwrap();
 
         partition.chain.insert(entry)
     }
@@ -180,18 +187,13 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
 
     pub fn scan_unique(&self, ts: Timestamp) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut best_candidates = HashMap::new();
+        // let mut idx = 0;
         for p in self.partitions.iter() {
             if ts >= p.range.0 && ts < p.range.1 {
-                let partition_scanner = p.chain.scan_unique(ts).unwrap();
-                // Iterate over all entries from the chain.
-                for entry in partition_scanner {
-                    // log_warn!("ts parti scan: get entry: {:?}", entry);
-                    let pkey = entry.pkey().to_vec();
-                    best_candidates.insert(pkey, entry);
-                }
+                p.chain.scan_unique(ts, &mut best_candidates).unwrap();
             }
         }
-        Ok(best_candidates.into_values().collect())
+        Ok(vec![])
     }
 
     pub fn scan_unique_read_repair(
@@ -200,27 +202,13 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
     ) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut best_candidates = HashMap::new();
         let mut versions_map = HashMap::new();
+        // let mut idx = 0;
         // iterate in natural order
         for p in self.partitions.iter() {
             if ts >= p.range.0 && ts < p.range.1 {
-                let partition_scanner = p
-                    .chain
-                    .scan_unique_read_repair(ts, &mut versions_map)
+                p.chain
+                    .scan_unique_read_repair(ts, &mut best_candidates, &mut versions_map)
                     .unwrap();
-                // Iterate over all entries from the chain.
-                for entry in partition_scanner {
-                    // log_warn!("ts parti scan: get entry: {:?}", entry);
-                    let pkey = entry.pkey().to_vec();
-                    best_candidates
-                        .entry(pkey)
-                        .and_modify(|existing: &mut MvccEntry| {
-                            // Replace with this candidate if it has a higher start_ts.
-                            if entry.start_ts() > existing.start_ts() {
-                                *existing = entry.clone();
-                            }
-                        })
-                        .or_insert(entry);
-                }
             }
         }
 
@@ -356,7 +344,6 @@ impl<T: MemPool> TimestampPartitionCollection<T> {
                     Delta::Inserted(to_kv.get_v().to_vec()),
                 ))
             } else {
-                // println!("both is valid, from: {:?}, to: {:?}", std::str::from_utf8(from_kv.get_v()), std::str::from_utf8(to_kv.get_v()));
                 // both is valid
                 if from_kv.get_v() == to_kv.get_v() {
                     // no change

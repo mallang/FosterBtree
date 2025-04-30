@@ -1,0 +1,73 @@
+Hash table type: Heap
+Bucket number: Some(100)
+Pkey per Bucket: 1000
+- Join key per Bucket: 2
+- Pkey per Join key: 500
+Rng seed: Some(13961168922867978456)
+-----------------------------------------------------------------------
+
+Row count: 100,000
+Number of distinct join keys: Some(200)
+Join key size: 100
+Pkey size: 100
+Value size: 800
+
+Update ratio: 1
+Number of transactions (max Timestamp value): 10
+
+Get ratio: 0.1
+Recent get ratio: Some(0.09090909090909091)
+-----------------------------------------------------------------------
+
+txs:
+idx:   0, tx_id:   0, tx_ts:   0, tx_type:     Insert,  Insert count: 100000
+idx:   1, tx_id:   1, tx_ts:   1, tx_type:     Update,  Update count: 10000
+idx:   2, tx_id:   2, tx_ts:   2, tx_type:       Scan,  read_ts: 3
+idx:   3, tx_id:   3, tx_ts:   3, tx_type:       Scan,  read_ts: 3
+idx:   4, tx_id:   4, tx_ts:   4, tx_type:     Update,  Update count: 10000
+idx:   5, tx_id:   5, tx_ts:   5, tx_type:       Scan,  read_ts: 3
+idx:   6, tx_id:   6, tx_ts:   6, tx_type:       Scan,  read_ts: 9
+idx:   7, tx_id:   7, tx_ts:   7, tx_type:       Scan,  read_ts: 9
+-----------------------------------------------------------------------
+
+read_txs:
+tx_id:   2, tx_type:       Scan,  read_ts:   3
+tx_id:   3, tx_type:       Scan,  read_ts:   3
+tx_id:   5, tx_type:       Scan,  read_ts:   3
+tx_id:   6, tx_type:       Scan,  read_ts:   9
+tx_id:   7, tx_type:       Scan,  read_ts:   9
+-----------------------------------------------------------------------
+
+read_ts_candidates: 2, 3, 5, 6, 7, 
+-----------------------------------------------------------------------
+
+
+No Repair
+[No Repair] idx:   0, tx_id:   0, tx_type:     Insert, duration: 65.804755ms,  Insert count: 100000
+[No Repair] idx:   1, tx_id:   1, tx_type:     Update, duration: 6.112801ms,  Update count: 10000
+[No Repair] idx:   2, tx_id:   2, tx_type:       Scan, duration: 67.32579ms,  read_ts: 3
+[No Repair] idx:   3, tx_id:   3, tx_type:       Scan, duration: 46.231992ms,  read_ts: 3
+[No Repair] idx:   4, tx_id:   4, tx_type:     Update, duration: 4.289958ms,  Update count: 10000
+[No Repair] idx:   5, tx_id:   5, tx_type:       Scan, duration: 45.899989ms,  read_ts: 3
+[No Repair] idx:   6, tx_id:   6, tx_type:       Scan, duration: 46.822878ms,  read_ts: 9
+[No Repair] idx:   7, tx_id:   7, tx_type:       Scan, duration: 45.075602ms,  read_ts: 9
+
+Read Repair
+[Read Repair] idx:   0, tx_id:   0, tx_type:     Insert, duration: 43.686839ms,  Insert count: 100000
+[Read Repair] idx:   1, tx_id:   1, tx_type:     Update, duration: 3.920767ms,  Update count: 10000
+[Read Repair] idx:   2, tx_id:   2, tx_type:       Scan, duration: 68.02757ms,  read_ts: 3
+[Read Repair] idx:   3, tx_id:   3, tx_type:       Scan, duration: 42.364497ms,  read_ts: 3
+[Read Repair] idx:   4, tx_id:   4, tx_type:     Update, duration: 4.142801ms,  Update count: 10000
+[Read Repair] idx:   5, tx_id:   5, tx_type:       Scan, duration: 42.500235ms,  read_ts: 3
+[Read Repair] idx:   6, tx_id:   6, tx_type:       Scan, duration: 69.577742ms,  read_ts: 9
+[Read Repair] idx:   7, tx_id:   7, tx_type:       Scan, duration: 42.528392ms,  read_ts: 9
+
+Write Repair
+[Write Repair] idx:   0, tx_id:   0, tx_type:     Insert, duration: 43.724896ms,  Insert count: 100000
+[Write Repair] idx:   1, tx_id:   1, tx_type:     Update, duration: 39.187462ms,  Update count: 10000
+[Write Repair] idx:   2, tx_id:   2, tx_type:       Scan, duration: 40.777331ms,  read_ts: 3
+[Write Repair] idx:   3, tx_id:   3, tx_type:       Scan, duration: 41.308839ms,  read_ts: 3
+[Write Repair] idx:   4, tx_id:   4, tx_type:     Update, duration: 46.997426ms,  Update count: 10000
+[Write Repair] idx:   5, tx_id:   5, tx_type:       Scan, duration: 42.038782ms,  read_ts: 3
+[Write Repair] idx:   6, tx_id:   6, tx_type:       Scan, duration: 41.389336ms,  read_ts: 9
+[Write Repair] idx:   7, tx_id:   7, tx_type:       Scan, duration: 42.352626ms,  read_ts: 9

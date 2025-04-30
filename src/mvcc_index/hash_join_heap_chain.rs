@@ -752,26 +752,19 @@ impl<T: MemPool> HeapHashChain<T> {
     pub fn scan_unique(
         self: &Arc<Self>,
         ts: Timestamp,
-    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
+        best_candidates: &mut HashMap<Vec<u8>, MvccEntry>,
+    ) -> Result<(), AccessMethodError> {
         // Get the full scanner (which iterates over all entries that pass the ts filter)
-        let scanner = HeapChainScanner::new(self, ts);
-        let mut best_candidates: HashMap<Vec<u8>, MvccEntry> = HashMap::new();
-
+        let mut scanner = HeapChainScanner::new(self, ts);
         // Iterate over all entries from the chain.
-        for entry in scanner {
-            let key = entry.pkey().to_vec();
-            best_candidates
-                .entry(key)
-                .and_modify(|existing| {
-                    // Replace with this candidate if it has a higher start_ts.
-                    if entry.start_ts() > existing.start_ts() {
-                        *existing = entry.clone();
-                    }
-                })
-                .or_insert(entry);
+        while !scanner.is_end() {
+            if let Some(entry) = scanner.next() {
+                let pkey = entry.pkey().to_vec();
+                best_candidates.insert(pkey, entry);
+            }
         }
         // Return the best candidate for each key. If order matters you might want to sort them.
-        Ok(best_candidates.into_values().collect())
+        Ok(())
     }
 
     /// Scan for all entries visible at `ts` and return only the best candidate
@@ -780,11 +773,12 @@ impl<T: MemPool> HeapHashChain<T> {
     pub fn scan_unique_read_repair(
         self: &Arc<Self>,
         ts: Timestamp,
+        best_candidates: &mut HashMap<Vec<u8>, MvccEntry>,
         versions_map: &mut HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>,
-    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
+    ) -> Result<(), AccessMethodError> {
         // Get the full scanner (which iterates over all entries that pass the ts filter)
         let mut scanner = HeapChainScanner::new_with_read_repair(self, ts, versions_map);
-        let mut best_candidates: HashMap<Vec<u8>, MvccEntry> = HashMap::new();
+        // let mut best_candidates: HashMap<Vec<u8>, MvccEntry> = HashMap::new();
 
         // Iterate over all entries from the chain.
         while !scanner.is_end() {
@@ -795,7 +789,7 @@ impl<T: MemPool> HeapHashChain<T> {
         }
 
         // Return the best candidate for each key. If order matters you might want to sort them.
-        Ok(best_candidates.into_values().collect())
+        Ok(())
     }
 
     pub fn scan_key_vec(
@@ -1137,7 +1131,7 @@ impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
             if self.current_slot_id < current_page.slot_count() {
                 {
                     let slot = current_page.unsafe_slot(self.current_slot_id);
-                    if self.ts < slot.start_ts() || slot.end_ts() <= self.ts {
+                    if self.filter_by_ts && slot.end_ts() <= self.ts {
                         self.current_slot_id += 1;
                         continue;
                     }
@@ -1178,14 +1172,14 @@ impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
                         next_pid,
                         next_fid,
                     ));
-                    // early termination if the first entry of the next page is greater than ts in ful
-                    if self.filter_by_ts && next_page.slot_count() > 0 {
-                        if next_page.unsafe_slot(0).start_ts() > self.ts {
-                            drop(next_page);
-                            self.finish();
-                            return None;
-                        }
-                    }
+                    // // early termination if the first entry of the next page is greater than ts in ful
+                    // if self.filter_by_ts && next_page.slot_count() > 0 {
+                    //     if next_page.unsafe_slot(0).start_ts() > self.ts {
+                    //         drop(next_page);
+                    //         self.finish();
+                    //         return None;
+                    //     }
+                    // }
                     let next_page = unsafe {
                         std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
                     };

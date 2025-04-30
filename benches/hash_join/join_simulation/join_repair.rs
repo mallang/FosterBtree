@@ -719,6 +719,9 @@ impl TxBench {
                         )
                         .unwrap();
                 }
+                hash_join_table
+                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
+                    .unwrap();
             }
             OperationType::Update => {
                 for op in &tx.ops {
@@ -732,6 +735,9 @@ impl TxBench {
                         )
                         .unwrap();
                 }
+                hash_join_table
+                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
+                    .unwrap();
             }
             OperationType::Delete => {
                 for op in &tx.ops {
@@ -828,6 +834,9 @@ impl TxBench {
                         )
                         .unwrap();
                 }
+                hash_join_table
+                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
+                    .unwrap();
             }
             OperationType::Update => {
                 for op in &tx.ops {
@@ -841,6 +850,9 @@ impl TxBench {
                         )
                         .unwrap();
                 }
+                hash_join_table
+                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
+                    .unwrap();
             }
             OperationType::Delete => {
                 for op in &tx.ops {
@@ -939,6 +951,9 @@ impl TxBench {
                         )
                         .unwrap();
                 }
+                hash_join_table
+                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
+                    .unwrap();
             }
             OperationType::Update => {
                 for op in &tx.ops {
@@ -952,6 +967,9 @@ impl TxBench {
                         )
                         .unwrap();
                 }
+                hash_join_table
+                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
+                    .unwrap();
             }
             OperationType::Delete => {
                 for op in &tx.ops {

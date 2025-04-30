@@ -1,7 +1,10 @@
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{hash_common::DEFAULT_BUCKET_NUM, Delta, MvccEntry, MvccIndex, TxId},
+    mvcc_index::{
+        hash_common::{read_repair_vec, DEFAULT_BUCKET_NUM},
+        Delta, MvccEntry, MvccIndex, TxId,
+    },
     page::{Page, PageId},
     prelude::{AccessMethodError, Timestamp},
 };
@@ -146,27 +149,6 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.bucket_count
-    }
-
-    fn _scan_unique(&self, ts: &Timestamp) -> Result<Vec<MvccEntry>, AccessMethodError> {
-        let mut unique_keys = Vec::new();
-        for bucket in &self.bucket_entries {
-            let keys = bucket.read().unwrap().scan_unique(*ts)?;
-            unique_keys.extend(keys);
-        }
-        Ok(unique_keys)
-    }
-
-    fn _scan_unique_read_repair(
-        &self,
-        ts: &Timestamp,
-    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
-        let mut unique_keys = Vec::new();
-        for bucket in &self.bucket_entries {
-            let keys = bucket.read().unwrap().scan_unique_read_repair(*ts)?;
-            unique_keys.extend(keys);
-        }
-        Ok(unique_keys)
     }
 
     fn _scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
@@ -318,13 +300,22 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
-        Ok(Box::new(self._scan_unique(&ts)?.into_iter().map(|entry| {
-            (
-                entry.key().to_vec(),
-                entry.pkey().to_vec(),
-                entry.value().to_vec(),
-            )
-        })))
+        let mut result = vec![];
+        for bucket in &self.bucket_entries {
+            let partition_collection = bucket.read().unwrap();
+            let mut best_candidates = HashMap::new();
+            // let mut idx = 0;
+            for p in partition_collection.partitions().iter() {
+                if ts >= p.get_range().0 && ts < p.get_range().1 {
+                    p.chain().scan_unique(ts, &mut best_candidates).unwrap();
+                }
+            }
+
+            result.extend(best_candidates.into_values());
+        }
+        Ok(Box::new(
+            result.into_iter().map(|e| (e.key, e.pkey, e.value)),
+        ))
     }
 
     fn scan_read_repair(
@@ -340,25 +331,35 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
             false
         };
         Ok(if is_need_repair {
-            Box::new(
-                self._scan_unique_read_repair(&ts)?
-                    .into_iter()
-                    .map(|entry| {
-                        (
-                            entry.key().to_vec(),
-                            entry.pkey().to_vec(),
-                            entry.value().to_vec(),
-                        )
-                    }),
-            )
+            Box::new({
+                let mut result = vec![];
+                for bucket in &self.bucket_entries {
+                    let partition_collection = bucket.read().unwrap();
+                    let mut best_candidates = HashMap::new();
+                    let mut versions_map = HashMap::new();
+                    for p in partition_collection.partitions().iter() {
+                        if ts >= p.get_range().0 && ts < p.get_range().1 {
+                            p.chain()
+                                .scan_unique_read_repair(
+                                    ts,
+                                    &mut best_candidates,
+                                    &mut versions_map,
+                                )
+                                .unwrap();
+                        }
+                    }
+
+                    for versions in versions_map.into_values() {
+                        read_repair_vec(&self.mem_pool, &versions, self.c_key);
+                    }
+
+                    result.extend(best_candidates.into_values());
+                }
+
+                result.into_iter().map(|e| (e.key, e.pkey, e.value))
+            })
         } else {
-            Box::new(self._scan_unique(&ts)?.into_iter().map(|entry| {
-                (
-                    entry.key().to_vec(),
-                    entry.pkey().to_vec(),
-                    entry.value().to_vec(),
-                )
-            }))
+            self.scan(ts)?
         })
     }
 

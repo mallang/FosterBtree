@@ -291,7 +291,7 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
 
     fn as_any(&self) -> &dyn Any;
 
-    // only has effect for ts_partitioned table
+    // only has effect for ts_partitioned table (ts >= current max ts + 1)
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error>;
 }
 
