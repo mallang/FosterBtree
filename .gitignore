@@ -5,3 +5,4 @@ output/
 benches/hash_join/csv/
 venv/
 *archive
+output_*

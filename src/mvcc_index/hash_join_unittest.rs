@@ -1046,16 +1046,22 @@ mod test_ops {
         }
     }
 
-    #[ignore = "no concurrency support"]
     #[test]
-    fn concurrent_inserts_and_update() {
+    fn test_many_inserts_and_gets() {
+        concurrent_inserts_and_update::<LinearHashTable<_>>();
+        concurrent_inserts_and_update::<HeapHashTable<_>>();
+        concurrent_inserts_and_update::<TsPartitionedTable<_>>();
+        concurrent_inserts_and_update::<ChainedHashTable<_>>();
+    }
+    fn concurrent_inserts_and_update<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
+    {
         use std::thread;
 
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
-
-        let hash_join_table_clone = hash_join_table.clone();
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 16).unwrap());
 
         // 1..1000 inserts
         for i in (0..1000).into_iter().step_by(1) {
@@ -1066,17 +1072,14 @@ mod test_ops {
         }
 
         // 1..1000..2 updates
-        let handle = thread::spawn(move || {
-            // Insert entries in a separate thread
-            for i in (1..1000).into_iter().step_by(2) {
-                let key = format!("key{}", i).into_bytes();
-                let pkey = format!("pkey{}", i).into_bytes();
-                let value = format!("value{}", i * 2 + 10000).into_bytes();
-                hash_join_table_clone
-                    .update(key, pkey, 2, 1, value)
-                    .unwrap();
-            }
-        });
+
+        // Insert entries in a separate thread
+        for i in (1..1000).into_iter().step_by(2) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i * 2 + 10000).into_bytes();
+            hash_join_table.update(key, pkey, 2, 1, value).unwrap();
+        }
 
         // Read entries while inserts are happening
         for i in (0..1000).into_iter().step_by(10) {
@@ -1096,20 +1099,6 @@ mod test_ops {
                 .unwrap();
         }
 
-        handle.join().unwrap();
-
-        let hash_join_table_clone = hash_join_table.clone();
-
-        let handle = thread::spawn(move || {
-            // Verify all entries after insertions are complete
-            for i in 0..1000 {
-                let key = format!("key{}", i).into_bytes();
-                let pkey = format!("pkey{}", i).into_bytes();
-                let expected_value = format!("value{}", i * 2 + 10000).into_bytes();
-                let retrieved_val = hash_join_table_clone.get(&key, &pkey, 2).unwrap();
-                assert_eq!(retrieved_val.unwrap(), expected_value);
-            }
-        });
         // Verify all entries after insertions are complete
         for i in 0..1000 {
             let key = format!("key{}", i).into_bytes();
@@ -1118,8 +1107,6 @@ mod test_ops {
             let retrieved_val = hash_join_table.get(&key, &pkey, 2).unwrap();
             assert_eq!(retrieved_val.unwrap(), expected_value);
         }
-
-        handle.join().unwrap();
 
         for i in 0..1000 {
             let key = format!("key{}", i).into_bytes();

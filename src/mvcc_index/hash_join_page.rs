@@ -19,6 +19,7 @@ mod header {
     };
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
 
+    #[derive(Copy, Clone, Debug)]
     pub struct Header {
         next_page_id: PageId,
         next_frame_id: u32,
@@ -684,6 +685,8 @@ pub trait HashJoinPage {
     }
 
     fn header(&self) -> Header;
+    fn unsafe_header(&self) -> &Header;
+    fn unsafe_header_mut(&self) -> &mut Header;
     fn set_header(&mut self, header: &Header);
     fn next_page(&self) -> Option<(PageId, u32)> {
         self.header().next_page()
@@ -1470,6 +1473,14 @@ impl HashJoinPage for Page {
 
     fn header(&self) -> Header {
         Header::from_bytes(&self[0..PAGE_HEADER_SIZE])
+    }
+
+    fn unsafe_header(&self) -> &Header {
+        unsafe { &*((&self.read_bytes(0, PAGE_HEADER_SIZE)).as_ptr() as *const Header) }
+    }
+
+    fn unsafe_header_mut(&self) -> &mut Header {
+        unsafe { &mut *((&self.read_bytes(0, PAGE_HEADER_SIZE)).as_ptr() as *mut Header) }
     }
 
     fn set_header(&mut self, header: &Header) {
