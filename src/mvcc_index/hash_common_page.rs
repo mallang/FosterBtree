@@ -3,1045 +3,539 @@ use crate::{
     mvcc_index::{MvccEntry, TxId},
     prelude::{Page, PageId, Timestamp, AVAILABLE_PAGE_SIZE},
 };
+use core::ptr::{read_unaligned, write_unaligned};
+use memoffset::offset_of;
+use std::mem::size_of;
 use std::{cmp::Ordering, result::Result::Ok, sync::atomic::AtomicU64};
-pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
-pub static HISTORY_SLOT_CMP_CNT: AtomicU64 = AtomicU64::new(0);
 
-mod header {
-    use crate::{
-        page::{PageId, AVAILABLE_PAGE_SIZE},
-        prelude::Timestamp,
+use super::hash_join_page::slot;
+
+/* ========================================================================== */
+/*                              Layout constants                              */
+/* ========================================================================== */
+
+#[repr(C)]
+struct HEADER {
+    next_page_id: PageId,  // 0  (u32)
+    next_frame_id: u32,    // 4
+    total_bytes_used: u32, // 8
+    slot_count: u32,       // 12
+    rec_start_offset: u32, // 16
+    recent_entry_cnt: u32, // 20
+    min_start_ts: u64,     // 24
+    max_end_ts: u64,       // 32
+    is_full: u8,           // 40
+}
+
+#[repr(C)]
+pub struct Slot {
+    hash_key_size: u32,       // 0
+    pkey_size: u32,           // 4
+    hash_key_prefix: [u8; 8], // 8
+    pkey_prefix: [u8; 8],     // 16
+    start_ts: Timestamp,      // 24 (u64)
+    end_ts: Timestamp,        // 32 (u64)
+    val_size: u32,            // 40
+    offset: u32,              // 44
+    tx_id: TxId,              // 48 (u64)
+}
+
+pub const HEADER_SIZE: usize = size_of::<HEADER>();
+pub const SLOT_SIZE: usize = size_of::<Slot>();
+
+#[inline]
+const fn slot_base(idx: usize) -> usize {
+    HEADER_SIZE + idx * SLOT_SIZE
+}
+
+/* ---------------- field offsets (compile‑time) ---------------- */
+macro_rules! off {
+    ($t:ty, $f:ident) => {
+        offset_of!($t, $f)
     };
-    pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
+}
 
-    pub struct Header {
-        next_page_id: PageId,
-        next_frame_id: u32,
-        total_bytes_used: u32, // (PAGE_HEADER_SIZE + slots + records)
-        slot_count: u32,
-        rec_start_offset: u32,
-        min_start_ts: Timestamp,
-        max_end_ts: Timestamp,
-        recent_entry_count: u32,
-        is_full: u8,
+// HEADER offsets
+pub const HDR_NEXT_PAGE_ID_OFF: usize = off!(HEADER, next_page_id);
+pub const HDR_NEXT_FRAME_ID_OFF: usize = off!(HEADER, next_frame_id);
+pub const HDR_TOTAL_BYTES_USED_OFF: usize = off!(HEADER, total_bytes_used);
+pub const HDR_SLOT_COUNT_OFF: usize = off!(HEADER, slot_count);
+pub const HDR_REC_START_OFF: usize = off!(HEADER, rec_start_offset);
+pub const HDR_RECENT_CNT_OFF: usize = off!(HEADER, recent_entry_cnt);
+pub const HDR_MIN_START_TS_OFF: usize = off!(HEADER, min_start_ts);
+pub const HDR_MAX_END_TS_OFF: usize = off!(HEADER, max_end_ts);
+pub const HDR_IS_FULL_OFF: usize = off!(HEADER, is_full);
+
+// Slot offsets
+pub const SLOT_HASH_KEY_SIZE_OFF: usize = off!(Slot, hash_key_size);
+pub const SLOT_PKEY_SIZE_OFF: usize = off!(Slot, pkey_size);
+pub const SLOT_HASH_KEY_PREFIX_OFF: usize = off!(Slot, hash_key_prefix);
+pub const SLOT_PKEY_PREFIX_OFF: usize = off!(Slot, pkey_prefix);
+pub const SLOT_START_TS_OFF: usize = off!(Slot, start_ts);
+pub const SLOT_END_TS_OFF: usize = off!(Slot, end_ts);
+pub const SLOT_VAL_SIZE_OFF: usize = off!(Slot, val_size);
+pub const SLOT_OFFSET_OFF: usize = off!(Slot, offset);
+pub const SLOT_TX_ID_OFF: usize = off!(Slot, tx_id);
+
+/* ========================================================================== */
+/*                            Unsafe zero‑copy IO                              */
+/* ========================================================================== */
+
+#[inline]
+unsafe fn rd_u32(buf: &[u8], off: usize) -> u32 {
+    read_unaligned(buf.as_ptr().add(off) as *const u32)
+}
+#[inline]
+unsafe fn wr_u32(buf: &mut [u8], off: usize, v: u32) {
+    write_unaligned(buf.as_mut_ptr().add(off) as *mut u32, v);
+}
+#[inline]
+unsafe fn rd_u64(buf: &[u8], off: usize) -> u64 {
+    read_unaligned(buf.as_ptr().add(off) as *const u64)
+}
+#[inline]
+unsafe fn wr_u64(buf: &mut [u8], off: usize, v: u64) {
+    write_unaligned(buf.as_mut_ptr().add(off) as *mut u64, v);
+}
+#[inline]
+fn rd_u8(buf: &[u8], off: usize) -> u8 {
+    buf[off]
+}
+#[inline]
+fn wr_u8(buf: &mut [u8], off: usize, v: u8) {
+    buf[off] = v
+}
+
+/* ========================================================================== */
+/*                                PageOps API                                 */
+/* ========================================================================== */
+
+pub trait PageOps {
+    /* HEADER getters */
+    fn hdr_next_page_id(&self) -> u32;
+    fn hdr_next_frame_id(&self) -> u32;
+    fn hdr_total_bytes_used(&self) -> usize;
+    fn hdr_slot_count(&self) -> usize;
+    fn hdr_rec_start_off(&self) -> usize;
+    fn hdr_recent_entry_cnt(&self) -> usize;
+    fn hdr_min_start_ts(&self) -> Timestamp;
+    fn hdr_max_end_ts(&self) -> Timestamp;
+    fn hdr_is_full(&self) -> bool;
+
+    /* HEADER setters */
+    fn set_hdr_next_page_id(&mut self, v: u32);
+    fn set_hdr_next_frame_id(&mut self, v: u32);
+    fn set_hdr_total_bytes_used(&mut self, v: usize);
+    fn set_hdr_slot_count(&mut self, v: usize);
+    fn set_hdr_rec_start_off(&mut self, v: usize);
+    fn set_hdr_recent_entry_cnt(&mut self, v: usize);
+    fn set_hdr_min_start_ts(&mut self, v: Timestamp);
+    fn set_hdr_max_end_ts(&mut self, v: Timestamp);
+    fn set_hdr_is_full(&mut self, is_full: bool);
+
+    /* Slot getters */
+    fn slot_hash_key_size(&self, idx: usize) -> usize;
+    fn slot_hash_key_size_ref<'a>(&'a self, idx: usize) -> &'a [u8];
+    fn slot_pkey_size(&self, idx: usize) -> usize;
+    fn slot_pkey_size_ref<'a>(&'a self, idx: usize) -> &'a [u8];
+    fn slot_hash_key_prefix(&self, idx: usize) -> &[u8; 8];
+    fn slot_pkey_prefix(&self, idx: usize) -> &[u8; 8];
+    fn slot_start_ts(&self, idx: usize) -> Timestamp;
+    fn slot_end_ts(&self, idx: usize) -> Timestamp;
+    fn slot_val_size(&self, idx: usize) -> usize;
+    fn slot_offset(&self, idx: usize) -> usize;
+    fn slot_tx_id(&self, idx: usize) -> TxId;
+
+    /* Slot setters */
+    fn set_slot_hash_key_size(&mut self, idx: usize, v: usize);
+    fn set_slot_pkey_size(&mut self, idx: usize, v: usize);
+    fn set_slot_start_ts(&mut self, idx: usize, ts: Timestamp);
+    fn set_slot_end_ts(&mut self, idx: usize, ts: Timestamp);
+    fn set_slot_val_size(&mut self, idx: usize, v: usize);
+    fn set_slot_offset(&mut self, idx: usize, v: usize);
+    fn set_slot_tx_id(&mut self, idx: usize, tx: TxId);
+    fn set_slot_hash_key_prefix(&mut self, idx: usize, p: &[u8; 8]);
+    fn set_slot_pkey_prefix(&mut self, idx: usize, p: &[u8; 8]);
+
+    /* data‑region raw slice getters (zero‑copy) */
+    fn slot_hash_key<'a>(&'a self, idx: usize) -> &'a [u8];
+    fn slot_pkey<'a>(&'a self, idx: usize) -> &'a [u8];
+    fn slot_value<'a>(&'a self, idx: usize) -> &'a [u8];
+
+    /* data‑region setters */
+    fn set_slot_hash_key(&mut self, idx: usize, key: &[u8]);
+    fn set_slot_pkey(&mut self, idx: usize, pkey: &[u8]);
+    fn set_slot_value(&mut self, idx: usize, val: &[u8]);
+}
+
+impl PageOps for Page {
+    /* ---------- HEADER getters ---------- */
+    #[inline]
+    fn hdr_next_page_id(&self) -> u32 {
+        unsafe { rd_u32(self, HDR_NEXT_PAGE_ID_OFF) }
+    }
+    #[inline]
+    fn hdr_next_frame_id(&self) -> u32 {
+        unsafe { rd_u32(self, HDR_NEXT_FRAME_ID_OFF) }
+    }
+    #[inline]
+    fn hdr_total_bytes_used(&self) -> usize {
+        unsafe { rd_u32(self, HDR_TOTAL_BYTES_USED_OFF) as usize }
+    }
+    #[inline]
+    fn hdr_slot_count(&self) -> usize {
+        unsafe { rd_u32(self, HDR_SLOT_COUNT_OFF) as usize }
+    }
+    #[inline]
+    fn hdr_rec_start_off(&self) -> usize {
+        unsafe { rd_u32(self, HDR_REC_START_OFF) as usize }
+    }
+    #[inline]
+    fn hdr_recent_entry_cnt(&self) -> usize {
+        unsafe { rd_u32(self, HDR_RECENT_CNT_OFF) as usize }
+    }
+    #[inline]
+    fn hdr_min_start_ts(&self) -> Timestamp {
+        unsafe { rd_u64(self, HDR_MIN_START_TS_OFF) }
+    }
+    #[inline]
+    fn hdr_max_end_ts(&self) -> Timestamp {
+        unsafe { rd_u64(self, HDR_MAX_END_TS_OFF) }
+    }
+    #[inline]
+    fn hdr_is_full(&self) -> bool {
+        rd_u8(self, HDR_IS_FULL_OFF) != 0
     }
 
-    impl Header {
-        pub fn from_bytes(bytes: &[u8]) -> Self {
-            let mut current_pos = 0;
-            let next_page_id = crate::page::PageId::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<crate::page::PageId>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<crate::page::PageId>();
-            let next_frame_id = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let total_bytes_used = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let slot_count = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let rec_start_offset = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let min_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-            let max_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-            let recent_entry_count = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let is_full = u8::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u8>();
+    /* ---------- HEADER setters ---------- */
+    #[inline]
+    fn set_hdr_next_page_id(&mut self, v: u32) {
+        unsafe { wr_u32(self, HDR_NEXT_PAGE_ID_OFF, v) }
+    }
+    #[inline]
+    fn set_hdr_next_frame_id(&mut self, v: u32) {
+        unsafe { wr_u32(self, HDR_NEXT_FRAME_ID_OFF, v) }
+    }
+    #[inline]
+    fn set_hdr_total_bytes_used(&mut self, v: usize) {
+        unsafe { wr_u32(self, HDR_TOTAL_BYTES_USED_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_hdr_slot_count(&mut self, v: usize) {
+        unsafe { wr_u32(self, HDR_SLOT_COUNT_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_hdr_rec_start_off(&mut self, v: usize) {
+        unsafe { wr_u32(self, HDR_REC_START_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_hdr_recent_entry_cnt(&mut self, v: usize) {
+        unsafe { wr_u32(self, HDR_RECENT_CNT_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_hdr_min_start_ts(&mut self, ts: Timestamp) {
+        unsafe { wr_u64(self, HDR_MIN_START_TS_OFF, ts) }
+    }
+    #[inline]
+    fn set_hdr_max_end_ts(&mut self, ts: Timestamp) {
+        unsafe { wr_u64(self, HDR_MAX_END_TS_OFF, ts) }
+    }
+    #[inline]
+    fn set_hdr_is_full(&mut self, is_full: bool) {
+        wr_u8(self, HDR_IS_FULL_OFF, if is_full { 1 } else { 0 });
+    }
 
-            Header {
-                next_page_id,
-                next_frame_id,
-                total_bytes_used,
-                slot_count,
-                rec_start_offset,
-                min_start_ts: min_ts,
-                max_end_ts: max_ts,
-                recent_entry_count,
-                is_full,
-            }
-        }
+    /* ---------- Slot getters ---------- */
+    #[inline]
+    fn slot_hash_key_size(&self, idx: usize) -> usize {
+        unsafe { rd_u32(self, slot_base(idx) + SLOT_HASH_KEY_SIZE_OFF) as usize }
+    }
+    #[inline]
+    fn slot_hash_key_size_ref<'a>(&'a self, idx: usize) -> &'a [u8] {
+        let off = slot_base(idx) + SLOT_HASH_KEY_SIZE_OFF;
+        unsafe { &*(self.as_ptr().add(off) as *const [u8; 4]) }
+    }
+    #[inline]
+    fn slot_pkey_size(&self, idx: usize) -> usize {
+        unsafe { rd_u32(self, slot_base(idx) + SLOT_PKEY_SIZE_OFF) as usize }
+    }
+    #[inline]
+    fn slot_pkey_size_ref<'a>(&'a self, idx: usize) -> &'a [u8] {
+        let off = slot_base(idx) + SLOT_PKEY_SIZE_OFF;
+        unsafe { &*(self.as_ptr().add(off) as *const [u8; 4]) }
+    }
+    #[inline]
+    fn slot_hash_key_prefix(&self, idx: usize) -> &[u8; 8] {
+        let off = slot_base(idx) + SLOT_HASH_KEY_PREFIX_OFF;
+        unsafe { &*(self.as_ptr().add(off) as *const [u8; 8]) }
+    }
+    #[inline]
+    fn slot_pkey_prefix(&self, idx: usize) -> &[u8; 8] {
+        let off = slot_base(idx) + SLOT_PKEY_PREFIX_OFF;
+        unsafe { &*(self.as_ptr().add(off) as *const [u8; 8]) }
+    }
+    #[inline]
+    fn slot_start_ts(&self, idx: usize) -> Timestamp {
+        unsafe { rd_u64(self, slot_base(idx) + SLOT_START_TS_OFF) }
+    }
+    #[inline]
+    fn slot_end_ts(&self, idx: usize) -> Timestamp {
+        unsafe { rd_u64(self, slot_base(idx) + SLOT_END_TS_OFF) }
+    }
+    #[inline]
+    fn slot_val_size(&self, idx: usize) -> usize {
+        unsafe { rd_u32(self, slot_base(idx) + SLOT_VAL_SIZE_OFF) as usize }
+    }
+    #[inline]
+    fn slot_offset(&self, idx: usize) -> usize {
+        unsafe { rd_u32(self, slot_base(idx) + SLOT_OFFSET_OFF) as usize }
+    }
+    #[inline]
+    fn slot_tx_id(&self, idx: usize) -> TxId {
+        unsafe { rd_u64(self, slot_base(idx) + SLOT_TX_ID_OFF) }
+    }
 
-        pub fn to_bytes(&self) -> [u8; PAGE_HEADER_SIZE] {
-            let mut bytes = [0; PAGE_HEADER_SIZE];
-            let mut current_pos = 0;
-            bytes[current_pos..current_pos + std::mem::size_of::<crate::page::PageId>()]
-                .copy_from_slice(&self.next_page_id.to_be_bytes());
-            current_pos += std::mem::size_of::<crate::page::PageId>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.next_frame_id.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.total_bytes_used.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.slot_count.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.rec_start_offset.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.min_start_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.max_end_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.recent_entry_count.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
-                .copy_from_slice(&self.is_full.to_be_bytes());
-            current_pos += std::mem::size_of::<u8>();
-            bytes
-        }
+    /* ---------- Slot setters ---------- */
+    #[inline]
+    fn set_slot_hash_key_size(&mut self, idx: usize, v: usize) {
+        unsafe { wr_u32(self, slot_base(idx) + SLOT_HASH_KEY_SIZE_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_slot_pkey_size(&mut self, idx: usize, v: usize) {
+        unsafe { wr_u32(self, slot_base(idx) + SLOT_PKEY_SIZE_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_slot_hash_key_prefix(&mut self, idx: usize, p: &[u8; 8]) {
+        self[slot_base(idx) + SLOT_HASH_KEY_PREFIX_OFF
+            ..slot_base(idx) + SLOT_HASH_KEY_PREFIX_OFF + 8]
+            .copy_from_slice(p);
+    }
+    #[inline]
+    fn set_slot_pkey_prefix(&mut self, idx: usize, p: &[u8; 8]) {
+        self[slot_base(idx) + SLOT_PKEY_PREFIX_OFF..slot_base(idx) + SLOT_PKEY_PREFIX_OFF + 8]
+            .copy_from_slice(p);
+    }
+    #[inline]
+    fn set_slot_start_ts(&mut self, idx: usize, ts: Timestamp) {
+        unsafe { wr_u64(self, slot_base(idx) + SLOT_START_TS_OFF, ts) }
+    }
+    #[inline]
+    fn set_slot_end_ts(&mut self, idx: usize, ts: Timestamp) {
+        unsafe { wr_u64(self, slot_base(idx) + SLOT_END_TS_OFF, ts) }
+    }
+    #[inline]
+    fn set_slot_val_size(&mut self, idx: usize, v: usize) {
+        unsafe { wr_u32(self, slot_base(idx) + SLOT_VAL_SIZE_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_slot_offset(&mut self, idx: usize, v: usize) {
+        unsafe { wr_u32(self, slot_base(idx) + SLOT_OFFSET_OFF, v as u32) }
+    }
+    #[inline]
+    fn set_slot_tx_id(&mut self, idx: usize, tx: TxId) {
+        unsafe { wr_u64(self, slot_base(idx) + SLOT_TX_ID_OFF, tx) }
+    }
 
-        pub fn new() -> Self {
-            Header {
-                next_page_id: PageId::MAX,
-                next_frame_id: u32::MAX,
-                total_bytes_used: PAGE_HEADER_SIZE as u32,
-                slot_count: 0,
-                rec_start_offset: AVAILABLE_PAGE_SIZE as u32,
-                min_start_ts: Timestamp::MAX,
-                max_end_ts: Timestamp::MIN,
-                recent_entry_count: 0,
-                is_full: 0,
-            }
-        }
+    /* ----------- zero‑copy data slice getters ----------- */
+    #[inline]
+    fn slot_hash_key<'a>(&'a self, idx: usize) -> &'a [u8] {
+        let base = self.slot_offset(idx) as usize;
+        let len = self.slot_hash_key_size(idx) as usize;
+        &self[base..base + len]
+    }
+    #[inline]
+    fn slot_pkey<'a>(&'a self, idx: usize) -> &'a [u8] {
+        let base = self.slot_offset(idx) as usize + self.slot_hash_key_size(idx) as usize;
+        let len = self.slot_pkey_size(idx) as usize;
+        &self[base..base + len]
+    }
+    #[inline]
+    fn slot_value<'a>(&'a self, idx: usize) -> &'a [u8] {
+        let base = self.slot_offset(idx) as usize
+            + self.slot_hash_key_size(idx) as usize
+            + self.slot_pkey_size(idx) as usize;
+        let len = self.slot_val_size(idx) as usize;
+        &self[base..base + len]
+    }
 
-        pub fn next_page(&self) -> Option<(PageId, u32)> {
-            if self.next_page_id == PageId::MAX {
-                None
-            } else {
-                Some((self.next_page_id, self.next_frame_id))
-            }
-        }
-
-        pub fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32) {
-            self.next_page_id = next_page_id;
-            self.next_frame_id = frame_id;
-        }
-
-        pub fn next_page_id(&self) -> Option<PageId> {
-            if self.next_page_id == PageId::MAX {
-                None
-            } else {
-                Some(self.next_page_id)
-            }
-        }
-
-        pub fn is_full(&self) -> bool {
-            self.is_full != 0
-        }
-
-        pub fn set_full(&mut self) {
-            self.is_full = 1;
-        }
-
-        pub fn set_next_page_id(&mut self, next_page_id: PageId) {
-            self.next_page_id = next_page_id;
-        }
-
-        pub fn next_frame_id(&self) -> u32 {
-            self.next_frame_id
-        }
-
-        pub fn set_next_frame_id(&mut self, next_frame_id: u32) {
-            self.next_frame_id = next_frame_id;
-        }
-
-        pub fn total_bytes_used(&self) -> usize {
-            self.total_bytes_used as usize
-        }
-
-        pub fn set_total_bytes_used(&mut self, total_bytes_used: usize) {
-            self.total_bytes_used = total_bytes_used as u32;
-        }
-
-        pub fn inc_total_bytes_used(&mut self, bytes: usize) {
-            self.total_bytes_used += bytes as u32;
-        }
-
-        pub fn dec_total_bytes_used(&mut self, bytes: usize) {
-            self.total_bytes_used -= bytes as u32;
-        }
-
-        pub fn slot_count(&self) -> usize {
-            self.slot_count as usize
-        }
-
-        pub fn set_slot_count(&mut self, slot_count: usize) {
-            self.slot_count = slot_count as u32;
-        }
-
-        pub fn inc_slot_count(&mut self) {
-            self.slot_count += 1;
-        }
-
-        pub fn dec_slot_count(&mut self) {
-            self.slot_count -= 1;
-        }
-
-        pub fn rec_start_offset(&self) -> usize {
-            self.rec_start_offset as usize
-        }
-
-        pub fn set_rec_start_offset(&mut self, rec_start_offset: usize) {
-            self.rec_start_offset = rec_start_offset as u32;
-        }
-
-        pub fn min_ts(&self) -> Timestamp {
-            self.min_start_ts
-        }
-
-        pub fn set_min_ts(&mut self, min_ts: &Timestamp) {
-            self.min_start_ts = *min_ts;
-        }
-
-        pub fn max_ts(&self) -> Timestamp {
-            self.max_end_ts
-        }
-
-        pub fn set_max_ts(&mut self, max_ts: &Timestamp) {
-            self.max_end_ts = *max_ts;
-        }
-
-        pub fn recent_entry_count(&self) -> u32 {
-            self.recent_entry_count
-        }
-
-        pub fn set_recent_entry_count(&mut self, recent_entry_count: usize) {
-            self.recent_entry_count = recent_entry_count as u32;
-        }
+    /* ---------- data‑region setters ---------- */
+    #[inline]
+    fn set_slot_hash_key(&mut self, idx: usize, key: &[u8]) {
+        let base = self.slot_offset(idx) as usize;
+        self[base..base + key.len()].copy_from_slice(key);
+        self.set_slot_hash_key_size(idx, key.len());
+    }
+    #[inline]
+    fn set_slot_pkey(&mut self, idx: usize, pkey: &[u8]) {
+        let base = self.slot_offset(idx) as usize + self.slot_hash_key_size(idx) as usize;
+        self[base..base + pkey.len()].copy_from_slice(pkey);
+        self.set_slot_pkey_size(idx, pkey.len());
+    }
+    #[inline]
+    fn set_slot_value(&mut self, idx: usize, val: &[u8]) {
+        let base = self.slot_offset(idx) as usize
+            + self.slot_hash_key_size(idx) as usize
+            + self.slot_pkey_size(idx) as usize;
+        self[base..base + val.len()].copy_from_slice(val);
+        self.set_slot_val_size(idx, val.len());
     }
 }
-use header::*;
 
-pub mod slot {
-    use crate::{mvcc_index::TxId, prelude::Timestamp};
+pub trait HashCommonPage: PageOps {
+    fn init(&mut self);
 
-    pub const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
-    pub const SLOT_KEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
-    pub const SLOT_PKEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
-
-    #[derive(Debug, PartialEq)]
-    pub struct Slot {
-        key_size: u32,
-        key_prefix: [u8; SLOT_KEY_PREFIX_SIZE],
-        pkey_size: u32,
-        pkey_prefix: [u8; SLOT_PKEY_PREFIX_SIZE],
-        tx_id: TxId,
-        start_ts: Timestamp,
-        end_ts: Timestamp,
-        val_size: u32,
-        offset: u32,
-    }
-
-    impl Slot {
-        pub fn from_bytes(bytes: &[u8]) -> Self {
-            let mut current_pos = 0;
-
-            let key_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-
-            let mut key_prefix: [u8; 8] = [0u8; SLOT_KEY_PREFIX_SIZE];
-            key_prefix.copy_from_slice(&bytes[current_pos..current_pos + SLOT_KEY_PREFIX_SIZE]);
-            current_pos += SLOT_KEY_PREFIX_SIZE;
-
-            let pkey_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-
-            let mut pkey_prefix: [u8; 8] = [0u8; SLOT_PKEY_PREFIX_SIZE];
-            pkey_prefix.copy_from_slice(&bytes[current_pos..current_pos + SLOT_PKEY_PREFIX_SIZE]);
-            current_pos += SLOT_PKEY_PREFIX_SIZE;
-
-            let tx_id = TxId::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<TxId>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<TxId>();
-
-            let start_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            let end_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            let val_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-
-            let offset = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-
-            Slot {
-                key_size,
-                key_prefix,
-                pkey_size,
-                pkey_prefix,
-                tx_id,
-                start_ts,
-                end_ts,
-                val_size,
-                offset,
-            }
-        }
-
-        pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
-            let mut bytes = [0u8; SLOT_SIZE];
-            let mut current_pos = 0;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.key_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + SLOT_KEY_PREFIX_SIZE]
-                .copy_from_slice(&self.key_prefix);
-            current_pos += SLOT_KEY_PREFIX_SIZE;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.pkey_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + SLOT_PKEY_PREFIX_SIZE]
-                .copy_from_slice(&self.pkey_prefix);
-            current_pos += SLOT_PKEY_PREFIX_SIZE;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<TxId>()]
-                .copy_from_slice(&self.tx_id.to_be_bytes());
-            current_pos += std::mem::size_of::<TxId>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.start_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.end_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.val_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.offset.to_be_bytes());
-
-            bytes
-        }
-
-        pub fn new(
-            key: &[u8],
-            pkey: &[u8],
-            tx_id: TxId,
-            start_ts: Timestamp,
-            end_ts: Timestamp,
-            val: &[u8],
-            offset: usize,
-        ) -> Self {
-            let key_size = key.len() as u32;
-            let val_size = val.len() as u32;
-
-            let mut key_prefix = [0u8; SLOT_KEY_PREFIX_SIZE];
-            let copy_len = SLOT_KEY_PREFIX_SIZE.min(key.len());
-            key_prefix[..copy_len].copy_from_slice(&key[..copy_len]);
-
-            let pkey_size = pkey.len() as u32;
-
-            let mut pkey_prefix = [0u8; SLOT_PKEY_PREFIX_SIZE];
-            let copy_len = SLOT_PKEY_PREFIX_SIZE.min(pkey.len());
-            pkey_prefix[..copy_len].copy_from_slice(&pkey[..copy_len]);
-
-            Slot {
-                key_size,
-                key_prefix,
-                pkey_size,
-                pkey_prefix,
-                tx_id,
-                start_ts,
-                end_ts,
-                val_size,
-                offset: offset as u32,
-            }
-        }
-
-        pub fn key_size(&self) -> usize {
-            self.key_size as usize
-        }
-
-        pub fn key_prefix(&self) -> &[u8] {
-            &self.key_prefix
-        }
-
-        pub fn pkey_size(&self) -> usize {
-            self.pkey_size as usize
-        }
-
-        pub fn pkey_prefix(&self) -> &[u8] {
-            &self.pkey_prefix
-        }
-
-        pub fn tx_id(&self) -> TxId {
-            self.tx_id
-        }
-
-        pub fn start_ts(&self) -> Timestamp {
-            self.start_ts
-        }
-
-        pub fn end_ts(&self) -> Timestamp {
-            self.end_ts
-        }
-
-        pub fn set_end_ts(&mut self, end_ts: &Timestamp) {
-            self.end_ts = *end_ts;
-        }
-
-        pub fn val_size(&self) -> usize {
-            self.val_size as usize
-        }
-
-        pub fn set_val_size(&mut self, val_size: usize) {
-            self.val_size = val_size as u32;
-        }
-
-        pub fn offset(&self) -> usize {
-            self.offset as usize
-        }
-
-        pub fn set_offset(&mut self, offset: usize) {
-            self.offset = offset as u32;
-        }
-
-        pub fn rec_size(&self) -> usize {
-            self.key_size() + self.pkey_size() + self.val_size()
-        }
-    }
-}
-use slot::*;
-
-pub mod record {
-    use dashmap::mapref::entry;
-
-    #[derive(Debug)]
-    pub struct Record {
-        key: Vec<u8>,  // hash key
-        pkey: Vec<u8>, // primary key
-        val: Vec<u8>,
-    }
-
-    impl Record {
-        pub fn from_bytes(
-            bytes: &[u8],
-            key_size: usize,
-            pkey_size: usize,
-            val_size: usize,
-        ) -> Self {
-            if bytes.len() != key_size + pkey_size + val_size {
-                panic!("Invalid record size");
-            }
-            let key = bytes[..key_size].to_vec();
-            let pkey = bytes[key_size..key_size + pkey_size].to_vec();
-            let val = bytes[key_size + pkey_size..key_size + pkey_size + val_size].to_vec();
-            Record { key, pkey, val }
-        }
-
-        pub fn to_bytes(&self) -> Vec<u8> {
-            let mut bytes = Vec::with_capacity(self.key.len() + self.pkey.len() + self.val.len());
-
-            bytes.extend_from_slice(&self.key);
-            bytes.extend_from_slice(&self.pkey);
-            bytes.extend_from_slice(&self.val);
-
-            bytes
-        }
-
-        pub fn new(key: &[u8], pkey: &[u8], val: &[u8]) -> Self {
-            Record {
-                key: key.to_vec(),
-                pkey: pkey.to_vec(),
-                val: val.to_vec(),
-            }
-        }
-
-        pub fn key(&self) -> &[u8] {
-            &self.key
-        }
-
-        pub fn pkey(&self) -> &[u8] {
-            &self.pkey
-        }
-
-        pub fn val(&self) -> &[u8] {
-            &self.val
-        }
-
-        pub fn update_val(&mut self, new_val: &[u8]) {
-            self.val = new_val.to_vec();
-        }
-
-        pub fn update_with_merge(&mut self, new_val: &[u8], merge_fn: fn(&[u8], &[u8]) -> Vec<u8>) {
-            self.val = merge_fn(&self.val, new_val);
-        }
-
-        pub fn size(&self) -> usize {
-            self.key.len() + self.pkey.len() + self.val.len()
-        }
-
-        pub fn sort_key(&self) -> &[u8] {
-            &self.pkey
-        }
-
-        pub fn require_size(entry: &crate::mvcc_index::MvccEntry) -> usize {
-            entry.key().len() + entry.pkey().len() + entry.value().len()
-        }
-    }
-}
-use record::*;
-
-pub trait CommonPageMethods {
-    fn init(&mut self) {
-        let header = Header::new();
-        self.set_header(&header);
-    }
-
-    fn read_bytes(&self, offset: usize, len: usize) -> &[u8];
-    fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
-    fn move_bytes(&mut self, src_start_offset: usize, src_end_offset: usize, dest_offset: usize);
-
-    // Header methods
-    fn header(&self) -> Header {
-        Header::from_bytes(self.read_bytes(0, PAGE_HEADER_SIZE))
-    }
-    fn set_header(&mut self, header: &Header) {
-        self.write_bytes(0, &header.to_bytes());
-    }
-
-    // Header method: next_page, next_frame_id
-    fn next_page(&self) -> Option<(PageId, u32)> {
-        self.header().next_page()
-    }
-    fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32) {
-        let mut header = self.header();
-        header.set_next_page(next_page_id, frame_id);
-        self.set_header(&header);
-    }
-    fn set_next_page_frame(&mut self, page_frame: (PageId, u32)) {
-        let mut header = self.header();
-        header.set_next_page(page_frame.0, page_frame.1);
-        self.set_header(&header);
-    }
-
-    // Header method: total_bytes_used
-    fn total_bytes_used(&self) -> usize {
-        self.header().total_bytes_used()
-    }
-    fn set_total_bytes_used(&mut self, total_bytes_used: usize) {
-        let mut header = self.header();
-        header.set_total_bytes_used(total_bytes_used);
-        self.set_header(&header);
-    }
-    fn increase_total_bytes_used(&mut self, bytes: usize) {
-        self.set_total_bytes_used(self.total_bytes_used() + bytes);
-    }
-    fn decrease_total_bytes_used(&mut self, bytes: usize) {
-        self.set_total_bytes_used(self.total_bytes_used() - bytes);
-    }
-    fn free_space_before_compaction(&self) -> usize {
-        self.header().rec_start_offset() - self.slot_end_offset()
-    }
-    fn free_space_after_compaction(&self) -> usize {
-        AVAILABLE_PAGE_SIZE - self.header().total_bytes_used()
-    }
-    fn require_space(entry: &MvccEntry) -> usize {
-        SLOT_SIZE + Record::require_size(entry)
-    }
-
-    // Header method: slot_count
-    fn slot_count(&self) -> usize {
-        self.header().slot_count()
-    }
-    fn set_slot_count(&mut self, slot_count: usize) {
-        let mut header = self.header();
-        header.set_slot_count(slot_count);
-        self.set_header(&header);
-    }
-    fn increase_slot_count(&mut self) {
-        self.set_slot_count(self.slot_count() + 1);
-    }
-    fn decrease_slot_count(&mut self) {
-        self.set_slot_count(self.slot_count() - 1);
-    }
-    fn slot_offset(&self, slot_id: usize) -> usize {
-        PAGE_HEADER_SIZE + slot_id * SLOT_SIZE
-    }
-    fn slot_end_offset(&self) -> usize {
-        PAGE_HEADER_SIZE + self.slot_count() * SLOT_SIZE
-    }
-
-    // Header method: rec_start_offset
-    fn rec_start_offset(&self) -> usize {
-        self.header().rec_start_offset()
-    }
-    fn set_rec_start_offset(&mut self, rec_start_offset: usize) {
-        let mut header = self.header();
-        header.set_rec_start_offset(rec_start_offset);
-        self.set_header(&header);
-    }
-
-    // Header method: min_ts, max_ts, recent_entry_count
-    fn min_ts(&self) -> Timestamp {
-        self.header().min_ts()
-    }
-    fn set_min_ts(&mut self, min_ts: &Timestamp) {
-        let mut header = self.header();
-        header.set_min_ts(min_ts);
-        self.set_header(&header);
-    }
-    fn max_ts(&self) -> Timestamp {
-        self.header().max_ts()
-    }
-    fn set_max_ts(&mut self, max_ts: &Timestamp) {
-        let mut header = self.header();
-        header.set_max_ts(max_ts);
-        self.set_header(&header);
-    }
-    fn recent_entry_count(&self) -> usize {
-        self.header().recent_entry_count() as usize
-    }
-    fn set_recent_entry_count(&mut self, recent_entry_count: usize) {
-        let mut header = self.header();
-        header.set_recent_entry_count(recent_entry_count);
-        self.set_header(&header);
-    }
-    fn increase_recent_entry_count(&mut self) {
-        self.set_recent_entry_count(self.recent_entry_count() + 1);
-    }
-    fn decrease_recent_entry_count(&mut self) {
-        self.set_recent_entry_count(self.recent_entry_count() - 1);
-    }
-
-    // Slot methods
-    fn slot(&self, slot_id: usize) -> Slot {
-        Slot::from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
-    }
-    fn set_slot_at_id(&mut self, slot: &Slot, slot_id: usize) {
-        self.write_bytes(self.slot_offset(slot_id), &slot.to_bytes());
-    }
-    fn insert_slot_at_id(&mut self, slot: &Slot, slot_id: usize) {
-        if slot_id > self.slot_count() {
-            panic!(
-                "Invalid slot_id in insert_slot_at_id: {} > {}",
-                slot_id,
-                self.slot_count()
-            );
-        }
-        if slot_id < self.slot_count() {
-            let start_offset = self.slot_offset(slot_id);
-            let end_offset = self.slot_end_offset();
-            self.move_bytes(start_offset, end_offset, start_offset + SLOT_SIZE);
-        }
-        self.set_slot_at_id(slot, slot_id);
-        self.increase_slot_count();
-        self.increase_total_bytes_used(SLOT_SIZE);
-    }
-    fn delete_slot_at_id(&mut self, slot_id: usize) {
-        if slot_id >= self.slot_count() {
-            panic!(
-                "Invalid slot_id in delete_slot_at_id: {} >= {}",
-                slot_id,
-                self.slot_count()
-            );
-        }
-        let start_offset = self.slot_offset(slot_id + 1);
-        let end_offset = self.slot_end_offset();
-        self.move_bytes(start_offset, end_offset, start_offset - SLOT_SIZE);
-
-        self.decrease_slot_count();
-        self.decrease_total_bytes_used(SLOT_SIZE);
-    }
-
-    /// Returns `Some(Record)` if the slot's pkey exactly matches `pkey`.
-    /// Otherwise returns `None`.
-    fn slot_pkey_matches(&self, slot: &Slot, pkey: &[u8]) -> Option<Record> {
-        // 1) Check pkey length first
-        if pkey.len() != slot.pkey_size() {
-            return None;
-        }
-
-        // 2) Compare prefix
-        let prefix_len = std::cmp::min(SLOT_PKEY_PREFIX_SIZE, pkey.len());
-        let slot_prefix = &slot.pkey_prefix()[..prefix_len];
-        let input_prefix = &pkey[..prefix_len];
-        if slot_prefix != input_prefix {
-            return None;
-        }
-
-        // If the entire pkey fits within the prefix, we've already confirmed equality:
-        if pkey.len() <= SLOT_PKEY_PREFIX_SIZE {
-            let rec_bytes = self.read_bytes(slot.offset(), slot.rec_size());
-            let rec = Record::from_bytes(
-                rec_bytes,
-                slot.key_size(),
-                slot.pkey_size(),
-                slot.val_size(),
-            );
-            return Some(rec);
-        }
-
-        // 3) pkey is longer than the prefix => compare the remainder.
-        let rec = self.record_from_slot(slot);
-        if rec.pkey() == pkey {
-            Some(rec)
-        } else {
-            None
-        }
-    }
-
-    /// Compare the slot’s pkey at slot_id with `search_key`.
-    /// Returns Ordering::Less if slot’s pkey < search_key,
-    ///         Ordering::Equal if slot’s pkey == search_key,
-    ///         Ordering::Greater if slot’s pkey > search_key.
-    /// Shorter pkeys are considered less than longer pkeys for simplicity.
-    fn slot_cmp_pkey(&self, slot_id: usize, pkey: &[u8]) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-
-        let slot = self.slot(slot_id);
-
-        // 1) First compare lengths
-        let slot_pkey_len = slot.pkey_size();
-        let input_pkey_len = pkey.len();
-        // shorter key < longer key
-        if slot_pkey_len != input_pkey_len {
-            return slot_pkey_len.cmp(&input_pkey_len);
-        }
-
-        // 2) Compare the prefix (up to 8 bytes).
-        let prefix_len = std::cmp::min(SLOT_PKEY_PREFIX_SIZE, input_pkey_len);
-        let slot_prefix = &slot.pkey_prefix()[..prefix_len];
-        let input_prefix = &pkey[..prefix_len];
-        match slot_prefix.cmp(input_prefix) {
-            Ordering::Less => return Ordering::Less,
-            Ordering::Greater => return Ordering::Greater,
-            Ordering::Equal => {
-                if input_pkey_len <= SLOT_PKEY_PREFIX_SIZE {
-                    return Ordering::Equal;
-                }
-            }
-        }
-
-        // 3) Need to read the entire pkey from the record area, then compare it to `search_key`.
-        let rec = self.record_from_slot(&slot);
-        let slot_pkey = rec.pkey();
-
-        slot_pkey.cmp(pkey)
-    }
-
-    // Record methods
-    fn record(&self, slot_id: usize) -> Record {
-        let slot = self.slot(slot_id);
-        self.record_from_slot(&slot)
-    }
-    fn record_from_slot(&self, slot: &Slot) -> Record {
-        Record::from_bytes(
-            self.read_bytes(slot.offset(), slot.rec_size()),
-            slot.key_size(),
-            slot.pkey_size(),
-            slot.val_size(),
-        )
-    }
-    fn set_record_at_slot_id(&mut self, rec: &Record, slot_id: usize) {
-        let slot = self.slot(slot_id);
-        self.write_bytes(slot.offset(), &rec.to_bytes());
-    }
-    fn set_record_at_offset(&mut self, rec: &Record, offset: usize) {
-        self.write_bytes(offset, &rec.to_bytes());
-    }
-    fn insert_rec_at_offset(&mut self, rec: &Record, offset: usize) {
-        self.set_record_at_offset(rec, offset);
-        self.increase_total_bytes_used(rec.size());
-        if offset < self.rec_start_offset() {
-            self.set_rec_start_offset(offset);
-        }
-    }
-
-    fn insert_at_slot_id(
+    fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
+    fn insert_entry_at_idx(
         &mut self,
         entry: &MvccEntry,
-        slot_id: usize,
+        idx: usize,
+    ) -> Result<(), AccessMethodError>;
+
+    fn search_pkey(&self, pkey: &[u8]) -> (bool, usize); // (found, idx)
+}
+
+impl HashCommonPage for Page {
+    fn init(&mut self) {
+        self.set_hdr_next_page_id(PageId::MAX);
+        self.set_hdr_next_frame_id(u32::MAX);
+        self.set_hdr_total_bytes_used(HEADER_SIZE);
+        self.set_hdr_slot_count(0);
+        self.set_hdr_rec_start_off(AVAILABLE_PAGE_SIZE);
+        self.set_hdr_recent_entry_cnt(0);
+        self.set_hdr_min_start_ts(u64::MAX);
+        self.set_hdr_max_end_ts(0);
+        self.set_hdr_is_full(false);
+    }
+
+    fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
+        let payload_len = entry.key.len() + entry.pkey.len() + entry.value.len() + SLOT_SIZE;
+        if AVAILABLE_PAGE_SIZE < payload_len {
+            return Err(AccessMethodError::RecordTooLarge);
+        } else if self.hdr_rec_start_off() - slot_base(self.hdr_slot_count()) < payload_len {
+            if AVAILABLE_PAGE_SIZE - self.hdr_total_bytes_used() < payload_len {
+                return Err(AccessMethodError::OutOfSpace);
+            }
+            // TODO: neeed to compact the page
+            return Err(AccessMethodError::OutOfSpace);
+        }
+        self.insert_entry_at_idx(entry, self.hdr_slot_count())
+    }
+    fn insert_entry_at_idx(
+        &mut self,
+        entry: &MvccEntry,
+        idx: usize,
     ) -> Result<(), AccessMethodError> {
-        // Assume that size check has been done before this call.
-        let rec = Record::new(entry.key(), entry.pkey(), entry.value());
-        let new_rec_start_offset = self.rec_start_offset() - rec.size();
-        let slot = Slot::new(
-            entry.key(),
-            entry.pkey(),
-            0, // tx_id is not used now
-            entry.start_ts(),
-            entry.end_ts(),
-            entry.value(),
-            new_rec_start_offset,
-        );
-        self.insert_slot_at_id(&slot, slot_id);
-        self.insert_rec_at_offset(&rec, new_rec_start_offset);
+        let slot_cnt = self.hdr_slot_count();
+
+        let payload_len = entry.key.len() + entry.pkey.len() + entry.value.len();
+        let new_rec_start = self.hdr_rec_start_off() - payload_len;
+
+        if idx < slot_cnt {
+            let from = slot_base(idx);
+            let to = slot_base(idx + 1);
+            let bytes = (slot_cnt - idx) * SLOT_SIZE;
+            self.copy_within(from..from + bytes, to);
+        }
+
+        let mut cur = new_rec_start;
+        self[cur..cur + entry.key.len()].copy_from_slice(&entry.key);
+        cur += entry.key.len();
+        self[cur..cur + entry.pkey.len()].copy_from_slice(&entry.pkey);
+        cur += entry.pkey.len();
+        self[cur..cur + entry.value.len()].copy_from_slice(&entry.value);
+
+        self.set_slot_offset(idx, new_rec_start);
+        self.set_slot_hash_key_size(idx, entry.key.len());
+        self.set_slot_pkey_size(idx, entry.pkey.len());
+        self.set_slot_val_size(idx, entry.value.len());
+        self.set_slot_start_ts(idx, entry.start_ts);
+        self.set_slot_end_ts(idx, entry.end_ts);
+        self.set_slot_tx_id(idx, entry.tx_id);
+
+        let mut hk_pref = [0u8; 8];
+        hk_pref[..entry.key.len().min(8)]
+            .copy_from_slice(&entry.key[..entry.key.len().min(8)]);
+        self.set_slot_hash_key_prefix(idx, &hk_pref);
+
+        let mut pk_pref = [0u8; 8];
+        pk_pref[..entry.pkey.len().min(8)].copy_from_slice(&entry.pkey[..entry.pkey.len().min(8)]);
+        self.set_slot_pkey_prefix(idx, &pk_pref);
+
+        self.set_hdr_slot_count(slot_cnt + 1);
+        self.set_hdr_rec_start_off(new_rec_start);
+        self.set_hdr_total_bytes_used(self.hdr_total_bytes_used() + SLOT_SIZE + payload_len);
+
+        if entry.start_ts < self.hdr_min_start_ts() {
+            self.set_hdr_min_start_ts(entry.start_ts);
+        }
+        if entry.end_ts == Timestamp::MAX {
+            self.set_hdr_recent_entry_cnt(self.hdr_recent_entry_cnt() + 1);
+        } else if entry.end_ts > self.hdr_max_end_ts() {
+            self.set_hdr_max_end_ts(entry.end_ts);
+        }
+
         Ok(())
     }
 
-    fn update_at_slot_id(
-        &mut self,
-        new_entry: &MvccEntry,
-        slot_id: usize,
-    ) -> Result<MvccEntry, AccessMethodError> {
-        // Assume that size check has been done before this call.
-        let old_slot = self.slot(slot_id);
-        // if new_entry.start_ts() < old_slot.start_ts() {
-        //     old_slot.set_end_ts(&new_entry.start_ts());
-        //     new_entry.set_end_ts(&old_slot.start_ts());
-        //     self.set_slot_at_id(&old_slot, slot_id);
-        //     return Ok(new_entry.clone());
-        // }
-
-        let mut new_slot = Slot::new(
-            new_entry.key(),
-            new_entry.pkey(),
-            0, // tx_id is not used now
-            new_entry.start_ts(),
-            new_entry.end_ts(),
-            new_entry.value(),
-            0, // for temporary use
-        );
-        let new_rec = Record::new(new_entry.key(), new_entry.pkey(), new_entry.value());
-        let new_rec_size = new_rec.size();
-        let old_rec = self.record_from_slot(&old_slot);
-        let old_rec_size = old_rec.size();
-
-        let new_rec_offset;
-
-        // Case 1: New value size is smaller or equal (or) Case 2: Offset matches `rec_start_offset`
-        if new_rec_size <= old_rec_size || old_slot.offset() == self.rec_start_offset() {
-            new_rec_offset = old_slot.offset() + old_rec_size - new_rec_size;
-            if new_rec_offset < self.slot_end_offset() {
-                // TODO: Compact the page
-                let old_entry = MvccEntry::new(
-                    old_rec.key().to_vec(),
-                    old_rec.pkey().to_vec(),
-                    old_rec.val().to_vec(),
-                    old_slot.start_ts(),
-                    new_entry.start_ts(),
-                );
-                self.delete_slot_at_id(slot_id);
-                self.decrease_total_bytes_used(old_rec_size);
-                // Reach here means new_rec_size > old_rec_size and offset matches `rec_start_offset`
-                self.set_rec_start_offset(self.rec_start_offset() + old_rec_size);
-                return Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry));
-            }
-            self.set_record_at_offset(&new_rec, new_rec_offset);
-            if new_rec_size < old_rec_size {
-                self.write_bytes(old_slot.offset(), &vec![0; old_rec_size - new_rec_size]);
-            }
-            if old_slot.offset() == self.rec_start_offset() {
-                self.set_rec_start_offset(new_rec_offset);
+    fn search_pkey(&self, pkey: &[u8]) -> (bool, usize) {
+        let slot_cnt = self.hdr_slot_count();
+        for idx in 0..slot_cnt {
+            if self.slot_pkey_size(idx) != pkey.len()
+                && self.slot_pkey_prefix(idx)[..pkey.len().min(8)] == pkey[..pkey.len().min(8)]
+                && self.slot_pkey(idx) == pkey
+            {
+                return (true, idx);
             }
         }
-        // Case 3: New value is larger and offset doesn't match `rec_start_offset`
-        else {
-            if self.slot_end_offset() + new_rec_size > self.rec_start_offset() {
-                // TODO: Compact the page
-                let old_entry = MvccEntry::new(
-                    old_rec.key().to_vec(),
-                    old_rec.pkey().to_vec(),
-                    old_rec.val().to_vec(),
-                    old_slot.start_ts(),
-                    new_entry.start_ts(),
-                );
-                self.delete_slot_at_id(slot_id);
-                self.decrease_total_bytes_used(old_rec_size);
-                return Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry));
-            }
-            new_rec_offset = self.rec_start_offset() - new_rec_size;
-            self.set_record_at_offset(&new_rec, new_rec_offset);
-            self.set_rec_start_offset(new_rec_offset);
-        }
-        new_slot.set_offset(new_rec_offset);
-        self.set_slot_at_id(&new_slot, slot_id);
-
-        self.decrease_total_bytes_used(old_rec_size);
-        self.increase_total_bytes_used(new_rec_size);
-
-        let old_entry = MvccEntry::new(
-            old_rec.key().to_vec(),
-            old_rec.pkey().to_vec(),
-            old_rec.val().to_vec(),
-            old_slot.start_ts(),
-            new_entry.start_ts(),
-        );
-
-        Ok(old_entry)
-    }
-
-    fn delete_at_slot_id(
-        &mut self,
-        ts: &Timestamp,
-        slot_id: usize,
-    ) -> Result<MvccEntry, AccessMethodError> {
-        let ts = *ts;
-        let old_slot = self.slot(slot_id);
-        if old_slot.start_ts() > ts {
-            return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
-        }
-        if old_slot.offset() == self.rec_start_offset() {
-            self.set_rec_start_offset(old_slot.offset() + old_slot.rec_size());
-        }
-        self.delete_slot_at_id(slot_id);
-        self.decrease_total_bytes_used(old_slot.rec_size());
-        let old_rec = self.record_from_slot(&old_slot);
-        let old_entry = MvccEntry::new(
-            old_rec.key().to_vec(),
-            old_rec.pkey().to_vec(),
-            old_rec.val().to_vec(),
-            old_slot.start_ts(),
-            ts,
-        );
-        Ok(old_entry)
+        (false, slot_cnt)
     }
 }
 
-impl CommonPageMethods for Page {
-    fn read_bytes(&self, offset: usize, len: usize) -> &[u8] {
-        &self[offset..offset + len]
+pub trait HeapPage: HashCommonPage {}
+pub trait RecentPage: HashCommonPage {}
+pub trait HistoryPage: HashCommonPage {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init() {
+        let mut page = Page::new_empty();
+        page.init();
+        assert_eq!(page.hdr_next_page_id(), PageId::MAX);
+        assert_eq!(page.hdr_next_frame_id(), u32::MAX);
+        assert_eq!(page.hdr_total_bytes_used(), HEADER_SIZE);
+        assert_eq!(page.hdr_slot_count(), 0);
+        assert_eq!(page.hdr_rec_start_off(), AVAILABLE_PAGE_SIZE);
+        assert_eq!(page.hdr_recent_entry_cnt(), 0);
+        assert_eq!(page.hdr_min_start_ts(), u64::MAX);
+        assert_eq!(page.hdr_max_end_ts(), 0);
+        assert_eq!(page.hdr_is_full(), false);
     }
 
-    fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
-        self[offset..offset + bytes.len()].copy_from_slice(bytes);
-    }
+    #[test]
+    fn test_slot_methods() {
+        let mut page = Page::new_empty();
+        // write a slot at idx 0
+        page.set_slot_hash_key_size(0, 11);
+        page.set_slot_pkey_size(0, 22);
+        page.set_slot_hash_key_prefix(0, b"12345678");
+        page.set_slot_pkey_prefix(0, b"ABCDEFGH");
+        page.set_slot_start_ts(0, 33);
+        page.set_slot_end_ts(0, 44);
+        page.set_slot_val_size(0, 55);
+        page.set_slot_offset(0, 66);
+        page.set_slot_tx_id(0, 77);
 
-    fn move_bytes(&mut self, src_start_offset: usize, src_end_offset: usize, dest_offset: usize) {
-        self.copy_within(src_start_offset..src_end_offset, dest_offset);
-    }
-}
-
-pub trait HeapPage: CommonPageMethods {
-    fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        // Assuming duplication check has been done before this call.
-        let rec = Record::new(entry.key(), entry.pkey(), entry.value());
-        if SLOT_SIZE + rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
-            return Err(AccessMethodError::RecordTooLarge);
-        } else if SLOT_SIZE + rec.size() > self.free_space_before_compaction() {
-            if SLOT_SIZE + rec.size() > self.free_space_after_compaction() {
-                return Err(AccessMethodError::OutOfSpace);
-            }
-            // TODO: (JUN) Need to compact the page
-            return Err(AccessMethodError::OutOfSpace);
-        }
-        self.insert_at_slot_id(entry, self.slot_count())
-    }
-
-    fn update_write_repair(
-        &mut self,
-        entry: &MvccEntry,
-        already_inserted: bool,
-        already_repaired: bool,
-    ) -> Result<(), AccessMethodError> {
-        let mut did_repair = already_repaired;
-        let mut did_insert = already_inserted;
-
-        let pkey = entry.pkey();
-        let st = entry.start_ts();
-
-        if !already_repaired {
-            for i in 0..self.slot_count() {
-                let slot = self.slot(i);
-                if slot.end_ts() != Timestamp::MAX {
-                    continue;
-                }
-                if let Some(_) = self.slot_pkey_matches(&slot, pkey) {
-                    if slot.start_ts() < st {
-                        let mut new_slot = slot;
-                        new_slot.set_end_ts(&st);
-                        self.set_slot_at_id(&new_slot, i);
-                        did_repair = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !already_inserted {
-            match self.insert(entry) {
-                Ok(_) => {
-                    did_insert = true;
-                }
-                Err(AccessMethodError::OutOfSpace) => { /* skip */ }
-                Err(e) => return Err(e),
-            }
-        }
-
-        match (did_repair, did_insert) {
-            (true, true) => Ok(()),
-            (true, false) => Err(AccessMethodError::UpdateReapiredButNotInseted),
-            (false, true) => Err(AccessMethodError::UpdateInsertedButNotReapired),
-            (false, false) => Err(AccessMethodError::NotRepairedAndNotInserted),
-        }
+        assert_eq!(page.slot_hash_key_size(0), 11);
+        assert_eq!(page.slot_pkey_size(0), 22);
+        assert_eq!(page.slot_hash_key_prefix(0), b"12345678");
+        assert_eq!(page.slot_pkey_prefix(0), b"ABCDEFGH");
+        assert_eq!(page.slot_start_ts(0), 33);
+        assert_eq!(page.slot_end_ts(0), 44);
+        assert_eq!(page.slot_val_size(0), 55);
+        assert_eq!(page.slot_offset(0), 66);
+        assert_eq!(page.slot_tx_id(0), 77);
     }
 }
-
-pub trait RecentPage: CommonPageMethods {}
-
-pub trait HistoryPage: CommonPageMethods {}

@@ -188,7 +188,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
             recent_iter
                 .into_iter()
                 .map(|e| (e.key, e.pkey, e.value))
-                .chain(history_iter.into_iter().map(|e| (e.key, e.pkey, e.value)))
+                .chain(
+                    history_iter
+                        .into_iter()
+                        .map(|e| (e.key, e.pkey, e.value)),
+                )
                 .collect::<Vec<_>>()
                 .into_iter(),
         ))
