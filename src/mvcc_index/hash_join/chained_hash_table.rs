@@ -11,7 +11,7 @@ use std::{
     fmt::Debug,
     hash::{Hash, Hasher},
     result,
-    sync::{atomic::AtomicU32, Arc},
+    sync::{atomic::{AtomicU32, AtomicU64}, Arc},
     time::Duration,
     vec::IntoIter,
 };
@@ -40,12 +40,19 @@ pub struct ChainedHashTable<T: MemPool> {
     bucket_count: usize,
     bucket_entries: Vec<Arc<FirstBucket<T>>>,
     // tx_status: HashMap<TxId, TxInfo>, // Neet to written down to disk later...
+
+    // used in recent scan
+    largest_txn_ts: AtomicU64,
 }
 
 impl<T: MemPool> ChainedHashTable<T> {
     /// Creates a new hash join table with the default number of buckets.
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         Self::new_with_bucket_num(c_key, mem_pool, DEAFAULT_FIRST_BUCKET_NUM)
+    }
+
+    fn set_largest_txn_ts(&self, ts: Timestamp) {
+        self.largest_txn_ts.store(ts, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Creates a new hash join table with a specified number of buckets.
@@ -71,6 +78,7 @@ impl<T: MemPool> ChainedHashTable<T> {
             meta_frame_id,
             bucket_count: num_buckets,
             bucket_entries,
+            largest_txn_ts: AtomicU64::new(0),
         }
     }
 
@@ -228,6 +236,19 @@ impl<T: MemPool> ChainedHashTable<T> {
         }
         Ok(())
     }
+
+    pub fn scan_into_vec_recent(
+        &self,
+        ts: &Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) -> Result<(), AccessMethodError> {
+        for bucket in &self.bucket_entries {
+            bucket.scan_into_vec_recent(&ts, results);
+        }
+        Ok(())
+    }
+
+
     /// Returns a human‑readable status string for the ChainedHashTable.
     ///
     /// This aggregates statistics across:
@@ -396,6 +417,10 @@ impl<T: MemPool> Clone for ChainedHashTable<T> {
             ),
             bucket_count: self.bucket_count,
             bucket_entries: self.bucket_entries.clone(),
+            largest_txn_ts: AtomicU64::new(
+                self.largest_txn_ts
+                   .load(std::sync::atomic::Ordering::Acquire),
+            )
         }
     }
 }
@@ -432,6 +457,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.set_largest_txn_ts(ts);
         // self.insert(key, pkey, ts, tx_id, value)
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         ChainedHashTable::insert(self, &entry)
@@ -471,6 +497,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.set_largest_txn_ts(ts);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         ChainedHashTable::update(self, entry.key(), entry.pkey(), &entry)
     }
@@ -483,6 +510,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.set_largest_txn_ts(ts);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         ChainedHashTable::update(self, entry.key(), entry.pkey(), &entry)
     }
@@ -494,24 +522,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         ts: Timestamp,
         _tx_id: TxId,
     ) -> Result<(), Self::Error> {
+        self.set_largest_txn_ts(ts);
         ChainedHashTable::delete(self, key.as_ref(), pkey.as_ref(), &ts)
     }
-
-    // fn scan(
-    //     &self,
-    //     ts: Timestamp,
-    // ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
-    // {
-    //     let chained_scanner = ChainedHashTable::scan(&Arc::new(self.clone()), ts)?; // This returns `ChainedHashTableScanner`, which yields MvccEntry
-    //     let iter = chained_scanner.map(|entry| {
-    //         (
-    //             entry.key().to_vec(),
-    //             entry.pkey().to_vec(),
-    //             entry.value().to_vec(),
-    //         )
-    //     });
-    //     Ok(Box::new(iter))
-    // }
 
     fn scan(
         &self,
@@ -519,7 +532,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
         let mut results = Vec::new();
-        ChainedHashTable::scan_into_vec(self, &ts, &mut results)?;
+        log_warn!("[chain scan] max txn ts: {:?}", self.largest_txn_ts.load(std::sync::atomic::Ordering::Acquire));
+        if ts >= self.largest_txn_ts.load(std::sync::atomic::Ordering::Acquire) {
+            log_warn!("[chain scan] only scan recent!");
+            ChainedHashTable::scan_into_vec_recent(self, &ts, &mut results)?;
+        } else {
+            ChainedHashTable::scan_into_vec(self, &ts, &mut results)?;
+        }
         let iter = results.into_iter().map(|entry| {
             (
                 entry.key().to_vec(),

@@ -36,8 +36,6 @@ pub struct HeapHashChain<T: MemPool> {
 
     last_page_id: AtomicU32,
     last_frame_id: AtomicU32,
-
-    repair_ts: AtomicU64,
 }
 
 impl<T: MemPool + 'static> HeapHashChain<T> {
@@ -57,7 +55,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             first_frame_id: AtomicU32::new(first_frame_id),
             last_page_id: AtomicU32::new(first_page_id),
             last_frame_id: AtomicU32::new(first_frame_id),
-            repair_ts: AtomicU64::new(0),
         }
     }
 

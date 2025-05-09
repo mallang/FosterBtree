@@ -377,7 +377,8 @@ mod test_ops {
         assert_eq!(2, scan_iter.count());
         let scan_iter = hash_join_table.scan(3).unwrap();
         assert_eq!(2, scan_iter.count());
-
+        let scan_iter = hash_join_table.scan(8).unwrap();
+        assert_eq!(3, scan_iter.count());
         hash_join_table.garbage_collect(6).unwrap();
         let scan_iter = hash_join_table.scan(100).unwrap();
         for entry in scan_iter {
@@ -410,6 +411,8 @@ mod test_ops {
         assert_eq!(0, scan_iter.count());
         let scan_iter = hash_join_table.scan(3).unwrap();
         assert_eq!(1, scan_iter.count());
+        let scan_iter = hash_join_table.scan(8).unwrap();
+        assert_eq!(3, scan_iter.count());
     }
 
     fn test_basic_index_ops0<I>()

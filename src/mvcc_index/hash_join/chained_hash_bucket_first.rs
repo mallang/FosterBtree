@@ -134,7 +134,13 @@ impl<T: MemPool> FirstBucket<T> {
 
     pub fn scan_into_vec(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
         for bucket in &self.bucket_entries {
-            bucket.scan_into_vec(ts, results);
+            bucket.scan_into_vec(ts, results).unwrap();
+        }
+    }
+
+    pub fn scan_into_vec_recent(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
+        for bucket in &self.bucket_entries {
+            bucket.scan_into_vec_recent(ts, results).unwrap();
         }
     }
 
