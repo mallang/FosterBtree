@@ -105,8 +105,7 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             let fid = buckets[cur_bucket_idx].frame_id();
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
             let mut write_page = write_page(&*self.mem_pool, page_f_key);
-            let insert_result =
-                <Page as HashJoinPage>::insert_recent_history(&mut *write_page, entry);
+            let insert_result = <Page as HashJoinPage>::insert_recent_history(&mut *write_page, entry);
             match insert_result {
                 Ok(_) => {
                     return Ok(());
