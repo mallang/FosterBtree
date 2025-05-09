@@ -1,8 +1,7 @@
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::hash_join_page::ChainedHashMetaPage,
-    mvcc_index::{Delta, MvccEntry, MvccIndex},
+    mvcc_index::{hash_join_page::ChainedHashMetaPage, Delta, MvccEntry, MvccIndex},
     page::{Page, PageId},
     prelude::AccessMethodError,
 };
@@ -630,6 +629,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         self
     }
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn bulk_update_end(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn bulk_update_start(&self) -> Result<(), Self::Error> {
         Ok(())
     }
 }

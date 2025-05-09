@@ -2,7 +2,7 @@ use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hash_common::{read_repair_vec, DEFAULT_BUCKET_NUM},
+        hash_common::{read_repair_vec, BulkUpdate, DEFAULT_BUCKET_NUM},
         Delta, MvccEntry, MvccIndex, TxId,
     },
     page::{Page, PageId},
@@ -14,7 +14,7 @@ use std::{
     fmt::Debug,
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, RwLock,
     },
     time::Duration,
@@ -34,6 +34,8 @@ pub struct TsPartitionedTable<T: MemPool + 'static> {
     bucket_count: usize,
     bucket_entries: Vec<Arc<RwLock<TimestampPartitionCollection<T>>>>,
     repair_ts: AtomicU64,
+    // bulk update
+    bulk_update: BulkUpdate,
 }
 
 impl<T: MemPool + 'static> TsPartitionedTable<T> {
@@ -63,6 +65,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             bucket_count: num_buckets,
             bucket_entries,
             repair_ts: AtomicU64::new(0),
+            bulk_update: BulkUpdate::new(num_buckets),
         }
     }
 
@@ -129,6 +132,23 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             .read()
             .unwrap()
             .update_write_repair(entry.start_ts(), entry)
+    }
+
+    fn _bulk_update(&self) -> Result<(), AccessMethodError> {
+        for (idx, bulk_repair) in self.bulk_update.get_updated_pkeys().iter_mut().enumerate() {
+            let bucket = &self.bucket_entries[idx];
+            let partition_collection = bucket.read().unwrap();
+            // let mut idx = 0;
+            for p in partition_collection.partitions().iter() {
+                p.chain().traverse_to_endofchain_for_bulk_update(bulk_repair);
+            }
+            // repair
+            for versions in bulk_repair.values() {
+                read_repair_vec(&self.mem_pool, versions, self.c_key);
+            }
+            bulk_repair.clear();
+        }
+        Ok(())
     }
 
     // Deletes a key-value pair from the hash join table.
@@ -218,7 +238,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
+        let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         self._update(&entry.key(), &entry.pkey(), &entry)
     }
 
@@ -230,8 +250,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
-        self._update_write_repair(&entry.key(), &entry.pkey(), &entry)
+        let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
+        if self.bulk_update.get_flag() {
+            self.bulk_update.put_updated_pkeys(entry.pkey(), self.get_bucket_index(entry.key()));
+            self._update(&entry.key(), &entry.pkey(), &entry)
+        } else {
+            self._update_write_repair(&entry.key(), &entry.pkey(), &entry)
+        }
     }
 
     fn delete(
@@ -441,5 +466,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Self: Sized,
     {
         Ok(Self::new_with_bucket_num(c_key, mem_pool, bucket_num))
+    }
+
+
+    fn bulk_update_start(&self) -> Result<(), Self::Error> {
+        self.bulk_update.set_flag();
+        Ok(())
+    }
+    fn bulk_update_end(&self) -> Result<(), Self::Error> {
+        self._bulk_update()?;
+        self.bulk_update.reset_flag();
+        Ok(())
     }
 }

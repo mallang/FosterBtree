@@ -305,4 +305,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    fn bulk_update_end(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn bulk_update_start(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }

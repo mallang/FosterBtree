@@ -1,9 +1,9 @@
 use core::fmt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher, SipHasher},
     ops::Bound::{Excluded, Unbounded},
-    sync::{atomic::AtomicU32, Arc, Mutex},
+    sync::{atomic::{AtomicBool, AtomicU32}, Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -247,5 +247,40 @@ pub fn read_repair_vec(
             loc_and_need_repair.slot_id() as usize,
         );
         slot.set_end_ts(*next_ts);
+    }
+}
+
+
+pub struct BulkUpdate {
+    flag: AtomicBool,
+    updated_keys: Mutex<Vec<HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>>>,
+}
+
+impl BulkUpdate {
+    pub fn new(bucket_num: usize) -> Self {
+        let mut updated_keys_collection = Vec::new();
+        for _ in 0..bucket_num {
+            updated_keys_collection.push(HashMap::new());
+        }
+        Self {
+            flag: AtomicBool::new(false),
+            updated_keys: Mutex::new(updated_keys_collection),
+        }
+    }
+    pub fn put_updated_pkeys(&self, pk: &[u8], idx: usize) {
+        let mut x: MutexGuard<'_, Vec<HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>>>= self.updated_keys.lock().unwrap();
+        x[idx].insert(pk.to_vec(), vec![]);
+    }
+    pub fn get_updated_pkeys(&self) -> MutexGuard<'_, Vec<HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>>> {
+        self.updated_keys.lock().unwrap()
+    }
+    pub fn set_flag(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn reset_flag(&self) {
+        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn get_flag(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
     }
 }

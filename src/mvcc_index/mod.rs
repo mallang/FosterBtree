@@ -23,7 +23,7 @@ use std::{
     error::Error,
     fmt::Debug,
     hash::{Hash, Hasher},
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +206,10 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error>;
+
+    fn bulk_update_start(&self) -> Result<(), Self::Error>;
+
+    fn bulk_update_end(&self) -> Result<(), Self::Error>;
 
     fn update_write_repair(
         &self,

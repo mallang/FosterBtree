@@ -886,6 +886,12 @@ pub trait HashJoinPage {
     );
 
     fn max_end_ts(&self) -> Timestamp;
+
+    // bulk update get repaired versions
+    fn heap_scan_bulk_update_repair(
+        &self,
+        write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Result<(), AccessMethodError>;
 }
 
 impl HashJoinPage for Page {
@@ -1141,6 +1147,21 @@ impl HashJoinPage for Page {
         } else {
             Err(AccessMethodError::KeyNotFound)
         }
+    }
+
+    fn heap_scan_bulk_update_repair(
+        &self,
+        write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Result<(), AccessMethodError> {
+        for i in 0..self.slot_count() {
+            // Attempt a cheap pkey check first; if no match, skip it.
+            let slot = self.unsafe_slot(i);
+            let rec = self.record_ref_from_slot(slot);
+            if let Some(versions) = write_repair.get_mut(rec.pkey()) {
+                versions.push((slot.start_ts(), MvccEntryLoc::new(self.get_id(), i as u32), slot.end_ts() == u64::MAX));
+            }
+        }
+        Ok(())
     }
 
     fn update(&mut self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError> {

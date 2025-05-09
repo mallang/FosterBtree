@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    hash_common::{read_repair_vec, write_page, MvccEntryLoc, RowDelta},
+    hash_common::{read_page, read_repair_vec, write_page, MvccEntryLoc, RowDelta},
     Delta,
 };
 
@@ -40,7 +40,7 @@ pub struct HeapHashChain<T: MemPool> {
     repair_ts: AtomicU64,
 }
 
-impl<T: MemPool> HeapHashChain<T> {
+impl<T: MemPool + 'static> HeapHashChain<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         let mut page = mem_pool.create_new_page_for_write(c_key).unwrap();
         let first_page_id = page.get_id();
@@ -493,6 +493,39 @@ impl<T: MemPool> HeapHashChain<T> {
                 }
             }
         }
+    }
+
+
+    pub fn traverse_to_endofchain_for_bulk_update(
+        &self,
+        write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Result<(), AccessMethodError> {
+        let mut current_page = read_page(&*self.mem_pool, self.first_key());
+        loop {
+            current_page.heap_scan_bulk_update_repair(write_repair)?;
+            if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
+                let next_page = read_page(&*self.mem_pool, PageFrameKey::new_with_frame_id(
+                    self.c_key,
+                    next_page_id,
+                    next_frame_id,
+                ));
+                if next_page.frame_id() != next_frame_id {
+                    log_debug!(
+                        "Frame of the next page has been changed. Trying to fix the frame id"
+                    );
+                    let new_frame_key = PageFrameKey::new_with_frame_id(
+                        self.c_key,
+                        next_page_id,
+                        next_page.frame_id(),
+                    );
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn try_traverse_to_endofchain_for_delete(
@@ -1042,10 +1075,11 @@ pub struct HeapChainScanner<'a, T: MemPool> {
     initialized: bool,
     finished: bool,
 
-    repair: Option<&'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
+    read_repair: Option<&'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
+    write_repair: Option<&'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
 }
 
-impl<'a, T: MemPool> HeapChainScanner<'a, T> {
+impl<'a, T: MemPool + 'static> HeapChainScanner<'a, T> {
     pub fn new(chain: &Arc<HeapHashChain<T>>, ts: Timestamp) -> Self {
         Self {
             chain: chain.clone(),
@@ -1055,7 +1089,8 @@ impl<'a, T: MemPool> HeapChainScanner<'a, T> {
             current_slot_id: 0,
             initialized: false,
             finished: false,
-            repair: None,
+            read_repair: None,
+            write_repair: None,
         }
     }
 
@@ -1072,7 +1107,8 @@ impl<'a, T: MemPool> HeapChainScanner<'a, T> {
             current_slot_id: 0,
             initialized: false,
             finished: false,
-            repair: Some(versions),
+            read_repair: Some(versions),
+            write_repair: None,
         }
     }
 
@@ -1085,7 +1121,25 @@ impl<'a, T: MemPool> HeapChainScanner<'a, T> {
             current_slot_id: 0,
             initialized: false,
             finished: false,
-            repair: None,
+            read_repair: None,
+            write_repair: None,
+        }
+    }
+
+    pub fn new_with_write_repair(
+        chain: &Arc<HeapHashChain<T>>,
+        versions: &'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Self {
+        Self {
+            chain: chain.clone(),
+            ts: u64::MAX, // ts is irrelevant in full scan
+            filter_by_ts: false,
+            current_page: None,
+            current_slot_id: 0,
+            initialized: false,
+            finished: false,
+            read_repair: None,
+            write_repair: Some(versions),
         }
     }
 
@@ -1108,7 +1162,7 @@ impl<'a, T: MemPool> HeapChainScanner<'a, T> {
     }
 }
 
-impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
+impl<'a, T: MemPool+'static> Iterator for HeapChainScanner<'a, T> {
     type Item = MvccEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1140,7 +1194,7 @@ impl<'a, T: MemPool> Iterator for HeapChainScanner<'a, T> {
                     .get_entry_at_slot_id(self.current_slot_id)
                     .unwrap();
 
-                if let Some(repair) = &mut self.repair {
+                if let Some(repair) = &mut self.read_repair {
                     let pkey = entry.pkey();
                     (*repair)
                         .entry(pkey.to_vec())

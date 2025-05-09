@@ -956,6 +956,7 @@ impl TxBench {
                     .unwrap();
             }
             OperationType::Update => {
+                hash_join_table.bulk_update_start().unwrap();
                 for op in &tx.ops {
                     hash_join_table
                         .update_write_repair(
@@ -967,6 +968,7 @@ impl TxBench {
                         )
                         .unwrap();
                 }
+                hash_join_table.bulk_update_end().unwrap();
                 hash_join_table
                     .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
                     .unwrap();

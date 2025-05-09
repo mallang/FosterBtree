@@ -2,7 +2,7 @@ use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hash_common::{read_repair_btree, read_repair_vec, KVWithTs, MvccEntryLoc, RowDelta},
+        hash_common::{read_repair_btree, read_repair_vec, BulkUpdate, KVWithTs, MvccEntryLoc, RowDelta},
         Delta, MvccEntry, MvccIndex, TxId,
     },
     page::{Page, PageId},
@@ -14,7 +14,7 @@ use std::{
     fmt::Debug,
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -41,6 +41,8 @@ pub struct HeapHashTable<T: MemPool + 'static> {
     bucket_entries: Vec<Arc<HeapHashChain<T>>>,
     // tx_status: HashMap<TxId, TxInfo>, // Neet to written down to disk later...
     repair_ts: AtomicU64,
+    // bulk update
+    update_bulk_repair: BulkUpdate,
 }
 
 impl<T: MemPool + 'static> HeapHashTable<T> {
@@ -70,6 +72,7 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
             bucket_count: num_buckets,
             bucket_entries,
             repair_ts: AtomicU64::new(0),
+            update_bulk_repair: BulkUpdate::new(num_buckets),
         }
     }
 
@@ -278,7 +281,12 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     ) -> Result<(), Self::Error> {
         let entry =
             MvccEntry::new_with_tx_id(key.clone(), pkey.clone(), value, ts, u64::MAX, tx_id);
-        self.update_write_reapair(&key, &pkey, &entry)
+        if self.update_bulk_repair.get_flag() {
+            self.update_bulk_repair.put_updated_pkeys(&pkey, self.get_bucket_index(&key));
+            self.update(&entry.key(), &entry.pkey(), &entry)
+        } else {
+            self.update_write_reapair(&key, &pkey, &entry)
+        }
     }
 
     fn delete(
@@ -555,6 +563,25 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
         ))
+    }
+
+    fn bulk_update_start(&self) -> Result<(), Self::Error> {
+        self.update_bulk_repair.set_flag();
+        Ok(())
+    }
+
+    fn bulk_update_end(&self) -> Result<(), Self::Error> {
+        let mut updated_pkeys = self.update_bulk_repair.get_updated_pkeys();
+        for (idx, bulk_versions_bucket) in updated_pkeys.iter_mut().enumerate() {
+            let chain = &self.bucket_entries[idx];
+            chain.traverse_to_endofchain_for_bulk_update(bulk_versions_bucket);
+            for versions in bulk_versions_bucket.values() {
+                read_repair_vec(&self.mem_pool, versions, self.c_key);
+            }
+            bulk_versions_bucket.clear();
+        }
+        self.update_bulk_repair.reset_flag();
+        Ok(())
     }
 }
 

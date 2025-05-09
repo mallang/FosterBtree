@@ -33,7 +33,7 @@ pub struct TimestampPartition<T: MemPool> {
     chain: Arc<HeapHashChain<T>>,
 }
 
-impl<T: MemPool> TimestampPartition<T> {
+impl<T: MemPool + 'static> TimestampPartition<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, range: (Timestamp, Timestamp)) -> Self {
         Self {
             range,
@@ -50,7 +50,7 @@ impl<T: MemPool> TimestampPartition<T> {
     }
 }
 
-impl<T: MemPool> TimestampPartitionCollection<T> {
+impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         let partitions = vec![TimestampPartition::new(
             c_key,
