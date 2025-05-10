@@ -15,7 +15,10 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
-    mvcc_index::{hash_join_page::HashJoinPage, MvccEntry, TxId},
+    mvcc_index::{
+        hash_join_page::{record::RecordRef, HashJoinPage},
+        MvccEntry, TxId,
+    },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -73,8 +76,8 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
             PageFrameKey::new_with_frame_id(self.c_key, last_page_id, last_frame_id);
         let mut last_page = self.traverse_until_endofchain_for_write(last_page_frame_key)?;
         log_trace!("Acquired write lock for page {}", last_page.get_id());
-
-        match last_page.insert_recent_history(entry) {
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        match last_page.insert_recent_history(&rec, entry.start_ts(), entry.end_ts()) {
             Ok(_) => {
                 if self.last_page_id.load(atomic::Ordering::Acquire) != last_page.get_id() {
                     self.last_page_id
@@ -108,7 +111,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                     .store(new_page.get_id(), atomic::Ordering::Release);
                 self.last_frame_id
                     .store(new_page.frame_id(), atomic::Ordering::Release);
-                match new_page.insert_recent_history(entry) {
+                match new_page.insert_recent_history(&rec, entry.start_ts(), entry.end_ts()) {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e),
                 }
@@ -393,12 +396,18 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         entry: &MvccEntry,
     ) -> Result<MvccEntry, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
         loop {
             let (found, slot_id) = current_page.search_slot(pkey);
             if found {
                 match current_page.try_upgrade(true) {
                     Ok(mut upgraded_page) => {
-                        match upgraded_page.update_at_slot_id(entry, slot_id) {
+                        match upgraded_page.update_at_slot_id(
+                            &rec,
+                            entry.start_ts(),
+                            entry.end_ts(),
+                            slot_id,
+                        ) {
                             Ok(old_entry) => {
                                 return Ok(old_entry);
                             }
@@ -745,7 +754,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
             page_count += 1;
             let kv = current_page.slot_count();
             total_kv_count += kv;
-            let used_bytes = current_page.header().total_bytes_used();
+            let used_bytes = current_page.unsafe_header().total_bytes_used();
             let usage = (used_bytes as f64 / AVAILABLE_PAGE_SIZE as f64) * 100.0;
             usage_sum += usage;
             max_usage = max_usage.max(usage as f64);

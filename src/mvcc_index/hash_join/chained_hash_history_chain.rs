@@ -10,8 +10,10 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_trace, log_warn,
-    mvcc_index::hash_join_page::HashJoinPage,
-    mvcc_index::MvccEntry,
+    mvcc_index::{
+        hash_join_page::{record::RecordRef, HashJoinPage},
+        MvccEntry,
+    },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -55,14 +57,14 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
     }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let entry = &mut entry.clone();
         let space_need = <Page as HashJoinPage>::require_space(&entry);
         if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
             return Err(AccessMethodError::RecordTooLarge);
         }
         let mut last_page = self.traverse_until_endofchain_for_insert(self.first_key(), entry)?;
         log_trace!("Acquired write lock for page {}", last_page.get_id());
-        match last_page.upsert_history(entry) {
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        match last_page.upsert_history(&rec, entry.start_ts(), entry.end_ts()) {
             Ok(_) => Ok(()),
             Err(AccessMethodError::OutOfSpace) => {
                 log_debug!(
@@ -77,7 +79,7 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
                     last_page.get_id(),
                     new_page.get_id()
                 );
-                match new_page.upsert_history(entry) {
+                match new_page.upsert_history(&rec, entry.start_ts(), entry.end_ts()) {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e),
                 }
@@ -427,7 +429,7 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
             page_count += 1;
             let kv = current_page.slot_count();
             total_kv_count += kv;
-            let used_bytes = current_page.header().total_bytes_used();
+            let used_bytes = current_page.unsafe_header().total_bytes_used();
             let usage = (used_bytes as f64 / AVAILABLE_PAGE_SIZE as f64) * 100.0;
             usage_sum += usage;
             max_usage = max_usage.max(usage as f64);

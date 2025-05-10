@@ -227,7 +227,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         let mut best_candidates = HashMap::new();
         for p in self.partitions.iter() {
             if ts >= p.range.0 && ts < p.range.1 {
-                let partition_scanner = p.chain.scan_key_vec(key, &ts)?;
+                let partition_scanner = p.chain.scan_key_vec_read_repair(key, &ts, None)?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
                     let (pkey, value) = entry;
@@ -250,7 +250,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
             if ts >= p.range.0 && ts < p.range.1 {
                 let partition_scanner =
                     p.chain
-                        .scan_key_vec_read_repair(key, &ts, &mut versions_map)?;
+                        .scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
                     best_candidates.insert(entry.0, entry.1);

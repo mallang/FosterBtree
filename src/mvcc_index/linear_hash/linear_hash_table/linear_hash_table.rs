@@ -1,10 +1,16 @@
 use core::panic;
-use std::{collections::BTreeMap, sync::{atomic::AtomicU64, Arc}};
+use std::{
+    collections::BTreeMap,
+    sync::{atomic::AtomicU64, Arc},
+};
 
 use crate::{
     bp::{ContainerKey, MemPool},
     log_warn,
-    mvcc_index::{hash_common::DEFAULT_BUCKET_NUM, Delta, MvccEntry, MvccIndex},
+    mvcc_index::{
+        hash_common::DEFAULT_BUCKET_NUM, hash_join_page::record::RecordRef, Delta, MvccEntry,
+        MvccIndex,
+    },
     prelude::{AccessMethodError, Timestamp},
 };
 
@@ -37,7 +43,8 @@ impl<T: MemPool + 'static> LinearHashTable<T> {
         }
     }
     fn set_largest_txn_ts(&self, ts: Timestamp) {
-        self.largest_txn_ts.store(ts, std::sync::atomic::Ordering::SeqCst);
+        self.largest_txn_ts
+            .store(ts, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -78,8 +85,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         self.set_largest_txn_ts(ts);
-        let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
-        match self.recent.insert(&entry) {
+        let rec = RecordRef::new(&key, &pkey, &value);
+        match self.recent.insert(&rec, ts, Timestamp::MAX) {
             Ok(_) => Ok(()),
             Err(e) => {
                 panic!("unexpected error: {:?}", e);
@@ -135,11 +142,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         self.set_largest_txn_ts(ts);
-        let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
-        match self.recent.update(entry.pkey(), &entry) {
+        // let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
+        let rec = RecordRef::new(&key, &pkey, &value);
+
+        match self.recent.update(&rec, ts, Timestamp::MAX) {
             Ok(mut old_res) => {
                 old_res.set_end_ts(&ts);
-                self.history.insert_history(&mut old_res).unwrap();
+                let history_rec = RecordRef::new(&old_res.key(), &old_res.pkey(), &old_res.value());
+                self.history
+                    .insert_history(&history_rec, old_res.start_ts(), old_res.end_ts())
+                    .unwrap();
                 return Ok(());
             }
             Err(AccessMethodError::KeyNotFound) => {
@@ -173,7 +185,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         match self.recent.delete(key, pkey, ts) {
             Ok(mut old_entry) => {
                 old_entry.set_end_ts(&ts);
-                self.history.insert_history(&mut old_entry).unwrap();
+                let old_rec =
+                    RecordRef::new(&old_entry.key(), &old_entry.pkey(), &old_entry.value());
+                self.history
+                    .insert_history(&old_rec, old_entry.start_ts(), old_entry.end_ts())
+                    .unwrap();
                 return Ok(());
             }
             Err(
@@ -191,21 +207,22 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
         let recent_iter = LinearSubTableScanner::new(self.recent.clone(), Some(ts));
-        let history_iter = if ts >= self.largest_txn_ts.load(std::sync::atomic::Ordering::SeqCst) {
+        let history_iter = if ts
+            >= self
+                .largest_txn_ts
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             Box::new(vec![].into_iter()) as Box<dyn Iterator<Item = MvccEntry>>
         } else {
-            Box::new(LinearSubTableScanner::new(self.history.clone(), Some(ts))) as Box<dyn Iterator<Item = MvccEntry>>
+            Box::new(LinearSubTableScanner::new(self.history.clone(), Some(ts)))
+                as Box<dyn Iterator<Item = MvccEntry>>
         };
-        
+
         Ok(Box::new(
             recent_iter
                 .into_iter()
                 .map(|e| (e.key, e.pkey, e.value))
-                .chain(
-                    history_iter
-                        .into_iter()
-                        .map(|e| (e.key, e.pkey, e.value)),
-                )
+                .chain(history_iter.into_iter().map(|e| (e.key, e.pkey, e.value)))
                 .collect::<Vec<_>>()
                 .into_iter(),
         ))
@@ -229,10 +246,18 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         let recent_iter = LinearSubTableKeyScanner::new(self.recent.clone(), Some(ts), key.clone());
-        let history_iter = if ts >= self.largest_txn_ts.load(std::sync::atomic::Ordering::SeqCst) {
+        let history_iter = if ts
+            >= self
+                .largest_txn_ts
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             Box::new(vec![].into_iter()) as Box<dyn Iterator<Item = MvccEntry>>
         } else {
-            Box::new(LinearSubTableKeyScanner::new(self.history.clone(), Some(ts), key.clone()))
+            Box::new(LinearSubTableKeyScanner::new(
+                self.history.clone(),
+                Some(ts),
+                key.clone(),
+            ))
         };
 
         let iter = Box::new(

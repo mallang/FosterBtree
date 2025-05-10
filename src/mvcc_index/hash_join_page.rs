@@ -1,5 +1,6 @@
 use crate::{
     access_method::AccessMethodError,
+    log_warn,
     mvcc_index::{MvccEntry, TxId},
     prelude::{Page, PageId, Timestamp, AVAILABLE_PAGE_SIZE},
 };
@@ -26,106 +27,16 @@ mod header {
         total_bytes_used: u32, // (PAGE_HEADER_SIZE + slots + records)
         slot_count: u32,
         rec_start_offset: u32,
-        //
-        min_ts: Timestamp,
-        max_ts: Timestamp,
+
+        // for optimization
+        page_min_start_ts: Timestamp,
+        page_max_end_ts: Timestamp,
+        page_recent_slot_cnt: u32,
+
         is_full: u8,
     }
 
     impl Header {
-        pub fn from_bytes(bytes: &[u8]) -> Self {
-            let mut current_pos = 0;
-            let next_page_id = crate::page::PageId::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<crate::page::PageId>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<crate::page::PageId>();
-            let next_frame_id = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let total_bytes_used = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let slot_count = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let rec_start_offset = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let min_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-            let max_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-            let is_full = u8::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u8>();
-
-            Header {
-                next_page_id,
-                next_frame_id,
-                total_bytes_used,
-                slot_count,
-                rec_start_offset,
-                min_ts,
-                max_ts,
-                is_full,
-            }
-        }
-
-        pub fn to_bytes(&self) -> [u8; PAGE_HEADER_SIZE] {
-            let mut bytes = [0; PAGE_HEADER_SIZE];
-            let mut current_pos = 0;
-            bytes[current_pos..current_pos + std::mem::size_of::<crate::page::PageId>()]
-                .copy_from_slice(&self.next_page_id.to_be_bytes());
-            current_pos += std::mem::size_of::<crate::page::PageId>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.next_frame_id.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.total_bytes_used.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.slot_count.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.rec_start_offset.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.min_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.max_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u8>()]
-                .copy_from_slice(&self.is_full.to_be_bytes());
-            current_pos += std::mem::size_of::<u8>();
-            bytes
-        }
-
         pub fn new() -> Self {
             Header {
                 next_page_id: PageId::MAX,
@@ -133,8 +44,11 @@ mod header {
                 total_bytes_used: PAGE_HEADER_SIZE as u32,
                 slot_count: 0,
                 rec_start_offset: AVAILABLE_PAGE_SIZE as u32,
-                min_ts: Timestamp::MAX,
-                max_ts: Timestamp::MIN,
+
+                page_min_start_ts: Timestamp::MAX,
+                page_max_end_ts: Timestamp::MIN,
+                page_recent_slot_cnt: 0,
+
                 is_full: 0,
             }
         }
@@ -219,21 +133,34 @@ mod header {
         pub fn set_rec_start_offset(&mut self, rec_start_offset: usize) {
             self.rec_start_offset = rec_start_offset as u32;
         }
-
-        pub fn min_ts(&self) -> Timestamp {
-            self.min_ts
+        pub fn recent_slot_cnt(&self) -> u32 {
+            self.page_recent_slot_cnt
         }
-
-        pub fn set_min_ts(&mut self, min_ts: Timestamp) {
-            self.min_ts = min_ts;
+        pub fn inc_recent_slot_cnt(&mut self) {
+            self.page_recent_slot_cnt += 1;
         }
-
-        pub fn max_ts(&self) -> Timestamp {
-            self.max_ts
+        pub fn dec_recent_slot_cnt(&mut self) {
+            assert!(self.page_recent_slot_cnt > 0);
+            self.page_recent_slot_cnt -= 1;
         }
-
-        pub fn set_max_ts(&mut self, max_ts: Timestamp) {
-            self.max_ts = max_ts;
+        pub fn page_recent_slot_cnt(&self) -> u32 {
+            self.page_recent_slot_cnt
+        }
+        pub fn page_min_start_ts(&self) -> Timestamp {
+            self.page_min_start_ts
+        }
+        pub fn try_set_page_min_start_ts(&mut self, page_min_start_ts: Timestamp) {
+            if page_min_start_ts < self.page_min_start_ts {
+                self.page_min_start_ts = page_min_start_ts;
+            }
+        }
+        pub fn page_max_end_ts(&self) -> Timestamp {
+            self.page_max_end_ts
+        }
+        pub fn try_set_page_max_end_ts(&mut self, page_max_end_ts: Timestamp) {
+            if page_max_end_ts > self.page_max_end_ts {
+                self.page_max_end_ts = page_max_end_ts;
+            }
         }
     }
 }
@@ -295,120 +222,6 @@ pub mod slot {
 
         pub unsafe fn unsafe_from_bytes_mut(bytes: &[u8]) -> &mut Slot {
             &mut *(bytes.as_ptr() as *mut Slot)
-        }
-
-        pub fn from_bytes(bytes: &[u8]) -> Self {
-            let mut current_pos = 0;
-
-            let key_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-
-            let mut key_prefix: [u8; 8] = [0u8; SLOT_KEY_PREFIX_SIZE];
-            key_prefix.copy_from_slice(&bytes[current_pos..current_pos + SLOT_KEY_PREFIX_SIZE]);
-            current_pos += SLOT_KEY_PREFIX_SIZE;
-
-            let pkey_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-
-            let mut pkey_prefix: [u8; 8] = [0u8; SLOT_PKEY_PREFIX_SIZE];
-            pkey_prefix.copy_from_slice(&bytes[current_pos..current_pos + SLOT_PKEY_PREFIX_SIZE]);
-            current_pos += SLOT_PKEY_PREFIX_SIZE;
-
-            let tx_id = TxId::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<TxId>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<TxId>();
-
-            let start_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            let end_ts = Timestamp::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            let val_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-
-            let offset = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-
-            Slot {
-                key_size,
-                key_prefix,
-                pkey_size,
-                pkey_prefix,
-                tx_id,
-                start_ts,
-                end_ts,
-                val_size,
-                offset,
-            }
-        }
-
-        pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
-            let mut bytes = [0u8; SLOT_SIZE];
-            let mut current_pos = 0;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.key_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + SLOT_KEY_PREFIX_SIZE]
-                .copy_from_slice(&self.key_prefix);
-            current_pos += SLOT_KEY_PREFIX_SIZE;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.pkey_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + SLOT_PKEY_PREFIX_SIZE]
-                .copy_from_slice(&self.pkey_prefix);
-            current_pos += SLOT_PKEY_PREFIX_SIZE;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<TxId>()]
-                .copy_from_slice(&self.tx_id.to_be_bytes());
-            current_pos += std::mem::size_of::<TxId>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.start_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<Timestamp>()]
-                .copy_from_slice(&self.end_ts.to_be_bytes());
-            current_pos += std::mem::size_of::<Timestamp>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.val_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.offset.to_be_bytes());
-
-            bytes
         }
 
         pub fn new(
@@ -548,39 +361,6 @@ pub mod record {
     }
 
     impl Record {
-        pub fn _from_bytes(
-            bytes: &[u8],
-            key_size: usize,
-            pkey_size: usize,
-            val_size: usize,
-        ) -> Self {
-            if bytes.len() != key_size + pkey_size + val_size {
-                panic!("Invalid record size");
-            }
-            let key = bytes[..key_size].to_vec();
-            let pkey = bytes[key_size..key_size + pkey_size].to_vec();
-            let val = bytes[key_size + pkey_size..key_size + pkey_size + val_size].to_vec();
-            Record { key, pkey, val }
-        }
-
-        pub fn _to_bytes(&self) -> Vec<u8> {
-            let mut bytes = Vec::with_capacity(self.key.len() + self.pkey.len() + self.val.len());
-
-            bytes.extend_from_slice(&self.key);
-            bytes.extend_from_slice(&self.pkey);
-            bytes.extend_from_slice(&self.val);
-
-            bytes
-        }
-
-        pub fn _new(key: &[u8], pkey: &[u8], val: &[u8]) -> Self {
-            Record {
-                key: key.to_vec(),
-                pkey: pkey.to_vec(),
-                val: val.to_vec(),
-            }
-        }
-
         pub fn key(&self) -> &[u8] {
             &self.key
         }
@@ -617,14 +397,31 @@ use super::hash_common::{KVWithTs, MvccEntryLoc, RowDelta};
 pub trait HashJoinPage {
     fn init(&mut self);
 
-    fn insert_heap_no_repair(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
-    fn insert_recent_history(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError>;
-
-    fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError>;
-    fn insert_at_slot_id(
+    fn insert_heap_no_repair(
         &mut self,
-        entry: &MvccEntry,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError>;
+    fn insert_recent_history(
+        &mut self,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError>;
+
+    fn upsert_history(
+        &mut self,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError>;
+    fn insert_entry_at_slot_id(
+        &mut self,
         slot_id: usize,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
     ) -> Result<(), AccessMethodError>;
 
     fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
@@ -641,7 +438,9 @@ pub trait HashJoinPage {
     fn update(&mut self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError>;
     fn update_at_slot_id(
         &mut self,
-        entry: &MvccEntry,
+        new_rec: &RecordRef,
+        new_start_ts: Timestamp,
+        new_end_ts: Timestamp,
         slot_id: usize,
     ) -> Result<MvccEntry, AccessMethodError>;
     fn update_heap_write_repair(
@@ -675,58 +474,52 @@ pub trait HashJoinPage {
     fn write_bytes_slice(&mut self, offset: usize, bytes: &[&[u8]]);
 
     fn free_space_before_compaction(&self) -> usize {
-        self.header().rec_start_offset() - self.slot_offset(self.slot_count())
+        self.unsafe_header().rec_start_offset() - self.slot_offset(self.slot_count())
     }
     fn free_space_after_compaction(&self) -> usize {
-        AVAILABLE_PAGE_SIZE - self.header().total_bytes_used()
+        AVAILABLE_PAGE_SIZE - self.unsafe_header().total_bytes_used()
     }
     fn require_space(entry: &MvccEntry) -> usize {
         SLOT_SIZE + RecordRef::new(entry.key(), entry.pkey(), entry.value()).size()
     }
 
-    fn header(&self) -> Header;
     fn unsafe_header(&self) -> &Header;
     fn unsafe_header_mut(&self) -> &mut Header;
     fn set_header(&mut self, header: &Header);
     fn next_page(&self) -> Option<(PageId, u32)> {
-        self.header().next_page()
+        self.unsafe_header().next_page()
     }
     fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32) {
-        let mut header = self.header();
+        let header = self.unsafe_header_mut();
         header.set_next_page(next_page_id, frame_id);
-        self.set_header(&header);
     }
     fn set_next_page_frame(&mut self, page_frame: (PageId, u32)) {
-        let mut header = self.header();
+        let header = self.unsafe_header_mut();
         header.set_next_page(page_frame.0, page_frame.1);
-        self.set_header(&header);
     }
     fn rec_start_offset(&self) -> usize {
-        self.header().rec_start_offset()
+        self.unsafe_header().rec_start_offset()
     }
     fn set_rec_start_offset(&mut self, rec_start_offset: usize) {
-        let mut header = self.header();
+        let header = self.unsafe_header_mut();
         header.set_rec_start_offset(rec_start_offset);
-        self.set_header(&header);
     }
     fn slot_count(&self) -> usize {
-        self.header().slot_count()
+        self.unsafe_header().slot_count()
     }
     fn set_slot_count(&mut self, slot_count: usize) {
-        let mut header = self.header();
+        let header = self.unsafe_header_mut();
         header.set_slot_count(slot_count);
-        self.set_header(&header);
     }
     fn slot_end_offset(&self) -> usize {
         PAGE_HEADER_SIZE + self.slot_count() * SLOT_SIZE
     }
     fn total_bytes_used(&self) -> usize {
-        self.header().total_bytes_used()
+        self.unsafe_header().total_bytes_used()
     }
     fn set_total_bytes_used(&mut self, total_bytes_used: usize) {
-        let mut header = self.header();
+        let header = self.unsafe_header_mut();
         header.set_total_bytes_used(total_bytes_used);
-        self.set_header(&header);
     }
     fn increase_total_bytes_used(&mut self, bytes: usize) {
         self.set_total_bytes_used(self.total_bytes_used() + bytes);
@@ -735,14 +528,12 @@ pub trait HashJoinPage {
         self.set_total_bytes_used(self.total_bytes_used() - bytes);
     }
     fn increase_slot_count(&mut self) {
-        let mut header = self.header();
+        let header = self.unsafe_header_mut();
         header.inc_slot_count();
-        self.set_header(&header);
     }
     fn decrease_slot_count(&mut self) {
-        let mut header = self.header();
+        let header = self.unsafe_header_mut();
         header.dec_slot_count();
-        self.set_header(&header);
     }
 
     fn slot_offset(&self, slot_id: usize) -> usize {
@@ -764,22 +555,11 @@ pub trait HashJoinPage {
         unsafe { Slot::unsafe_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE)) }
     }
 
-    fn _record_from_slotid(&self, slot_id: usize) -> Record {
-        let slot = self.unsafe_slot(slot_id);
-        self._record_from_slot(&slot)
-    }
     fn record_ref_from_slotid(&self, slot_id: usize) -> RecordRef {
         let slot = self.unsafe_slot(slot_id);
         self.record_ref_from_slot(&slot)
     }
-    fn _record_from_slot(&self, slot: &Slot) -> Record {
-        Record::_from_bytes(
-            self.read_bytes(slot.offset(), slot.rec_size()),
-            slot.key_size(),
-            slot.pkey_size(),
-            slot.val_size(),
-        )
-    }
+
     fn record_ref_from_slot(&self, slot: &Slot) -> RecordRef {
         RecordRef::from_bytes(
             self.read_bytes(slot.offset(), slot.rec_size()),
@@ -788,21 +568,12 @@ pub trait HashJoinPage {
             slot.val_size(),
         )
     }
-    fn set_slot(&mut self, slot_id: usize, slot: &Slot) {
+    fn set_slot(&mut self, slot_id: usize, slot: Slot) {
         // self.write_bytes(self.slot_offset(slot_id), &slot.to_bytes());
         let slot_mut_ref = unsafe {
             Slot::unsafe_mut_from_bytes(&self.read_bytes(self.slot_offset(slot_id), SLOT_SIZE))
         };
-        *slot_mut_ref = *slot;
-    }
-
-    fn _set_record_at_slot_id(&mut self, slot_id: usize, rec: &Record) {
-        let slot = self.unsafe_slot(slot_id);
-        self.write_bytes(slot.offset(), &rec._to_bytes());
-    }
-
-    fn _set_record_at_offset(&mut self, offset: usize, rec: &Record) {
-        self.write_bytes(offset, &rec._to_bytes());
+        *slot_mut_ref = slot;
     }
 
     fn set_record_ref_at_offset(&mut self, offset: usize, rec: &RecordRef) {
@@ -811,10 +582,9 @@ pub trait HashJoinPage {
         self.write_bytes_slice(offset, &bytes_slice);
     }
 
-    fn insert_slot_at_id(&mut self, slot: &Slot, slot_id: usize);
+    fn insert_slot_at_id(&mut self, slot: Slot, slot_id: usize);
     fn delete_slot_at_id(&mut self, slot_id: usize);
 
-    fn _insert_rec_at_offset(&mut self, rec: &Record, offset: usize);
     fn insert_rec_ref_at_offset(&mut self, rec: &RecordRef, offset: usize);
     /// Returns `Some(Record)` if the slot's pkey exactly matches `pkey`.
     /// Otherwise returns `None`.
@@ -840,7 +610,7 @@ pub trait HashJoinPage {
     /// For “heap” pages, we do a linear scan.  But *instead* of returning a Vec,
     /// we pass in a &mut HashMap so we can update the "best version" logic
     /// directly without creating an intermediate Vec.
-    fn scan_key_heap_into_best(
+    fn scan_key_heap(
         &self,
         search_key: &[u8],
         ts: &Timestamp,
@@ -873,12 +643,13 @@ pub trait HashJoinPage {
 
     fn scan_history_into(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>);
 
-    fn scan_key_heap_into_best_read_repair(
+    fn scan_key_heap_read_repair(
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError>;
+        result_map: &mut HashMap<Vec<u8>, Vec<u8>>,
+        versions_map: &mut Option<&mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
+    ) -> Result<(), AccessMethodError>;
 
     fn scan_all_for_gc_read_repair(
         &self,
@@ -900,8 +671,13 @@ impl HashJoinPage for Page {
         HashJoinPage::set_header(&mut *self, &header);
     }
 
-    fn insert_recent_history(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let new_rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+    fn insert_recent_history(
+        &mut self,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let new_rec = RecordRef::new(rec.key(), rec.pkey(), rec.val());
         let needed_space = SLOT_SIZE + new_rec.size();
         if needed_space > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
@@ -918,34 +694,42 @@ impl HashJoinPage for Page {
             // unreachable!("no duplicate keys should be inserted");
             return Err(AccessMethodError::KeyDuplicate);
         }
-        HashJoinPage::insert_at_slot_id(&mut *self, entry, slot_id)
+        HashJoinPage::insert_entry_at_slot_id(&mut *self, slot_id, rec, start_ts, end_ts)
     }
-    fn insert_at_slot_id(
+    fn insert_entry_at_slot_id(
         &mut self,
-        entry: &MvccEntry,
         slot_id: usize,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
     ) -> Result<(), AccessMethodError> {
-        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        // let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
 
-        let new_rec_start_offset = HashJoinPage::header(&*self).rec_start_offset() - rec.size();
+        let new_rec_start_offset =
+            HashJoinPage::unsafe_header(&*self).rec_start_offset() - rec.size();
         let slot = Slot::new(
-            entry.key(),
-            entry.pkey(),
+            rec.key(),
+            rec.pkey(),
             0, // tx_id not used now
-            entry.start_ts(),
-            entry.end_ts(),
-            entry.value(),
+            start_ts,
+            end_ts,
+            rec.val(),
             new_rec_start_offset,
         );
 
-        HashJoinPage::insert_slot_at_id(&mut *self, &slot, slot_id);
+        HashJoinPage::insert_slot_at_id(&mut *self, slot, slot_id);
         HashJoinPage::insert_rec_ref_at_offset(&mut *self, &rec, new_rec_start_offset);
 
         Ok(())
     }
 
-    fn insert_heap_no_repair(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+    fn insert_heap_no_repair(
+        &mut self,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let rec = RecordRef::new(rec.key(), rec.pkey(), rec.val());
         if SLOT_SIZE + rec.size() > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
         } else if SLOT_SIZE + rec.size() > HashJoinPage::free_space_before_compaction(&*self) {
@@ -955,12 +739,31 @@ impl HashJoinPage for Page {
             // TODO: (JUN) Need to compact the page
             return Err(AccessMethodError::OutOfSpace);
         }
-        self.insert_at_slot_id(entry, self.slot_count())
+
+        self.insert_entry_at_slot_id(self.slot_count(), &rec, start_ts, end_ts)?;
+
+        // update min-max info
+        assert!(end_ts == Timestamp::max_value());
+        let header = self.unsafe_header_mut();
+        header.inc_recent_slot_cnt();
+        log_warn!(
+            "[INC] page_id: {}, slot_count: {}",
+            self.get_id(),
+            header.slot_count()
+        );
+        header.try_set_page_min_start_ts(start_ts);
+
+        Ok(())
     }
 
-    fn upsert_history(&mut self, entry: &mut MvccEntry) -> Result<(), AccessMethodError> {
+    fn upsert_history(
+        &mut self,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
         // 1) Check record size constraints
-        let new_rec_ref = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        let new_rec_ref = RecordRef::new(rec.key(), rec.pkey(), rec.val());
         let needed_space = SLOT_SIZE + new_rec_ref.size();
         if needed_space > AVAILABLE_PAGE_SIZE - PAGE_HEADER_SIZE {
             return Err(AccessMethodError::RecordTooLarge);
@@ -1003,12 +806,12 @@ impl HashJoinPage for Page {
 
         // Build the slot for the new version
         let mut new_slot = Slot::new(
-            entry.key(),
-            entry.pkey(),
+            rec.key(),
+            rec.pkey(),
             0, // tx_id not used
-            entry.start_ts(),
-            entry.end_ts(),
-            entry.value(),
+            start_ts,
+            end_ts,
+            rec.val(),
             0, // offset => updated below
         );
 
@@ -1016,8 +819,13 @@ impl HashJoinPage for Page {
         let new_slot_idx = self.binary_search_by_end_ts(new_slot.end_ts());
         new_slot.set_offset(new_rec_offset);
 
-        self.insert_slot_at_id(&new_slot, new_slot_idx);
+        self.insert_slot_at_id(new_slot, new_slot_idx);
         self.insert_rec_ref_at_offset(&new_rec_ref, new_rec_offset);
+
+        // min-max info
+        let header = self.unsafe_header_mut();
+        header.inc_recent_slot_cnt();
+        header.try_set_page_min_start_ts(start_ts);
 
         Ok(())
     }
@@ -1158,7 +966,11 @@ impl HashJoinPage for Page {
             let slot = self.unsafe_slot(i);
             let rec = self.record_ref_from_slot(slot);
             if let Some(versions) = write_repair.get_mut(rec.pkey()) {
-                versions.push((slot.start_ts(), MvccEntryLoc::new(self.get_id(), i as u32), slot.end_ts() == u64::MAX));
+                versions.push((
+                    slot.start_ts(),
+                    MvccEntryLoc::new(self.get_id(), i as u32),
+                    slot.end_ts() == u64::MAX,
+                ));
             }
         }
         Ok(())
@@ -1173,30 +985,31 @@ impl HashJoinPage for Page {
         if slot.start_ts() > entry.start_ts() {
             return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
         }
-        HashJoinPage::update_at_slot_id(&mut *self, entry, slot_id)
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        HashJoinPage::update_at_slot_id(&mut *self, &rec, entry.start_ts(), entry.end_ts(), slot_id)
     }
     fn update_at_slot_id(
         &mut self,
-        entry: &MvccEntry,
+        new_rec: &RecordRef,
+        new_start_ts: Timestamp,
+        new_end_ts: Timestamp,
         slot_id: usize,
     ) -> Result<MvccEntry, AccessMethodError> {
-        let old_slot = HashJoinPage::slot(self, slot_id);
-        if entry.start_ts() < old_slot.start_ts() {
-            let mut old_entry = entry.clone();
-            old_entry.set_end_ts(&old_slot.start_ts());
-            return Ok(old_entry);
+        let old_slot = HashJoinPage::unsafe_slot(self, slot_id).to_owned();
+        if new_start_ts < old_slot.start_ts() {
+            return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
         }
 
         let mut new_slot = Slot::new(
-            entry.key(),
-            entry.pkey(),
+            new_rec.key(),
+            new_rec.pkey(),
             0,
-            entry.start_ts(),
-            entry.end_ts(),
-            entry.value(),
+            new_start_ts,
+            new_end_ts,
+            new_rec.val(),
             0, // for temporary use
         );
-        let new_rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        let new_rec = RecordRef::new(new_rec.key(), new_rec.pkey(), new_rec.val());
 
         let old_rec = HashJoinPage::record_ref_from_slotid(self, slot_id);
 
@@ -1213,7 +1026,7 @@ impl HashJoinPage for Page {
             old_rec.pkey().to_vec(),
             old_rec.val().to_vec(),
             old_slot.start_ts(),
-            entry.start_ts(),
+            new_slot.start_ts(),
         );
         // Case 1: New value size is smaller or equal (or) Case 2: Offset matches `rec_start_offset`
         if new_rec_size <= old_rec_size || old_slot.offset() == HashJoinPage::rec_start_offset(self)
@@ -1254,7 +1067,7 @@ impl HashJoinPage for Page {
             self.set_rec_start_offset(new_rec_offset);
         }
         new_slot.set_offset(new_rec_offset);
-        HashJoinPage::set_slot(self, slot_id, &new_slot);
+        HashJoinPage::set_slot(self, slot_id, new_slot);
 
         HashJoinPage::increase_total_bytes_used(self, new_rec_size);
         HashJoinPage::decrease_total_bytes_used(self, old_rec_size);
@@ -1282,19 +1095,24 @@ impl HashJoinPage for Page {
                 }
                 if let Some(_) = self.slot_pkey_matches(&slot, pkey) {
                     if slot.start_ts() < st {
-                        let mut new_slot = *slot;
-                        new_slot.set_end_ts(st);
-                        self.set_slot(i, &new_slot);
                         did_repair = true;
-                        break;
                     }
+                }
+                if did_repair {
+                    let slot = self.unsafe_slot_mut(i);
+                    slot.set_end_ts(st);
+                    let header = self.unsafe_header_mut();
+                    header.dec_recent_slot_cnt();
+                    header.try_set_page_max_end_ts(st);
+                    break;
                 }
             }
         }
 
         // 2. insert
         if !already_inserted {
-            match self.insert_heap_no_repair(entry) {
+            let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+            match self.insert_heap_no_repair(&rec, entry.start_ts(), entry.end_ts()) {
                 Ok(_) => {
                     did_insert = true;
                 }
@@ -1392,7 +1210,7 @@ impl HashJoinPage for Page {
             let slot = self.slot(idx);
             if slot.end_ts() > *safe_ts {
                 // keep
-                self.set_slot(next_valid_slot_idx, &slot);
+                self.set_slot(next_valid_slot_idx, slot);
                 next_valid_slot_idx += 1;
                 continue;
             }
@@ -1492,10 +1310,6 @@ impl HashJoinPage for Page {
         self[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
-    fn header(&self) -> Header {
-        Header::from_bytes(&self[0..PAGE_HEADER_SIZE])
-    }
-
     fn unsafe_header(&self) -> &Header {
         unsafe { &*((&self.read_bytes(0, PAGE_HEADER_SIZE)).as_ptr() as *const Header) }
     }
@@ -1505,10 +1319,11 @@ impl HashJoinPage for Page {
     }
 
     fn set_header(&mut self, header: &Header) {
-        HashJoinPage::write_bytes(&mut *self, 0, &header.to_bytes());
+        let myheader = self.unsafe_header_mut();
+        *myheader = *header;
     }
 
-    fn insert_slot_at_id(&mut self, slot: &Slot, slot_id: usize) {
+    fn insert_slot_at_id(&mut self, slot: Slot, slot_id: usize) {
         if slot_id < self.slot_count() {
             let start_offset = HashJoinPage::slot_offset(&*self, slot_id);
             let end_offset = HashJoinPage::slot_offset(&*self, self.slot_count());
@@ -1530,14 +1345,6 @@ impl HashJoinPage for Page {
 
         self.decrease_slot_count();
         self.decrease_total_bytes_used(SLOT_SIZE);
-    }
-
-    fn _insert_rec_at_offset(&mut self, rec: &Record, offset: usize) {
-        HashJoinPage::write_bytes(&mut *self, offset, &rec._to_bytes());
-        self.increase_total_bytes_used(rec.size());
-        if offset < self.rec_start_offset() {
-            self.set_rec_start_offset(offset);
-        }
     }
 
     fn insert_rec_ref_at_offset(&mut self, rec: &RecordRef, offset: usize) {
@@ -1656,27 +1463,30 @@ impl HashJoinPage for Page {
     fn stat(&self) -> String {
         let slot_count = self.slot_count();
         // Total bytes used in this page, as maintained in the header.
-        let used_bytes = self.header().total_bytes_used();
+        let used_bytes = self.unsafe_header().total_bytes_used();
         let usage_percent = (used_bytes as f64 / AVAILABLE_PAGE_SIZE as f64) * 100.0;
         // Free space without compaction: this is the gap between where the records start
         // and the end of the slot area.
         let free_before = HashJoinPage::free_space_before_compaction(self);
 
         format!(
-            "PageId {}: kv count: {}, usage: {:.2}% ({} bytes used / {} total), free_before: {}",
+            "PageId {}: kv count: {}, usage: {:.2}% ({} bytes used / {} total), free_before: {}, recent_slot_cnt: {}, max_end_ts: {}, min start ts: {}",
             self.get_id(),
             slot_count,
             usage_percent,
             used_bytes,
             AVAILABLE_PAGE_SIZE,
             free_before,
+            self.unsafe_header().recent_slot_cnt(),
+            self.unsafe_header().page_max_end_ts(),
+            self.unsafe_header().page_min_start_ts(),
         )
     }
 
     /// For “heap” pages, we do a linear scan.  But *instead* of returning a Vec,
     /// we pass in a &mut HashMap so we can update the "best version" logic
     /// directly without creating an intermediate Vec.
-    fn scan_key_heap_into_best(
+    fn scan_key_heap(
         &self,
         search_key: &[u8],
         ts: &Timestamp,
@@ -1749,18 +1559,24 @@ impl HashJoinPage for Page {
     /// For “heap” pages, we do a linear scan.  But *instead* of returning a Vec,
     /// we pass in a &mut HashMap so we can update the "best version" logic
     /// directly without creating an intermediate Vec.
-    fn scan_key_heap_into_best_read_repair(
+    /// Both  Read Repair and No Repair
+    fn scan_key_heap_read_repair(
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        versions_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
-        let mut res: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        result_map: &mut HashMap<Vec<u8>, Vec<u8>>,
+        versions_map: &mut Option<&mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
+    ) -> Result<(), AccessMethodError> {
         let page_id = self.get_id();
         let ts = *ts;
         // For each slot:
         for slot_idx in 0..self.slot_count() {
             let slot = self.unsafe_slot(slot_idx);
+
+            // timestamp filter
+            if slot.start_ts() > ts || slot.end_ts() <= ts {
+                continue;
+            }
 
             // 1) Compare prefix, etc. (same as your existing logic)
             let slot_key_len = slot.key_size();
@@ -1777,25 +1593,22 @@ impl HashJoinPage for Page {
             // 2) If prefix matches, load the record
             let rec = self.record_ref_from_slot(&slot);
             if rec.key() == search_key {
-                let start_ts = slot.start_ts();
-                if start_ts <= ts {
-                    let pkey = rec.pkey();
+                let pkey = rec.pkey();
+                result_map.insert(pkey.to_vec(), rec.val().to_vec());
 
-                    res.insert(pkey.to_vec(), rec.val().to_vec());
-
+                if let Some(versions_map) = versions_map.as_mut() {
                     match versions_map.get_mut(pkey) {
-                        Some(versions_vec_of_pkey) => {
-                            versions_vec_of_pkey.push((
-                                start_ts,
+                        Some(vs) => {
+                            vs.push((
+                                slot.start_ts(),
                                 MvccEntryLoc::new(page_id, slot_idx as u32),
                                 slot.end_ts() == Timestamp::MAX,
                             ));
                         }
                         None => {
-                            let versions_vec_of_pkey =
-                                versions_map.entry(pkey.to_vec()).or_insert(Vec::new());
-                            versions_vec_of_pkey.push((
-                                start_ts,
+                            let vs = versions_map.entry(pkey.to_vec()).or_insert(Vec::new());
+                            vs.push((
+                                slot.start_ts(),
                                 MvccEntryLoc::new(page_id, slot_idx as u32),
                                 slot.end_ts() == Timestamp::MAX,
                             ));
@@ -1804,8 +1617,7 @@ impl HashJoinPage for Page {
                 }
             }
         }
-
-        Ok(res.into_iter().collect())
+        Ok(())
     }
 
     fn scan_all_for_gc_read_repair(
@@ -2056,7 +1868,6 @@ impl ChainedHashMetaPage for Page {
 
 #[cfg(test)]
 mod tests {
-    use std::hash::Hash;
 
     use super::*;
 
@@ -2093,9 +1904,9 @@ mod tests {
 
         // Create an MVCC entry.
         let entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), start_ts, end_ts);
-
+        let rec = RecordRef::new(&key, &pkey, &value);
         // Insert the entry into the page.
-        let insert_result = HashJoinPage::insert_recent_history(&mut page, &entry);
+        let insert_result = HashJoinPage::insert_recent_history(&mut page, &rec, start_ts, end_ts);
         assert!(insert_result.is_ok(), "Insert failed: {:?}", insert_result);
 
         // Retrieve the entry by its primary key and the timestamp.
@@ -2134,9 +1945,9 @@ mod tests {
             // For simplicity, set timestamps based on i.
             let start_ts: Timestamp = 100 + i as Timestamp;
             let end_ts: Timestamp = 200 + i as Timestamp;
-            let entry = MvccEntry::new(key, pkey.clone(), value, start_ts, end_ts);
+            let rec = RecordRef::new(&key, &pkey, &value);
 
-            let res = HashJoinPage::insert_recent_history(&mut page, &entry);
+            let res = HashJoinPage::insert_recent_history(&mut page, &rec, start_ts, end_ts);
             assert!(
                 res.is_ok(),
                 "Failed to insert entry for pkey {:?}: {:?}",
@@ -2287,9 +2098,10 @@ mod tests {
         let pkey = b"pkey-large-001-extra".to_vec();
         let value = b"value-large-001-extra".to_vec();
         let insert_entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), 100, 200);
+        let rec = RecordRef::new(&key, &pkey, &value);
 
         // Insert the entry into the page.
-        let res = HashJoinPage::insert_recent_history(&mut page, &insert_entry);
+        let res = HashJoinPage::insert_recent_history(&mut page, &rec, 100, 200);
         assert!(res.is_ok(), "Insert failed: {:?}", res.err());
 
         // Increase the expected used space.
@@ -2368,9 +2180,10 @@ mod tests {
             let start_ts = 100 + i as Timestamp;
             let end_ts = 200 + i as Timestamp;
             let entry = MvccEntry::new(key.clone(), pkey.clone(), value.clone(), start_ts, end_ts);
+            let rec = RecordRef::new(&key, &pkey, &value);
 
             // Insert the entry.
-            let res = HashJoinPage::insert_recent_history(&mut page, &entry);
+            let res = HashJoinPage::insert_recent_history(&mut page, &rec, start_ts, end_ts);
             assert!(
                 res.is_ok(),
                 "Insert failed for entry {}: {:?}",
@@ -2490,7 +2303,8 @@ mod tests {
         // History record 1: valid from 100 to 150.
         let value1 = b"value-history-first".to_vec();
         let mut entry1 = MvccEntry::new(key.clone(), pkey.clone(), value1.clone(), 100, 150);
-        let res = HashJoinPage::upsert_history(&mut page, &mut entry1);
+        let rec = RecordRef::new(&key, &pkey, &value1);
+        let res = HashJoinPage::upsert_history(&mut page, &rec, 100, 150);
         assert!(
             res.is_ok(),
             "insert_history for entry1 failed: {:?}",
@@ -2509,7 +2323,8 @@ mod tests {
         // History record 2: valid from 150 to 200.
         let value2 = b"value-history-second".to_vec();
         let mut entry2 = MvccEntry::new(key.clone(), pkey.clone(), value2.clone(), 150, 200);
-        let res = HashJoinPage::upsert_history(&mut page, &mut entry2);
+        let rec2 = RecordRef::new(&key, &pkey, &value2);
+        let res = HashJoinPage::upsert_history(&mut page, &rec2, 150, 200);
         assert!(
             res.is_ok(),
             "insert_history for entry2 failed: {:?}",
@@ -2609,7 +2424,8 @@ mod tests {
         // History record 1: valid [100,150), value "value-history-first"
         let value1 = b"value-history-first".to_vec();
         let mut entry1 = MvccEntry::new(key.clone(), pkey.clone(), value1.clone(), 100, 150);
-        let res = HashJoinPage::upsert_history(&mut page, &mut entry1);
+        let rec = RecordRef::new(&key, &pkey, &value1);
+        let res = HashJoinPage::upsert_history(&mut page, &rec, 100, 150);
         assert!(
             res.is_ok(),
             "upsert_history for entry1 failed: {:?}",
@@ -2628,7 +2444,8 @@ mod tests {
         // History record 2: valid [150,200), value "value-history-second"
         let value2 = b"value-history-second".to_vec();
         let mut entry2 = MvccEntry::new(key.clone(), pkey.clone(), value2.clone(), 150, 200);
-        let res = HashJoinPage::upsert_history(&mut page, &mut entry2);
+        let rec2 = RecordRef::new(&key, &pkey, &value2);
+        let res = HashJoinPage::upsert_history(&mut page, &rec2, 150, 200);
         assert!(
             res.is_ok(),
             "upsert_history for entry2 failed: {:?}",
@@ -2728,7 +2545,8 @@ mod tests {
         let orig_value = b"Original".to_vec();
         let mut orig_entry =
             MvccEntry::new(key.clone(), pkey.clone(), orig_value.clone(), 100, 150);
-        let res = HashJoinPage::upsert_history(&mut page, &mut orig_entry);
+        let orig_rec = RecordRef::new(&key, &pkey, &orig_value);
+        let res = HashJoinPage::upsert_history(&mut page, &orig_rec, 100, 150);
         assert!(
             res.is_ok(),
             "upsert_history original failed: {:?}",
@@ -2746,7 +2564,8 @@ mod tests {
         // New record has range [80,150) but should be adjusted to [80,100) so that it does not overlap.
         let new_value = b"New".to_vec();
         let mut new_entry = MvccEntry::new(key.clone(), pkey.clone(), new_value.clone(), 80, 150);
-        let res = HashJoinPage::upsert_history(&mut page, &mut new_entry);
+        let new_rec = RecordRef::new(&key, &pkey, &new_value);
+        let res = HashJoinPage::upsert_history(&mut page, &new_rec, 80, 150);
         assert!(
             res.is_ok(),
             "upsert_history new overlapping failed: {:?}",
@@ -2821,21 +2640,24 @@ mod tests {
         // For key1: record [100,150), value "K1-First"
         let mut entry1 =
             MvccEntry::new(key1.clone(), pkey1.clone(), b"K1-First".to_vec(), 100, 150);
-        let res = HashJoinPage::upsert_history(&mut page, &mut entry1);
+        let rec1 = RecordRef::new(&key1, &pkey1, entry1.value());
+        let res = HashJoinPage::upsert_history(&mut page, &rec1, 100, 150);
         assert!(res.is_ok(), "upsert_history for key1 record1 failed");
         expected_used += SLOT_SIZE + key1.len() + pkey1.len() + b"K1-First".len();
 
         // For key2: record [120,180), value "K2-First"
         let mut entry2 =
             MvccEntry::new(key2.clone(), pkey2.clone(), b"K2-First".to_vec(), 120, 180);
-        let res = HashJoinPage::upsert_history(&mut page, &mut entry2);
+        let rec2 = RecordRef::new(&key2, &pkey2, entry2.value());
+        let res = HashJoinPage::upsert_history(&mut page, &rec2, 120, 180);
         assert!(res.is_ok(), "upsert_history for key2 record1 failed");
         expected_used += SLOT_SIZE + key2.len() + pkey2.len() + b"K2-First".len();
 
         // For key1: record [150,200), value "K1-Second"
         let mut entry3 =
             MvccEntry::new(key1.clone(), pkey1.clone(), b"K1-Second".to_vec(), 150, 200);
-        let res = HashJoinPage::upsert_history(&mut page, &mut entry3);
+        let rec3 = RecordRef::new(&key1, &pkey1, entry3.value());
+        let res = HashJoinPage::upsert_history(&mut page, &rec3, 150, 200);
         assert!(res.is_ok(), "upsert_history for key1 record2 failed");
         expected_used += SLOT_SIZE + key1.len() + pkey1.len() + b"K1-Second".len();
 
@@ -2901,21 +2723,24 @@ mod tests {
 
         // Insert in a non-sorted order.
         // First insert entry C, then entry A, then entry B.
-        let res_c = HashJoinPage::upsert_history(&mut page, &mut entry_c);
+        let reca = RecordRef::new(&key, &pkey, entry_a.value());
+        let recb = RecordRef::new(&key, &pkey, entry_b.value());
+        let recc = RecordRef::new(&key, &pkey, entry_c.value());
+        let res_c = HashJoinPage::upsert_history(&mut page, &recc, 200, 250);
         assert!(
             res_c.is_ok(),
             "upsert_history for entry C failed: {:?}",
             res_c.err()
         );
 
-        let res_a = HashJoinPage::upsert_history(&mut page, &mut entry_a);
+        let res_a = HashJoinPage::upsert_history(&mut page, &reca, 100, 150);
         assert!(
             res_a.is_ok(),
             "upsert_history for entry A failed: {:?}",
             res_a.err()
         );
 
-        let res_b = HashJoinPage::upsert_history(&mut page, &mut entry_b);
+        let res_b = HashJoinPage::upsert_history(&mut page, &recb, 150, 200);
         assert!(
             res_b.is_ok(),
             "upsert_history for entry B failed: {:?}",
@@ -3009,7 +2834,8 @@ mod tests {
             let end_ts = start_ts + 50;
             let value = format!("value-history-{}", i).into_bytes();
             let mut entry = MvccEntry::new(key.clone(), pkey.clone(), value, start_ts, end_ts);
-            let res = HashJoinPage::upsert_history(&mut page, &mut entry);
+            let rec = RecordRef::new(&key, &pkey, entry.value());
+            let res = HashJoinPage::upsert_history(&mut page, &rec, start_ts, end_ts);
             assert!(
                 res.is_ok(),
                 "upsert_history failed for entry {}: {:?}",
@@ -3100,9 +2926,8 @@ mod tests {
             // For simplicity, set timestamps based on i.
             let start_ts: Timestamp = 100 + i as Timestamp;
             let end_ts: Timestamp = 200 + i as Timestamp;
-            let entry = MvccEntry::new(key, pkey.clone(), value, start_ts, end_ts);
-
-            let res = HashJoinPage::insert_recent_history(&mut page, &entry);
+            let rec = RecordRef::new(&key, &pkey, &value);
+            let res = HashJoinPage::insert_recent_history(&mut page, &rec, start_ts, end_ts);
             assert!(
                 res.is_ok(),
                 "Failed to insert entry for pkey {:?}: {:?}",

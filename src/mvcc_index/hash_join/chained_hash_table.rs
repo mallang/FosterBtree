@@ -11,7 +11,10 @@ use std::{
     fmt::Debug,
     hash::{Hash, Hasher},
     result,
-    sync::{atomic::{AtomicU32, AtomicU64}, Arc},
+    sync::{
+        atomic::{AtomicU32, AtomicU64},
+        Arc,
+    },
     time::Duration,
     vec::IntoIter,
 };
@@ -52,7 +55,8 @@ impl<T: MemPool> ChainedHashTable<T> {
     }
 
     fn set_largest_txn_ts(&self, ts: Timestamp) {
-        self.largest_txn_ts.store(ts, std::sync::atomic::Ordering::SeqCst);
+        self.largest_txn_ts
+            .store(ts, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Creates a new hash join table with a specified number of buckets.
@@ -248,7 +252,6 @@ impl<T: MemPool> ChainedHashTable<T> {
         Ok(())
     }
 
-
     /// Returns a human‑readable status string for the ChainedHashTable.
     ///
     /// This aggregates statistics across:
@@ -419,8 +422,8 @@ impl<T: MemPool> Clone for ChainedHashTable<T> {
             bucket_entries: self.bucket_entries.clone(),
             largest_txn_ts: AtomicU64::new(
                 self.largest_txn_ts
-                   .load(std::sync::atomic::Ordering::Acquire),
-            )
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
         }
     }
 }
@@ -532,8 +535,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
         let mut results = Vec::new();
-        log_warn!("[chain scan] max txn ts: {:?}", self.largest_txn_ts.load(std::sync::atomic::Ordering::Acquire));
-        if ts >= self.largest_txn_ts.load(std::sync::atomic::Ordering::Acquire) {
+        log_warn!(
+            "[chain scan] max txn ts: {:?}",
+            self.largest_txn_ts
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        if ts
+            >= self
+                .largest_txn_ts
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             log_warn!("[chain scan] only scan recent!");
             ChainedHashTable::scan_into_vec_recent(self, &ts, &mut results)?;
         } else {

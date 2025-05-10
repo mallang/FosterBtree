@@ -11,7 +11,7 @@ mod test_ops {
     use crate::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
     use crate::mvcc_index::{hash_join, Delta, MvccIndex};
     use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
-    use crate::prelude::Timestamp;
+    use crate::prelude::{AccessMethodError, Timestamp};
     use core::str;
     use std::marker::PhantomData;
     use std::sync::Arc;
@@ -1287,5 +1287,52 @@ mod test_ops {
             );
         }
         assert_eq!(item_count, 0);
+    }
+
+    #[test]
+    fn test_min_max() {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table =
+            Arc::new(HeapHashTable::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
+                as Arc<
+                    dyn MvccIndex<
+                        InMemPool,
+                        Key = Vec<u8>,
+                        Value = Vec<u8>,
+                        PKey = Vec<u8>,
+                        Error = AccessMethodError,
+                    >,
+                >;
+
+        // 1..1000 inserts
+        for i in (0..1000).into_iter().step_by(1) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
+        }
+
+        // 1..1000..2 updates
+
+        // Insert entries in a separate thread
+        for i in (1..1000).into_iter().step_by(2) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i * 2 + 10000).into_bytes();
+            hash_join_table.update(key, pkey, 2, 1, value).unwrap();
+        }
+
+        // 0..1000..2 updates
+        for i in (0..1000).into_iter().step_by(2) {
+            let key = format!("key{}", i).into_bytes();
+            let pkey = format!("pkey{}", i).into_bytes();
+            let value = format!("value{}", i * 2 + 10000).into_bytes();
+            hash_join_table
+                .update(key, pkey, 2 as u64, 1, value)
+                .unwrap();
+        }
+
+        let _ = hash_join_table.scan_read_repair(2).unwrap();
     }
 }

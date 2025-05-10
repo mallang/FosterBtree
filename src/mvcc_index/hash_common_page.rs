@@ -453,8 +453,7 @@ impl HashCommonPage for Page {
         self.set_slot_tx_id(idx, entry.tx_id);
 
         let mut hk_pref = [0u8; 8];
-        hk_pref[..entry.key.len().min(8)]
-            .copy_from_slice(&entry.key[..entry.key.len().min(8)]);
+        hk_pref[..entry.key.len().min(8)].copy_from_slice(&entry.key[..entry.key.len().min(8)]);
         self.set_slot_hash_key_prefix(idx, &hk_pref);
 
         let mut pk_pref = [0u8; 8];

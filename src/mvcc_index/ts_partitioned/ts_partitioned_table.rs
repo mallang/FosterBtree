@@ -140,7 +140,8 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             let partition_collection = bucket.read().unwrap();
             // let mut idx = 0;
             for p in partition_collection.partitions().iter() {
-                p.chain().traverse_to_endofchain_for_bulk_update(bulk_repair);
+                p.chain()
+                    .traverse_to_endofchain_for_bulk_update(bulk_repair)?;
             }
             // repair
             for versions in bulk_repair.values() {
@@ -252,7 +253,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     ) -> Result<(), Self::Error> {
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         if self.bulk_update.get_flag() {
-            self.bulk_update.put_updated_pkeys(entry.pkey(), self.get_bucket_index(entry.key()));
+            self.bulk_update
+                .put_updated_pkeys(entry.pkey(), self.get_bucket_index(entry.key()));
             self._update(&entry.key(), &entry.pkey(), &entry)
         } else {
             self._update_write_repair(&entry.key(), &entry.pkey(), &entry)
@@ -467,7 +469,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     {
         Ok(Self::new_with_bucket_num(c_key, mem_pool, bucket_num))
     }
-
 
     fn bulk_update_start(&self) -> Result<(), Self::Error> {
         self.bulk_update.set_flag();

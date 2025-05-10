@@ -207,7 +207,13 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableKeyScanner<T> {
 
                 return Some(entry);
             } else {
-                if !self.current_page.as_ref().unwrap().header().is_full() {
+                if !self
+                    .current_page
+                    .as_ref()
+                    .unwrap()
+                    .unsafe_header()
+                    .is_full()
+                {
                     self.is_end = true;
                     return None;
                 }

@@ -3,13 +3,16 @@ use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher, SipHasher},
     ops::Bound::{Excluded, Unbounded},
-    sync::{atomic::{AtomicBool, AtomicU32}, Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, AtomicU32},
+        Arc, Mutex, MutexGuard,
+    },
     time::Duration,
 };
 
 use crate::{
     bp::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
-    log_warn,
+    log_debug, log_warn,
     page::{Page, PageId},
     prelude::Timestamp,
 };
@@ -222,8 +225,17 @@ pub fn read_repair_btree(
             let page_key = PageFrameKey::new(c_key, loc.page_id());
             let mut current_page = write_page(&**mem_pool, page_key);
             let slot =
-                <Page as HashJoinPage>::unsafe_slot_mut(&mut *current_page, loc.slot_id() as usize);
+                <Page as HashJoinPage>::unsafe_slot_mut(&mut current_page, loc.slot_id() as usize);
             slot.set_end_ts(*next_ts);
+            let header = <Page as HashJoinPage>::unsafe_header_mut(&current_page);
+            header.try_set_page_max_end_ts(*next_ts);
+            log_warn!(
+                "[DEC slot: {}] page_id: {}, slot_cnt: {}",
+                loc.slot_id(),
+                loc.page_id(),
+                header.recent_slot_cnt()
+            );
+            header.dec_recent_slot_cnt();
         }
     }
 }
@@ -243,13 +255,22 @@ pub fn read_repair_vec(
         let page_key = PageFrameKey::new(c_key, loc_and_need_repair.page_id());
         let mut current_page = write_page(&**mem_pool, page_key);
         let slot = <Page as HashJoinPage>::unsafe_slot_mut(
-            &mut *current_page,
+            &mut current_page,
             loc_and_need_repair.slot_id() as usize,
         );
+        assert!(slot.end_ts() == Timestamp::MAX);
         slot.set_end_ts(*next_ts);
+        let header = <Page as HashJoinPage>::unsafe_header_mut(&current_page);
+        header.try_set_page_max_end_ts(*next_ts);
+        log_warn!(
+            "[DEC slot: {}] page_id: {}, slot_cnt: {}",
+            loc_and_need_repair.slot_id(),
+            loc_and_need_repair.page_id(),
+            header.recent_slot_cnt()
+        );
+        header.dec_recent_slot_cnt();
     }
 }
-
 
 pub struct BulkUpdate {
     flag: AtomicBool,
@@ -268,10 +289,13 @@ impl BulkUpdate {
         }
     }
     pub fn put_updated_pkeys(&self, pk: &[u8], idx: usize) {
-        let mut x: MutexGuard<'_, Vec<HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>>>= self.updated_keys.lock().unwrap();
+        let mut x: MutexGuard<'_, Vec<HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>>> =
+            self.updated_keys.lock().unwrap();
         x[idx].insert(pk.to_vec(), vec![]);
     }
-    pub fn get_updated_pkeys(&self) -> MutexGuard<'_, Vec<HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>>> {
+    pub fn get_updated_pkeys(
+        &self,
+    ) -> MutexGuard<'_, Vec<HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>>> {
         self.updated_keys.lock().unwrap()
     }
     pub fn set_flag(&self) {
@@ -282,5 +306,25 @@ impl BulkUpdate {
     }
     pub fn get_flag(&self) -> bool {
         self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Opportunistically try to fix the next page frame id
+pub fn fix_frame_id<'a>(
+    this: FrameReadGuard<'a>,
+    new_pid: PageId,
+    new_fid: u32,
+) -> FrameReadGuard<'a> {
+    log_debug!("Frame of the next page has been changed. Trying to fix the frame id");
+    match this.try_upgrade(true) {
+        Ok(mut write_guard) => {
+            write_guard.set_next_page(new_pid, new_fid);
+            log_debug!("Fixed frame id of the next page");
+            write_guard.downgrade()
+        }
+        Err(read_guard) => {
+            log_debug!("Failed to fix frame id of the next page");
+            read_guard
+        }
     }
 }

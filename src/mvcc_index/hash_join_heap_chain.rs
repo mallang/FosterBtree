@@ -1,31 +1,26 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    f32::consts::E,
-    ops::Bound::{Excluded, Unbounded},
     sync::{
         atomic::{self, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
-    thread::current,
     time::Duration,
-    vec::IntoIter,
 };
-
-use dashmap::mapref::entry;
 
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
-    mvcc_index::{hash_common::KVWithTs, hash_join_page::HashJoinPage, MvccEntry},
+    mvcc_index::{
+        hash_common::fix_frame_id,
+        hash_join_page::{record::RecordRef, HashJoinPage},
+        MvccEntry,
+    },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
     prelude::Timestamp,
 };
 
-use super::{
-    hash_common::{read_page, read_repair_vec, write_page, MvccEntryLoc, RowDelta},
-    Delta,
-};
+use super::hash_common::{read_page, MvccEntryLoc, RowDelta};
 
 pub struct HeapHashChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -59,7 +54,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let entry = &mut entry.clone();
         let space_need = <Page as HashJoinPage>::require_space(&entry);
         if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
             return Err(AccessMethodError::RecordTooLarge);
@@ -68,9 +62,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         let last_frame_id = self.last_frame_id.load(Ordering::Acquire);
         let last_page_frame_key =
             PageFrameKey::new_with_frame_id(self.c_key, last_page_id, last_frame_id);
-        let mut last_page = self.traverse_until_endofchain_for_insert(last_page_frame_key)?;
+        let mut last_page = self.get_tail_page_for_write(last_page_frame_key)?;
         log_trace!("Acquired write lock for page {}", last_page.get_id());
-        match last_page.insert_heap_no_repair(entry) {
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        match last_page.insert_heap_no_repair(&rec, entry.start_ts(), entry.end_ts()) {
             Ok(_) => {
                 if self.last_page_id.load(Ordering::Acquire) != last_page.get_id() {
                     self.last_page_id
@@ -100,7 +95,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                     .store(new_page.get_id(), Ordering::Release);
                 self.last_frame_id
                     .store(new_page.frame_id(), Ordering::Release);
-                match new_page.upsert_history(entry) {
+                match new_page.upsert_history(&rec, entry.start_ts(), entry.end_ts()) {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e),
                 }
@@ -109,14 +104,14 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
     }
 
-    fn traverse_until_endofchain_for_insert(
+    fn get_tail_page_for_write(
         &self,
         page_key: PageFrameKey,
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
-            let last_page = self.try_traverse_until_endofchain_for_insert(page_key);
+            let last_page = self.try_get_tail_page_for_write(page_key);
             match last_page {
                 Ok(last_page) => {
                     return Ok(last_page);
@@ -137,28 +132,17 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
     }
 
-    fn try_traverse_until_endofchain_for_insert(
+    fn try_get_tail_page_for_write(
         &self,
         page_key: PageFrameKey,
     ) -> Result<FrameWriteGuard, AccessMethodError> {
-        let mut current_page = self.read_page(page_key);
+        let mut current_page = read_page(&*self.mem_pool, page_key);
         loop {
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
+                let pfk = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                let next_page = read_page(&*self.mem_pool, pfk);
                 if next_page.frame_id() != next_frame_id {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -187,11 +171,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         loop {
             if let Some(entry) = current_page.heap_get_read_repair(pkey, ts, versions).ok() {
                 if entry.end_ts() != u64::MAX {
-                    // log_warn!(
-                    //     "successfully find a entry: {:?} with end_ts: {}",
-                    //     entry,
-                    //     entry.end_ts()
-                    // );
                     return Ok(entry);
                 }
 
@@ -205,19 +184,12 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             }
 
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                );
                 if next_page.frame_id() != next_frame_id {
-                    log_debug!("Frame of the next page has changed; fix frame id");
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -256,19 +228,12 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             }
 
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                );
                 if next_page.frame_id() != next_frame_id {
-                    log_debug!("Frame of the next page has changed; fix frame id");
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -321,9 +286,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             }
 
             if let Some((next_pid, next_fid)) = next_page_info {
-                current_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                current_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
                 drop(write_page);
             } else {
                 // first versions => ok if !repaired
@@ -332,7 +298,8 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                 }
                 let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key)?;
                 new_page.init();
-                new_page.insert_heap_no_repair(entry)?;
+                let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+                new_page.insert_heap_no_repair(&rec, entry.start_ts(), entry.end_ts())?;
                 write_page.set_next_page(new_page.get_id(), new_page.frame_id());
                 self.last_page_id
                     .store(new_page.get_id(), Ordering::Release);
@@ -378,9 +345,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             }
 
             if let Some((next_pid, next_fid)) = next_page_info {
-                current_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                current_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
                 drop(write_page);
             } else {
                 drop(write_page);
@@ -421,20 +389,22 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             }
 
             if let Some((next_pid, next_fid)) = next_page_info {
-                current_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                current_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
                 drop(write_page);
             } else {
+                let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
                 // reach last page
-                match write_page.insert_heap_no_repair(entry) {
+                match write_page.insert_heap_no_repair(&rec, entry.start_ts(), entry.end_ts()) {
                     Ok(()) => {
                         return Ok(());
                     }
                     Err(AccessMethodError::OutOfSpace) => {
                         let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key)?;
                         new_page.init();
-                        new_page.insert_heap_no_repair(entry)?;
+                        new_page.insert_heap_no_repair(&rec, entry.start_ts(), entry.end_ts())?;
                         write_page.set_next_page(new_page.get_id(), new_page.frame_id());
                         self.last_page_id
                             .store(new_page.get_id(), Ordering::Release);
@@ -492,7 +462,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
     }
 
-
     pub fn traverse_to_endofchain_for_bulk_update(
         &self,
         write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
@@ -501,21 +470,12 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         loop {
             current_page.heap_scan_bulk_update_repair(write_repair)?;
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = read_page(&*self.mem_pool, PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                );
                 if next_page.frame_id() != next_frame_id {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -531,7 +491,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         pkey: &[u8],
         ts: &Timestamp,
     ) -> Result<MvccEntry, AccessMethodError> {
-        let mut current_page = self.read_page(page_key);
+        let mut current_page = read_page(&*self.mem_pool, page_key);
         loop {
             let (found, slot_id) = current_page.search_slot(pkey);
             if found {
@@ -551,21 +511,12 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                 }
             }
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                );
                 if next_page.frame_id() != next_frame_id {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -600,19 +551,12 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                 current_page.scan_all_for_gc_read_repair(versions_map);
 
                 if let Some((next_pid, next_fid)) = current_page.next_page() {
-                    let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                        self.c_key, next_pid, next_fid,
-                    ));
+                    let next_page = read_page(
+                        &*self.mem_pool,
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                    );
                     if next_page.frame_id() != next_fid {
-                        log_debug!(
-                            "Frame of the next page has been changed. Trying to fix the frame id"
-                        );
-                        let new_frame_key = PageFrameKey::new_with_frame_id(
-                            self.c_key,
-                            next_pid,
-                            next_page.frame_id(),
-                        );
-                        let _ = fix_frame_id(current_page, &new_frame_key);
+                        let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                     }
                     let slot_cnt = next_page.slot_count();
                     if slot_cnt > 0 {
@@ -663,9 +607,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                     if let Some((next_pid, next_fid)) = current_page.next_page() {
                         // Promote the next page as the new first page.
                         self.set_first_page_id(next_pid);
-                        current_page = self.read_page(PageFrameKey::new_with_frame_id(
-                            self.c_key, next_pid, next_fid,
-                        ));
+                        current_page = read_page(
+                            &*self.mem_pool,
+                            PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                        );
                         // Continue without updating prev_page.
                         continue;
                     } else {
@@ -691,9 +636,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
 
             // Move to the next page, if any.
             if let Some((next_pid, next_fid)) = prev_page.as_ref().unwrap().next_page() {
-                current_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                current_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
             } else {
                 break;
             }
@@ -721,31 +667,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         self.last_frame_id.load(Ordering::Acquire)
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
-        loop {
-            let page = self.mem_pool.get_page_for_read(page_key);
-            match page {
-                Ok(page) => {
-                    return page;
-                }
-                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
-                    log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
-                    std::hint::spin_loop();
-                }
-                Err(MemPoolStatus::CannotEvictPage) => {
-                    log_warn!(
-                        "All frames are latched and cannot evict page to read the page: {:?}. Will retry",
-                        page_key
-                    );
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(e) => {
-                    panic!("Unexpected error: {:?}", e);
-                }
-            }
-        }
-    }
-
     pub fn first_key(&self) -> PageFrameKey {
         PageFrameKey::new_with_frame_id(
             self.c_key,
@@ -757,11 +678,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     fn first_page(&self) -> FrameReadGuard {
         let first_frame_id = self.first_frame_id.load(Ordering::Acquire);
         let first_page_id = self.first_page_id.load(Ordering::Acquire);
-        let first_page = self.read_page(PageFrameKey::new_with_frame_id(
-            self.c_key,
-            first_page_id,
-            first_frame_id,
-        ));
+        let first_page = read_page(
+            &*self.mem_pool,
+            PageFrameKey::new_with_frame_id(self.c_key, first_page_id, first_frame_id),
+        );
         if first_page.frame_id() != first_frame_id {
             log_debug!("Frame of the first page has been changed. Trying to fix the frame id");
             self.first_frame_id
@@ -822,50 +742,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         Ok(())
     }
 
-    pub fn scan_key_vec(
-        &self,
-        search_key: &[u8],
-        ts: &Timestamp,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
-        use std::collections::HashMap;
-
-        // pkey, st, mvccentry
-        let mut best_map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-
-        let mut current_page = self.first_page();
-        loop {
-            let page_result = current_page.scan_key_heap_into_best(search_key, ts)?;
-            for (pkey, val) in page_result {
-                best_map.insert(pkey, val);
-            }
-
-            if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
-                if next_page.frame_id() != next_fid {
-                    log_debug!(
-                        "Frame of the next page has been changed. Trying to fix the frame id"
-                    );
-                    let new_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
-                    let _ = fix_frame_id(current_page, &new_frame_key);
-                }
-
-                if next_page.slot_count() > 0 && next_page.unsafe_slot(0).start_ts() > *ts {
-                    break;
-                }
-
-                current_page = next_page;
-            } else {
-                break;
-            }
-        }
-
-        // return pkey, val from entry
-        Ok(best_map.into_iter().collect::<Vec<(Vec<u8>, Vec<u8>)>>())
-    }
-
     pub fn scan_delta(
         self: &Arc<Self>,
         from: Timestamp,
@@ -873,7 +749,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         delta_map: &mut HashMap<Vec<u8>, RowDelta>,
     ) {
         // Get the full scanner (which iterates over all entries that pass the ts filter)
-        let mut scanner = HeapChainScanner::new(self, to);
+        let mut scanner = HeapChainScanner::new_delta_scan(self, from, to, None);
 
         // Iterate over all entries from the chain.
         while !scanner.is_end() {
@@ -907,7 +783,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         versions: &mut HashMap<Vec<u8>, Vec<(u64, MvccEntryLoc, bool)>>,
     ) {
         // Get the full scanner (which iterates over all entries that pass the ts filter)
-        let mut scanner = HeapChainScanner::new_with_read_repair(self, to, versions);
+        let mut scanner = HeapChainScanner::new_delta_scan(self, from, to, Some(versions));
 
         // Iterate over all entries from the chain.
         while !scanner.is_end() {
@@ -937,40 +813,40 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         &self,
         search_key: &[u8],
         ts: &Timestamp,
-        versions_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+        mut versions_map: Option<&mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
-        let mut res: BTreeMap<Vec<u8>, Vec<u8>>/*pkey -> value */ = BTreeMap::new();
+        let mut res = HashMap::new();
         {
             let mut current_page = self.first_page();
             loop {
-                let page_result = current_page.scan_key_heap_into_best_read_repair(
-                    search_key,
-                    ts,
-                    versions_map,
-                )?;
-                for (pkey, value) in page_result {
-                    res.insert(pkey, value);
+                let header = current_page.unsafe_header();
+
+                if ts < &header.page_min_start_ts() {
+                    // do nothing
+                } else if header.recent_slot_cnt() == 0 && ts >= &header.page_max_end_ts() {
+                    // do nothing
+                } else {
+                    current_page.scan_key_heap_read_repair(
+                        search_key,
+                        ts,
+                        &mut res,
+                        &mut versions_map,
+                    )?;
                 }
 
                 if let Some((next_pid, next_fid)) = current_page.next_page() {
-                    let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                        self.c_key, next_pid, next_fid,
-                    ));
+                    let next_page = read_page(
+                        &*self.mem_pool,
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                    );
                     if next_page.frame_id() != next_fid {
-                        log_debug!(
-                            "Frame of the next page has been changed. Trying to fix the frame id"
-                        );
-                        let new_frame_key = PageFrameKey::new_with_frame_id(
-                            self.c_key,
-                            next_pid,
-                            next_page.frame_id(),
-                        );
-                        let _ = fix_frame_id(current_page, &new_frame_key);
+                        let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                     }
                     current_page = next_page;
-                } else {
-                    break;
+                    continue;
                 }
+                // no next page in current chain
+                break;
             }
         }
 
@@ -1001,11 +877,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
 
             // Traverse to the next page if available.
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                current_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
+                current_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                );
             } else {
                 break;
             }
@@ -1029,15 +904,16 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             page_count += 1;
             let kv = current_page.slot_count();
             total_kv_count += kv;
-            let used_bytes = current_page.header().total_bytes_used();
+            let used_bytes = current_page.unsafe_header().total_bytes_used();
             let usage = (used_bytes as f64 / AVAILABLE_PAGE_SIZE as f64) * 100.0;
             usage_sum += usage;
             max_usage = max_usage.max(usage as f64);
             min_usage = min_usage.min(usage as f64);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
-                current_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                current_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
             } else {
                 break;
             }
@@ -1046,26 +922,15 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     }
 }
 
-/// Opportunistically try to fix the next page frame id
-fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> FrameReadGuard<'a> {
-    match this.try_upgrade(true) {
-        Ok(mut write_guard) => {
-            write_guard.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
-            log_debug!("Fixed frame id of the next page");
-            write_guard.downgrade()
-        }
-        Err(read_guard) => {
-            log_debug!("Failed to fix frame id of the next page");
-            read_guard
-        }
-    }
+enum FilterMode {
+    FullScan,
+    FilterByTs(Timestamp),
+    FilterByDelta(Timestamp, Timestamp),
 }
 
 pub struct HeapChainScanner<'a, T: MemPool> {
     chain: Arc<HeapHashChain<T>>,
-    ts: Timestamp,
-    filter_by_ts: bool,
-
+    filter_mode: FilterMode,
     current_page: Option<FrameReadGuard<'static>>,
     current_slot_id: usize,
 
@@ -1073,22 +938,21 @@ pub struct HeapChainScanner<'a, T: MemPool> {
     finished: bool,
 
     read_repair: Option<&'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
-    write_repair: Option<&'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
 }
 
 impl<'a, T: MemPool + 'static> HeapChainScanner<'a, T> {
     pub fn new(chain: &Arc<HeapHashChain<T>>, ts: Timestamp) -> Self {
-        Self {
+        let mut a = Self {
             chain: chain.clone(),
-            ts,
-            filter_by_ts: true,
+            filter_mode: FilterMode::FilterByTs(ts),
             current_page: None,
             current_slot_id: 0,
             initialized: false,
             finished: false,
             read_repair: None,
-            write_repair: None,
-        }
+        };
+        a.initialize();
+        a
     }
 
     pub fn new_with_read_repair(
@@ -1096,48 +960,50 @@ impl<'a, T: MemPool + 'static> HeapChainScanner<'a, T> {
         ts: Timestamp,
         versions: &'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
     ) -> Self {
-        Self {
+        let mut a = Self {
             chain: chain.clone(),
-            ts,
-            filter_by_ts: true,
+            filter_mode: FilterMode::FilterByTs(ts),
             current_page: None,
             current_slot_id: 0,
             initialized: false,
             finished: false,
             read_repair: Some(versions),
-            write_repair: None,
-        }
+        };
+        a.initialize();
+        a
     }
 
     pub fn new_full_scan(chain: &Arc<HeapHashChain<T>>) -> Self {
-        Self {
+        let mut a = Self {
             chain: chain.clone(),
-            ts: u64::MAX, // ts is irrelevant in full scan
-            filter_by_ts: false,
+            filter_mode: FilterMode::FullScan,
             current_page: None,
             current_slot_id: 0,
             initialized: false,
             finished: false,
             read_repair: None,
-            write_repair: None,
-        }
+        };
+        a.initialize();
+        a
     }
 
-    pub fn new_with_write_repair(
+    pub fn new_delta_scan(
         chain: &Arc<HeapHashChain<T>>,
-        versions: &'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+        from: Timestamp,
+        to: Timestamp,
+        versions: Option<&'a mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>>,
     ) -> Self {
-        Self {
+        let mut a = Self {
             chain: chain.clone(),
-            ts: u64::MAX, // ts is irrelevant in full scan
-            filter_by_ts: false,
+            filter_mode: FilterMode::FilterByDelta(from, to),
             current_page: None,
             current_slot_id: 0,
             initialized: false,
             finished: false,
-            read_repair: None,
-            write_repair: Some(versions),
-        }
+            read_repair: versions,
+        };
+        a.initialize();
+        a
     }
 
     fn initialize(&mut self) {
@@ -1146,6 +1012,26 @@ impl<'a, T: MemPool + 'static> HeapChainScanner<'a, T> {
             unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(first_page) };
         self.current_page = Some(first_page);
         self.current_slot_id = 0;
+        let header = self.current_page.as_ref().unwrap().unsafe_header();
+        let (min_st, max_end, recent_cnt) = (
+            header.page_min_start_ts(),
+            header.page_max_end_ts(),
+            header.recent_slot_cnt(),
+        );
+        if let FilterMode::FilterByTs(filter_ts) = self.filter_mode {
+            if filter_ts < min_st {
+                self.move_to_next_page();
+            } else if recent_cnt == 0 && filter_ts >= max_end {
+                self.move_to_next_page();
+            }
+        } else if let FilterMode::FilterByDelta(from, to) = self.filter_mode {
+            if to < min_st {
+                self.move_to_next_page();
+            } else if recent_cnt == 0 && from >= max_end {
+                self.move_to_next_page();
+            }
+        }
+
         self.initialized = true;
     }
 
@@ -1157,16 +1043,51 @@ impl<'a, T: MemPool + 'static> HeapChainScanner<'a, T> {
     pub fn is_end(&self) -> bool {
         self.finished
     }
+
+    fn move_to_next_page(&mut self) -> bool {
+        loop {
+            let next_page = <Page as HashJoinPage>::next_page(&self.current_page.as_ref().unwrap());
+            if let Some((next_pid, next_fid)) = next_page {
+                let next_page = read_page(
+                    &*self.chain.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.chain.c_key, next_pid, next_fid),
+                );
+                let next_page = unsafe {
+                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
+                };
+                self.current_page = Some(next_page);
+                self.current_slot_id = 0;
+                let header = self.current_page.as_ref().unwrap().unsafe_header();
+
+                if let FilterMode::FilterByTs(filter_ts) = self.filter_mode {
+                    if filter_ts < header.page_min_start_ts() {
+                        continue;
+                    }
+                    if header.recent_slot_cnt() == 0 && filter_ts >= header.page_max_end_ts() {
+                        continue;
+                    }
+                } else if let FilterMode::FilterByDelta(from, to) = self.filter_mode {
+                    if to < header.page_min_start_ts() {
+                        continue;
+                    } else if header.recent_slot_cnt() == 0 && from >= header.page_max_end_ts() {
+                        continue;
+                    }
+                }
+                break;
+            } else {
+                // no more page in heap chain
+                self.finish();
+                return true;
+            }
+        }
+        return false;
+    }
 }
 
-impl<'a, T: MemPool+'static> Iterator for HeapChainScanner<'a, T> {
+impl<'a, T: MemPool + 'static> Iterator for HeapChainScanner<'a, T> {
     type Item = MvccEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.initialized {
-            self.initialize();
-        }
-
         if self.finished {
             return None;
         }
@@ -1180,66 +1101,63 @@ impl<'a, T: MemPool+'static> Iterator for HeapChainScanner<'a, T> {
             let current_page = self.current_page.as_ref().unwrap();
 
             if self.current_slot_id < current_page.slot_count() {
-                {
-                    let slot = current_page.unsafe_slot(self.current_slot_id);
-                    if self.filter_by_ts && slot.end_ts() <= self.ts {
-                        self.current_slot_id += 1;
-                        continue;
-                    }
-                }
-                let entry = current_page
-                    .get_entry_at_slot_id(self.current_slot_id)
-                    .unwrap();
+                let slot = current_page.unsafe_slot(self.current_slot_id);
+                let record = current_page.record_ref_from_slotid(self.current_slot_id);
 
+                // read repair
                 if let Some(repair) = &mut self.read_repair {
-                    let pkey = entry.pkey();
-                    (*repair)
-                        .entry(pkey.to_vec())
-                        .or_insert_with(Vec::new)
-                        .push((
-                            entry.start_ts(),
+                    let pkey = record.pkey();
+                    if let Some(vec_entry) = (*repair).get_mut(pkey) {
+                        vec_entry.push((
+                            slot.start_ts(),
                             MvccEntryLoc::new(current_page.get_id(), self.current_slot_id as u32),
-                            entry.end_ts() == Timestamp::MAX,
+                            slot.end_ts() == Timestamp::MAX,
                         ));
+                    } else {
+                        (*repair).insert(
+                            pkey.to_vec(),
+                            vec![(
+                                slot.start_ts(),
+                                MvccEntryLoc::new(
+                                    current_page.get_id(),
+                                    self.current_slot_id as u32,
+                                ),
+                                slot.end_ts() == Timestamp::MAX,
+                            )],
+                        );
+                    }
                 }
 
                 self.current_slot_id += 1;
-                if self.filter_by_ts {
-                    if self.ts < entry.start_ts()
-                        || (entry.end_ts <= self.ts && entry.end_ts != u64::MAX)
+                if let FilterMode::FilterByTs(filter_ts) = self.filter_mode {
+                    if filter_ts < slot.start_ts()
+                        || (slot.end_ts() <= filter_ts && slot.end_ts() != u64::MAX)
                     {
                         continue;
-                    } else {
-                        return Some(entry);
                     }
-                } else {
-                    return Some(entry);
+                } else if let FilterMode::FilterByDelta(from, to) = self.filter_mode {
+                    if to < slot.start_ts() || (slot.end_ts() <= from && slot.end_ts() != u64::MAX)
+                    {
+                        continue;
+                    }
                 }
+                // 1. full scan
+                // 2. filter by ts && ts fits in the range
+                // 3. delta scan && slots ts range has overlap with delta range
+                //    need further processing in caller function.
+                return Some(MvccEntry::new(
+                    record.key().to_vec(),
+                    record.pkey().to_vec(),
+                    record.val().to_vec(),
+                    slot.start_ts(),
+                    slot.end_ts(),
+                ));
             } else {
                 // Move to the next page
-                if let Some((next_pid, next_fid)) = current_page.next_page() {
-                    let next_page = self.chain.read_page(PageFrameKey::new_with_frame_id(
-                        self.chain.c_key,
-                        next_pid,
-                        next_fid,
-                    ));
-                    // // early termination if the first entry of the next page is greater than ts in ful
-                    // if self.filter_by_ts && next_page.slot_count() > 0 {
-                    //     if next_page.unsafe_slot(0).start_ts() > self.ts {
-                    //         drop(next_page);
-                    //         self.finish();
-                    //         return None;
-                    //     }
-                    // }
-                    let next_page = unsafe {
-                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
-                    };
-                    self.current_page = Some(next_page);
-                    self.current_slot_id = 0;
-                } else {
-                    self.finish();
+                if self.move_to_next_page() {
                     return None;
                 }
+                continue;
             }
         }
     }

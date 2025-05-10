@@ -2,7 +2,9 @@ use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
     mvcc_index::{
-        hash_common::{read_repair_btree, read_repair_vec, BulkUpdate, KVWithTs, MvccEntryLoc, RowDelta},
+        hash_common::{
+            read_repair_btree, read_repair_vec, BulkUpdate, KVWithTs, MvccEntryLoc, RowDelta,
+        },
         Delta, MvccEntry, MvccIndex, TxId,
     },
     page::{Page, PageId},
@@ -173,35 +175,6 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         Ok(())
     }
 
-    /// Deletes a key-value pair from the hash join table.
-    // pub fn delete(&self, key: &[u8], pkey: &[u8], ts: &Timestamp) -> Result<(), AccessMethodError> {
-    //     let index = self.get_bucket_index(key);
-    //     let heap_chain = &self.bucket_entries[index];
-
-    //     heap_chain.delete(pkey, ts)
-    // }
-
-    /// Read page with given PageFrameKey
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
-        loop {
-            let page = self.mem_pool.get_page_for_read(page_key);
-            match page {
-                Ok(page) => return page,
-                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
-                    log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
-                    std::hint::spin_loop();
-                }
-                Err(MemPoolStatus::CannotEvictPage) => {
-                    log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(e) => {
-                    panic!("Unexpected error: {:?}", e);
-                }
-            }
-        }
-    }
-
     fn get_bucket_index(&self, key: &[u8]) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
@@ -253,7 +226,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
             if e.value().is_empty() {
                 None
             } else {
-                Some(e.value().to_vec())
+                Some(e.value)
             }
         });
         Ok(v)
@@ -282,7 +255,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let entry =
             MvccEntry::new_with_tx_id(key.clone(), pkey.clone(), value, ts, u64::MAX, tx_id);
         if self.update_bulk_repair.get_flag() {
-            self.update_bulk_repair.put_updated_pkeys(&pkey, self.get_bucket_index(&key));
+            self.update_bulk_repair
+                .put_updated_pkeys(&pkey, self.get_bucket_index(&key));
             self.update(&entry.key(), &entry.pkey(), &entry)
         } else {
             self.update_write_reapair(&key, &pkey, &entry)
@@ -433,7 +407,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
 
-        let pk_v = chain.scan_key_vec(key, &ts)?;
+        let pk_v = chain.scan_key_vec_read_repair(key, &ts, None)?;
 
         let mapped: IntoIter<(Vec<u8>, Vec<u8>)> = pk_v.into_iter();
 
@@ -448,7 +422,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
 
-        let mvccs = chain.scan_key_vec(key, &ts)?;
+        let mvccs = chain.scan_key_vec_read_repair(key, &ts, None)?;
 
         Ok(mvccs)
     }
@@ -471,13 +445,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
 
         let mvccs = if is_need_repair {
             let mut versions_map = HashMap::new();
-            let rett = chain.scan_key_vec_read_repair(key, &ts, &mut versions_map)?;
+            let rett = chain.scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
             for btmap in versions_map.into_values() {
                 read_repair_vec(&self.mem_pool, &btmap, self.c_key);
             }
             rett
         } else {
-            chain.scan_key_vec(key, &ts)?
+            chain.scan_key_vec_read_repair(key, &ts, None)?
         };
 
         Ok(mvccs)
@@ -551,6 +525,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
                 for versions in versions_map.into_values() {
                     read_repair_vec(&self.mem_pool, &versions, self.c_key);
                 }
+
+                log_warn!("stat: {:?}", bucket.stat());
                 best_candidates.into_values()
             } else {
                 bucket.scan_unique(ts, &mut best_candidates)?;
@@ -574,7 +550,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let mut updated_pkeys = self.update_bulk_repair.get_updated_pkeys();
         for (idx, bulk_versions_bucket) in updated_pkeys.iter_mut().enumerate() {
             let chain = &self.bucket_entries[idx];
-            chain.traverse_to_endofchain_for_bulk_update(bulk_versions_bucket);
+            chain.traverse_to_endofchain_for_bulk_update(bulk_versions_bucket)?;
             for versions in bulk_versions_bucket.values() {
                 read_repair_vec(&self.mem_pool, versions, self.c_key);
             }
