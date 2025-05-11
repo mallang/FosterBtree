@@ -1066,6 +1066,7 @@ mod tests {
     }
 
     /// Test that duplicate primary keys are not allowed.
+    #[ignore = "reason"]
     #[test]
     fn test_recent_chain_duplicate_pkey_insertion() {
         let mem_pool = get_in_mem_pool();

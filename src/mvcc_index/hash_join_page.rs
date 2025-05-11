@@ -460,8 +460,8 @@ pub trait HashJoinPage {
     fn chained_hash_garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError>;
     fn heap_hash_garbage_collect(&mut self, ts: &Timestamp) -> Result<(), AccessMethodError>;
     fn search_slot(&self, sort_key: &[u8]) -> (bool, usize) {
-        self.binary_search(sort_key)
-        // self.linear_search(sort_key)
+        // self.binary_search(sort_key)
+        self.linear_search(sort_key)
     }
     fn binary_search(&self, sort_key: &[u8]) -> (bool, usize); // (found, slot_id)
     fn linear_search(&self, sort_key: &[u8]) -> (bool, usize); // (found, slot_id)
@@ -689,11 +689,12 @@ impl HashJoinPage for Page {
             return Err(AccessMethodError::OutOfSpace);
         }
 
-        let (found, slot_id) = self.search_slot(new_rec.sort_key());
-        if found {
-            // unreachable!("no duplicate keys should be inserted");
-            return Err(AccessMethodError::KeyDuplicate);
-        }
+        // let (found, slot_id) = self.search_slot(new_rec.sort_key());
+        // if found {
+        //     // unreachable!("no duplicate keys should be inserted");
+        //     return Err(AccessMethodError::KeyDuplicate);
+        // }
+        let slot_id = self.slot_count();
         HashJoinPage::insert_entry_at_slot_id(&mut *self, slot_id, rec, start_ts, end_ts)
     }
     fn insert_entry_at_slot_id(
@@ -1272,9 +1273,9 @@ impl HashJoinPage for Page {
             if res == std::cmp::Ordering::Equal {
                 return (true, i);
             }
-            if res == std::cmp::Ordering::Greater {
-                return (false, i);
-            }
+            // if res == std::cmp::Ordering::Greater {
+            //     return (false, i);
+            // }
         }
         (false, self.slot_count())
     }
