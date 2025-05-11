@@ -80,27 +80,22 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableScanner<T> {
                 self.cur_slot_idx = 0;
             }
 
-            if self.cur_slot_idx < self.current_page.as_ref().unwrap().slot_count() {
-                let entry = match <Page as HashJoinPage>::get_entry_at_slot_id(
-                    &*self.current_page.as_ref().unwrap(),
+            let current_page = self.current_page.as_ref().unwrap();
+            if self.cur_slot_idx < current_page.slot_count() {
+                let slot = current_page.unsafe_slot(self.cur_slot_idx);
+                if self.ts.is_some()
+                    && (self.ts.as_ref().unwrap() < &slot.start_ts()
+                        || (self.ts.as_ref().unwrap() >= &slot.end_ts()
+                            && slot.end_ts() != u64::MAX))
+                {
+                    self.cur_slot_idx += 1;
+                    continue;
+                }
+                let entry = <Page as HashJoinPage>::get_entry_at_slot_id(
+                    &current_page,
                     self.cur_slot_idx,
-                ) {
-                    Ok(entry) => {
-                        self.cur_slot_idx += 1;
-                        if self.ts.is_some()
-                            && (self.ts.as_ref().unwrap() < &entry.start_ts()
-                                || (self.ts.as_ref().unwrap() >= &entry.end_ts()
-                                    && entry.end_ts() != u64::MAX))
-                        {
-                            continue;
-                        }
-                        entry
-                    }
-                    Err(e) => {
-                        panic!("unexpected error: {:?}", e);
-                    }
-                };
-
+                ).unwrap();
+                self.cur_slot_idx += 1;
                 return Some(entry);
             } else {
                 self.current_page = None;
@@ -180,37 +175,32 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableKeyScanner<T> {
                 self.cur_slot_idx = 0;
             }
 
+            let current_page = self.current_page.as_ref().unwrap();
             if self.cur_slot_idx < self.current_page.as_ref().unwrap().slot_count() {
-                let entry = match <Page as HashJoinPage>::get_entry_at_slot_id(
-                    &*self.current_page.as_ref().unwrap(),
+                let slot = current_page.unsafe_slot(self.cur_slot_idx);
+                let rec = current_page.record_ref_from_slot(slot);
+                if self.ts.is_some()
+                    && (self.ts.as_ref().unwrap() < &slot.start_ts()
+                        || (self.ts.as_ref().unwrap() >= &slot.end_ts()
+                            && slot.end_ts()!= u64::MAX))
+                {
+                    self.cur_slot_idx += 1;
+                    continue;
+                }
+
+                if rec.key() != self.key {
+                    self.cur_slot_idx += 1;
+                    continue;
+                }
+
+                let entry = <Page as HashJoinPage>::get_entry_at_slot_id(
+                    &current_page,
                     self.cur_slot_idx,
-                ) {
-                    Ok(entry) => {
-                        self.cur_slot_idx += 1;
-                        if self.ts.is_some()
-                            && (self.ts.as_ref().unwrap() < &entry.start_ts()
-                                || (self.ts.as_ref().unwrap() >= &entry.end_ts()
-                                    && entry.end_ts() != u64::MAX))
-                        {
-                            continue;
-                        }
-
-                        if entry.key() != self.key {
-                            continue;
-                        }
-                        entry
-                    }
-                    Err(e) => {
-                        panic!("unexpected error: {:?}", e);
-                    }
-                };
-
+                ).unwrap();
+                self.cur_slot_idx += 1;
                 return Some(entry);
             } else {
-                if !self
-                    .current_page
-                    .as_ref()
-                    .unwrap()
+                if !current_page
                     .unsafe_header()
                     .is_full()
                 {
