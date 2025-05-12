@@ -91,10 +91,9 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableScanner<T> {
                     self.cur_slot_idx += 1;
                     continue;
                 }
-                let entry = <Page as HashJoinPage>::get_entry_at_slot_id(
-                    &current_page,
-                    self.cur_slot_idx,
-                ).unwrap();
+                let entry =
+                    <Page as HashJoinPage>::get_entry_at_slot_id(&current_page, self.cur_slot_idx)
+                        .unwrap();
                 self.cur_slot_idx += 1;
                 return Some(entry);
             } else {
@@ -182,7 +181,7 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableKeyScanner<T> {
                 if self.ts.is_some()
                     && (self.ts.as_ref().unwrap() < &slot.start_ts()
                         || (self.ts.as_ref().unwrap() >= &slot.end_ts()
-                            && slot.end_ts()!= u64::MAX))
+                            && slot.end_ts() != u64::MAX))
                 {
                     self.cur_slot_idx += 1;
                     continue;
@@ -193,17 +192,13 @@ impl<T: MemPool + 'static> Iterator for LinearSubTableKeyScanner<T> {
                     continue;
                 }
 
-                let entry = <Page as HashJoinPage>::get_entry_at_slot_id(
-                    &current_page,
-                    self.cur_slot_idx,
-                ).unwrap();
+                let entry =
+                    <Page as HashJoinPage>::get_entry_at_slot_id(&current_page, self.cur_slot_idx)
+                        .unwrap();
                 self.cur_slot_idx += 1;
                 return Some(entry);
             } else {
-                if !current_page
-                    .unsafe_header()
-                    .is_full()
-                {
+                if !current_page.unsafe_header().is_full() {
                     self.is_end = true;
                     return None;
                 }

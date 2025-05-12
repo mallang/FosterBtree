@@ -463,7 +463,8 @@ impl HashCommonPage for Page {
         self.set_slot_hash_key_prefix(idx, &hk_pref);
 
         let mut pk_pref = [0u8; 8];
-        pk_pref[..entry.pkey().len().min(8)].copy_from_slice(&entry.pkey()[..entry.pkey().len().min(8)]);
+        pk_pref[..entry.pkey().len().min(8)]
+            .copy_from_slice(&entry.pkey()[..entry.pkey().len().min(8)]);
         self.set_slot_pkey_prefix(idx, &pk_pref);
 
         self.set_hdr_slot_count(slot_cnt + 1);
@@ -565,8 +566,7 @@ impl HeapPage for Page {
         if !inserted {
             match self.insert(entry) {
                 Ok(_) => did_insert = true,
-                Err(AccessMethodError::OutOfSpace) => {
-                }
+                Err(AccessMethodError::OutOfSpace) => {}
                 Err(e) => {
                     return Err(e);
                 }
@@ -580,7 +580,6 @@ impl HeapPage for Page {
             (false, false) => Err(AccessMethodError::KeyNotFound),
         }
     }
-    
 }
 pub trait RecentPage: HashCommonPage {}
 pub trait HistoryPage: HashCommonPage {}
