@@ -8,8 +8,6 @@ use memoffset::offset_of;
 use std::mem::size_of;
 use std::{cmp::Ordering, result::Result::Ok, sync::atomic::AtomicU64};
 
-use super::hash_join_page::slot;
-
 /* ========================================================================== */
 /*                              Layout constants                              */
 /* ========================================================================== */
@@ -391,6 +389,13 @@ pub trait HashCommonPage: PageOps {
         idx: usize,
     ) -> Result<(), AccessMethodError>;
 
+    fn update(&mut self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError>;
+    fn update_entry_at_idx(
+        &mut self,
+        entry: &MvccEntry,
+        idx: usize,
+    ) -> Result<MvccEntry, AccessMethodError>;
+
     fn search_pkey(&self, pkey: &[u8]) -> (bool, usize); // (found, idx)
 }
 
@@ -408,7 +413,7 @@ impl HashCommonPage for Page {
     }
 
     fn insert(&mut self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let payload_len = entry.key.len() + entry.pkey.len() + entry.value.len() + SLOT_SIZE;
+        let payload_len = entry.key().len() + entry.pkey().len() + entry.value().len() + SLOT_SIZE;
         if AVAILABLE_PAGE_SIZE < payload_len {
             return Err(AccessMethodError::RecordTooLarge);
         } else if self.hdr_rec_start_off() - slot_base(self.hdr_slot_count()) < payload_len {
@@ -427,7 +432,7 @@ impl HashCommonPage for Page {
     ) -> Result<(), AccessMethodError> {
         let slot_cnt = self.hdr_slot_count();
 
-        let payload_len = entry.key.len() + entry.pkey.len() + entry.value.len();
+        let payload_len = entry.key().len() + entry.pkey().len() + entry.value().len();
         let new_rec_start = self.hdr_rec_start_off() - payload_len;
 
         if idx < slot_cnt {
@@ -438,50 +443,80 @@ impl HashCommonPage for Page {
         }
 
         let mut cur = new_rec_start;
-        self[cur..cur + entry.key.len()].copy_from_slice(&entry.key);
-        cur += entry.key.len();
-        self[cur..cur + entry.pkey.len()].copy_from_slice(&entry.pkey);
-        cur += entry.pkey.len();
-        self[cur..cur + entry.value.len()].copy_from_slice(&entry.value);
+        self[cur..cur + entry.key().len()].copy_from_slice(entry.key());
+        cur += entry.key().len();
+        self[cur..cur + entry.pkey.len()].copy_from_slice(entry.pkey());
+        cur += entry.pkey().len();
+        self[cur..cur + entry.value.len()].copy_from_slice(entry.value());
 
         self.set_slot_offset(idx, new_rec_start);
-        self.set_slot_hash_key_size(idx, entry.key.len());
-        self.set_slot_pkey_size(idx, entry.pkey.len());
-        self.set_slot_val_size(idx, entry.value.len());
-        self.set_slot_start_ts(idx, entry.start_ts);
-        self.set_slot_end_ts(idx, entry.end_ts);
-        self.set_slot_tx_id(idx, entry.tx_id);
+        self.set_slot_hash_key_size(idx, entry.key().len());
+        self.set_slot_pkey_size(idx, entry.pkey().len());
+        self.set_slot_val_size(idx, entry.value().len());
+        self.set_slot_start_ts(idx, entry.start_ts());
+        self.set_slot_end_ts(idx, entry.end_ts());
+        self.set_slot_tx_id(idx, entry.tx_id());
 
         let mut hk_pref = [0u8; 8];
-        hk_pref[..entry.key.len().min(8)].copy_from_slice(&entry.key[..entry.key.len().min(8)]);
+        hk_pref[..entry.key().len().min(8)]
+            .copy_from_slice(&entry.key()[..entry.key().len().min(8)]);
         self.set_slot_hash_key_prefix(idx, &hk_pref);
 
         let mut pk_pref = [0u8; 8];
-        pk_pref[..entry.pkey.len().min(8)].copy_from_slice(&entry.pkey[..entry.pkey.len().min(8)]);
+        pk_pref[..entry.pkey().len().min(8)].copy_from_slice(&entry.pkey()[..entry.pkey().len().min(8)]);
         self.set_slot_pkey_prefix(idx, &pk_pref);
 
         self.set_hdr_slot_count(slot_cnt + 1);
         self.set_hdr_rec_start_off(new_rec_start);
         self.set_hdr_total_bytes_used(self.hdr_total_bytes_used() + SLOT_SIZE + payload_len);
 
-        if entry.start_ts < self.hdr_min_start_ts() {
-            self.set_hdr_min_start_ts(entry.start_ts);
+        if entry.start_ts() < self.hdr_min_start_ts() {
+            self.set_hdr_min_start_ts(entry.start_ts());
         }
-        if entry.end_ts == Timestamp::MAX {
+        if entry.end_ts() == Timestamp::MAX {
             self.set_hdr_recent_entry_cnt(self.hdr_recent_entry_cnt() + 1);
-        } else if entry.end_ts > self.hdr_max_end_ts() {
-            self.set_hdr_max_end_ts(entry.end_ts);
+        } else if entry.end_ts() > self.hdr_max_end_ts() {
+            self.set_hdr_max_end_ts(entry.end_ts());
         }
 
         Ok(())
     }
 
+    fn update(&mut self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError> {
+        let (found, idx) = self.search_pkey(pkey);
+        if !found {
+            return Err(AccessMethodError::KeyNotFound);
+        }
+        self.update_entry_at_idx(entry, idx)
+    }
+
+    fn update_entry_at_idx(
+        &mut self,
+        entry: &MvccEntry,
+        idx: usize,
+    ) -> Result<MvccEntry, AccessMethodError> {
+        // only vlaue and end_ts are updated now
+        let old_val = self.slot_value(idx).to_vec();
+        let old_start_ts = self.slot_start_ts(idx);
+
+        self.set_slot_value(idx, entry.value());
+        self.set_slot_start_ts(idx, entry.start_ts());
+
+        Ok(MvccEntry::new(
+            entry.key().to_vec(),
+            entry.pkey().to_vec(),
+            old_val,
+            old_start_ts,
+            entry.end_ts,
+        ))
+    }
+
     fn search_pkey(&self, pkey: &[u8]) -> (bool, usize) {
         let slot_cnt = self.hdr_slot_count();
         for idx in 0..slot_cnt {
-            if self.slot_pkey_size(idx) != pkey.len()
+            if self.slot_pkey_size(idx) == pkey.len()
                 && self.slot_pkey_prefix(idx)[..pkey.len().min(8)] == pkey[..pkey.len().min(8)]
-                && self.slot_pkey(idx) == pkey
+                && (pkey.len() <= 8 || self.slot_pkey(idx) == pkey)
             {
                 return (true, idx);
             }
@@ -490,7 +525,63 @@ impl HashCommonPage for Page {
     }
 }
 
-pub trait HeapPage: HashCommonPage {}
+pub trait HeapPage: HashCommonPage {
+    fn update_write_repair(
+        &mut self,
+        entry: &MvccEntry,
+        inserted: bool,
+        repaired: bool,
+    ) -> Result<(), AccessMethodError>;
+}
+impl HeapPage for Page {
+    fn update_write_repair(
+        &mut self,
+        entry: &MvccEntry,
+        inserted: bool,
+        repaired: bool,
+    ) -> Result<(), AccessMethodError> {
+        let mut did_repair = repaired;
+        let mut did_insert = inserted;
+
+        if !repaired {
+            for idx in 0..self.hdr_slot_count() {
+                if self.slot_end_ts(idx) == Timestamp::MAX
+                    && self.slot_pkey_size(idx) == entry.pkey().len()
+                    && self.slot_pkey_prefix(idx)[..entry.pkey().len().min(8)]
+                        == entry.pkey()[..entry.pkey().len().min(8)]
+                    && (entry.pkey().len() <= 8 || self.slot_pkey(idx) == entry.pkey())
+                {
+                    did_repair = true;
+                    self.set_slot_end_ts(idx, entry.start_ts());
+                    if self.hdr_max_end_ts() < entry.start_ts() {
+                        self.set_hdr_max_end_ts(entry.start_ts());
+                    }
+                    self.set_hdr_recent_entry_cnt(self.hdr_recent_entry_cnt() - 1);
+                    break;
+                }
+            }
+        }
+
+        if !inserted {
+            match self.insert(entry) {
+                Ok(_) => did_insert = true,
+                Err(AccessMethodError::OutOfSpace) => {
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        match (did_repair, did_insert) {
+            (true, true) => Ok(()),
+            (true, false) => Err(AccessMethodError::UpdateReapiredButNotInseted),
+            (false, true) => Err(AccessMethodError::UpdateInsertedButNotReapired),
+            (false, false) => Err(AccessMethodError::KeyNotFound),
+        }
+    }
+    
+}
 pub trait RecentPage: HashCommonPage {}
 pub trait HistoryPage: HashCommonPage {}
 
