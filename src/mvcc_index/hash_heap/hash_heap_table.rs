@@ -42,7 +42,8 @@ pub struct HeapHashTable<T: MemPool + 'static> {
     bucket_count: usize,
     bucket_entries: Vec<Arc<HeapHashChain<T>>>,
     // tx_status: HashMap<TxId, TxInfo>, // Neet to written down to disk later...
-    repair_ts: AtomicU64,
+    read_repair_ts: AtomicU64,
+    latest_update_ts: AtomicU64,
     // bulk update
     update_bulk_repair: BulkUpdate,
 }
@@ -73,7 +74,8 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
             meta_frame_id,
             bucket_count: num_buckets,
             bucket_entries,
-            repair_ts: AtomicU64::new(0),
+            read_repair_ts: AtomicU64::new(0),
+            latest_update_ts: AtomicU64::new(0),
             update_bulk_repair: BulkUpdate::new(num_buckets),
         }
     }
@@ -240,6 +242,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.latest_update_ts.store(ts, Ordering::SeqCst);
         let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
         self.update(&entry.key(), &entry.pkey(), &entry)
     }
@@ -252,6 +255,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.latest_update_ts.store(ts, Ordering::SeqCst);
         let entry =
             MvccEntry::new_with_tx_id(key.clone(), pkey.clone(), value, ts, u64::MAX, tx_id);
         if self.update_bulk_repair.get_flag() {
@@ -328,9 +332,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
-        let is_need_repair = if to_ts > repair_ts {
-            self.repair_ts.store(to_ts, Ordering::SeqCst);
+        let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let is_need_repair = if to_ts > repair_ts && repair_ts < latest_update_ts  {
+            let new_repair_ts = std::cmp::min(to_ts, latest_update_ts);
+            self.read_repair_ts.store(new_repair_ts, Ordering::SeqCst);
             true
         } else {
             false
@@ -432,8 +438,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
-        let is_need_repair = if ts > repair_ts {
+        let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts && repair_ts < latest_update_ts {
             // scan key can not repair the whole table
             true
         } else {
@@ -508,9 +515,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
-        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
-        let is_need_repair = if ts > repair_ts {
-            self.repair_ts.store(ts, Ordering::SeqCst);
+        let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts && repair_ts < latest_update_ts {
+            let new_repair_ts = std::cmp::min(ts, latest_update_ts);
+            self.read_repair_ts.store(new_repair_ts, Ordering::SeqCst);
             true
         } else {
             false

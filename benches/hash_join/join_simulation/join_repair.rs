@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const PKEY_PER_JOIN_KEY: usize = 500;
-const JOIN_KEY_PER_BUCKET: usize = 2;
+const JOIN_KEY_PER_BUCKET: usize = 5;
 const LINEAR_BUCKET_NUM: usize = 2048;
 
 #[derive(Debug, Clone)]
@@ -408,6 +408,37 @@ impl TxBench {
             .push(Tx::new(OperationType::Update, tx_id, tx_ts, ops));
     }
 
+    pub fn gen_update_tx_skewed(&mut self, update_count: usize) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        let gen_func = |cnt: usize, range: usize, exp: f64| -> Vec<_> {
+            use rand::distributions::Distribution;
+            let mut rng = rand::thread_rng();
+            let zipf = zipf::ZipfDistribution::new(range, exp).unwrap();
+            (0..cnt).into_iter().map(|_| {
+                let sample_idx = zipf.sample(&mut rng) - 1;
+                self.key_pairs[sample_idx].clone()
+            })
+            .collect()
+        };
+        let sampled_pairs: Vec<(Vec<u8>, Vec<u8>)> = gen_func(update_count, self.key_pairs.len(), self.cli.update_skew_exp);
+        let mut ops = Vec::new();
+        for (pkey, join_key) in sampled_pairs {
+            let new_val = self.random_bytes(self.cli.value_size);
+
+            if let Some(pkey_map) = self.table_map.get_mut(&join_key) {
+                let version_list = pkey_map.entry(pkey.clone()).or_insert_with(Vec::new);
+                version_list.push((tx_ts, new_val.clone()));
+
+                let op = TxOperation::new_update(tx_id, tx_ts, pkey, join_key, new_val);
+                ops.push(op);
+            } else {
+                panic!("Join_key should found in table map");
+            }
+        }
+        self.txs
+            .push(Tx::new(OperationType::Update, tx_id, tx_ts, ops));
+    }
+
     pub fn gen_delete_tx(&mut self, delete_count: usize) {
         let (tx_id, tx_ts) = self.gen_new_tx();
         let sampled_pairs = self
@@ -530,6 +561,17 @@ impl TxBench {
         }
 
         self.read_ts_candidates.push(tx_ts);
+        let op = TxOperation::new_delta_scan(tx_id, tx_ts, read_ts);
+        let tx = Tx::new(OperationType::DeltaScan, tx_id, tx_ts, vec![op.clone()]);
+        self.read_txs.push(tx.clone());
+        self.txs.push(tx);
+    }
+
+    pub fn gen_delta_scan_tx_with_ts(&mut self, from: Timestamp) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+
+        let read_ts = from;
+
         let op = TxOperation::new_delta_scan(tx_id, tx_ts, read_ts);
         let tx = Tx::new(OperationType::DeltaScan, tx_id, tx_ts, vec![op.clone()]);
         self.read_txs.push(tx.clone());
@@ -675,6 +717,10 @@ impl TxBench {
                     let count = (row_count as f64 * param.parse::<f64>().unwrap()) as usize;
                     self.gen_update_tx(count);
                 }
+                "us" | "update_skewed" => {
+                    let count = (row_count as f64 * param.parse::<f64>().unwrap()) as usize;
+                    self.gen_update_tx_skewed(count);
+                }
                 "d" | "delete" => {
                     let count = (row_count as f64 * param.parse::<f64>().unwrap()) as usize;
                     self.gen_delete_tx(count);
@@ -691,7 +737,8 @@ impl TxBench {
                     self.gen_scan_tx_with_ts(ts as Timestamp);
                 }
                 "delta_scan" => {
-                    todo!("manual delta_scan not implemented");
+                    let ts = param.parse::<u64>().unwrap();
+                    self.gen_delta_scan_tx_with_ts(ts);
                 }
                 _ => {
                     panic!("Unknown op: '{}'", op);
@@ -1080,6 +1127,7 @@ impl TxBench {
         println!();
         println!("Get ratio: {}", cli.get_count_ratio);
         println!("Recent get ratio: {:?}", cli.recent_get_ratio);
+        println!("update skew_exponent: {:?}", cli.update_skew_exp);
         println!("-----------------------------------------------------------------------");
         println!();
     }
@@ -1285,6 +1333,9 @@ pub struct Cli {
     /// Manually specify txs like "u,0.1 scan,3"
     #[arg(long = "manual-txs")]
     manual_txs: Option<String>,
+
+    #[arg(long = "skew-exponent", default_value = "1.03")]
+    update_skew_exp: f64,
 }
 
 fn main() -> Result<()> {

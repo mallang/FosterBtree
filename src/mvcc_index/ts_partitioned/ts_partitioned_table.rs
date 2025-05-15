@@ -33,7 +33,9 @@ pub struct TsPartitionedTable<T: MemPool + 'static> {
 
     bucket_count: usize,
     bucket_entries: Vec<Arc<RwLock<TimestampPartitionCollection<T>>>>,
-    repair_ts: AtomicU64,
+    // read repair
+    read_repair_ts: AtomicU64,
+    latest_update_ts: AtomicU64,
     // bulk update
     bulk_update: BulkUpdate,
 }
@@ -64,7 +66,8 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             c_key,
             bucket_count: num_buckets,
             bucket_entries,
-            repair_ts: AtomicU64::new(0),
+            read_repair_ts: AtomicU64::new(0),
+            latest_update_ts: AtomicU64::new(0),
             bulk_update: BulkUpdate::new(num_buckets),
         }
     }
@@ -239,6 +242,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.latest_update_ts.store(ts, Ordering::SeqCst);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         self._update(&entry.key(), &entry.pkey(), &entry)
     }
@@ -251,6 +255,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.latest_update_ts.store(ts, Ordering::SeqCst);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         if self.bulk_update.get_flag() {
             self.bulk_update
@@ -298,9 +303,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
-        let is_need_repair = if to_ts > repair_ts {
-            self.repair_ts.store(to_ts, Ordering::SeqCst);
+        let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let is_need_repair = if to_ts > repair_ts && repair_ts < latest_update_ts {
+            let new_repair_ts = std::cmp::min(to_ts, latest_update_ts);
+            self.read_repair_ts.store(new_repair_ts, Ordering::SeqCst);
             true
         } else {
             false
@@ -350,9 +357,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
-        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
-        let is_need_repair = if ts > repair_ts {
-            self.repair_ts.store(ts, Ordering::SeqCst);
+        let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts && repair_ts < latest_update_ts {
+            let new_repair_ts = std::cmp::min(ts, latest_update_ts);
+            self.read_repair_ts.store(new_repair_ts, Ordering::SeqCst);
             true
         } else {
             false
@@ -418,8 +427,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        let repair_ts = self.repair_ts.load(Ordering::SeqCst);
-        let is_need_repair = if ts > repair_ts { true } else { false };
+        let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let is_need_repair = if ts > repair_ts && repair_ts < latest_update_ts { true } else { false };
         let idx = self.get_bucket_index(key);
         let partitions = &self.bucket_entries[idx];
 
