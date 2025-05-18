@@ -817,7 +817,8 @@ impl HashJoinPage for Page {
         );
 
         // Insert in sorted order by end_ts
-        let new_slot_idx = self.binary_search_by_end_ts(new_slot.end_ts());
+        // let new_slot_idx = self.binary_search_by_end_ts(new_slot.end_ts());
+        let new_slot_idx = self.slot_count();
         new_slot.set_offset(new_rec_offset);
 
         self.insert_slot_at_id(new_slot, new_slot_idx);
@@ -1281,6 +1282,14 @@ impl HashJoinPage for Page {
     }
 
     fn binary_search_by_end_ts(&self, target_end_ts: Timestamp) -> usize {
+        // // do linear search for fair comparison
+        // for i in 0..self.slot_count() {
+        //     let slot = self.unsafe_slot(i);
+        //     if slot.end_ts() > target_end_ts {
+        //         return i;
+        //     }
+        // }
+
         // Find the first index i such that slot[i].end_ts() > target_end_ts.
         // Standard upper_bound style binary search.
         let mut low = 0;
@@ -1774,8 +1783,8 @@ impl HashJoinPage for Page {
         let ts = *ts;
 
         // 1) skip older slots
-        let start_idx = self.binary_search_by_end_ts(ts);
-        // let start_idx = 0;
+        // let start_idx = self.binary_search_by_end_ts(ts);
+        let start_idx = 0;
 
         for slot_idx in start_idx..self.slot_count() {
             let slot = self.unsafe_slot(slot_idx);
@@ -1783,7 +1792,7 @@ impl HashJoinPage for Page {
             // Check if st <= ts
             let st = slot.start_ts();
             let et = slot.end_ts();
-            if st <= ts {
+            if st <= ts && ts < et {
                 // 2) prefix check
                 let slot_key_len = slot.key_size();
                 if slot_key_len != search_key.len() {
