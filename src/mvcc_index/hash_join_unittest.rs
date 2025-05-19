@@ -1289,12 +1289,14 @@ mod test_ops {
         assert_eq!(item_count, 0);
     }
 
-    #[test]
-    fn test_min_max() {
+    fn read_most_recent_same_ts<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>,Error = AccessMethodError>
+    {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
         let hash_join_table =
-            Arc::new(HeapHashTable::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
+            Arc::new(I::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
                 as Arc<
                     dyn MvccIndex<
                         InMemPool,
@@ -1304,35 +1306,29 @@ mod test_ops {
                         Error = AccessMethodError,
                     >,
                 >;
-
-        // 1..1000 inserts
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
+        let key = format!("key{}", 0).into_bytes();
+        let pkey = format!("pkey{}", 0).into_bytes();
+        let value = format!("value{}", 0).into_bytes();
+        hash_join_table.insert(key.clone(), pkey.clone(), 1, 1, value.clone()).unwrap();
+        for i in (1..10).into_iter().step_by(1) {
             let value = format!("value{}", i).into_bytes();
-            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
+            hash_join_table.update(key.clone(), pkey.clone(), 1, 1, value).unwrap();
         }
 
-        // 1..1000..2 updates
+        let scan_res = hash_join_table.scan(1).unwrap().collect::<Vec<_>>();
+        assert_eq!(scan_res.len(), 1);
+        assert_eq!(scan_res[0].2, format!("value{}", 9).into_bytes());
 
-        // Insert entries in a separate thread
-        for i in (1..1000).into_iter().step_by(2) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let value = format!("value{}", i * 2 + 10000).into_bytes();
-            hash_join_table.update(key, pkey, 2, 1, value).unwrap();
-        }
+        let scan_delta_res = hash_join_table.delta_scan(0, 1).unwrap().collect::<Vec<_>>();
+        assert_eq!(scan_delta_res.len(), 1);
+        assert_eq!(scan_delta_res[0].2, Delta::Inserted(format!("value{}", 9).into_bytes()));
+    }
 
-        // 0..1000..2 updates
-        for i in (0..1000).into_iter().step_by(2) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let value = format!("value{}", i * 2 + 10000).into_bytes();
-            hash_join_table
-                .update(key, pkey, 2 as u64, 1, value)
-                .unwrap();
-        }
-
-        let _ = hash_join_table.scan_read_repair(2).unwrap();
+    #[test]
+    fn test_read_most_recent_same_ts() {
+        read_most_recent_same_ts::<LinearHashTable<_>>();
+        read_most_recent_same_ts::<HeapHashTable<_>>();
+        read_most_recent_same_ts::<TsPartitionedTable<_>>();
+        read_most_recent_same_ts::<ChainedHashTable<_>>();
     }
 }
