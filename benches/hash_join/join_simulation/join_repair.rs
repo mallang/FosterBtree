@@ -413,13 +413,15 @@ impl TxBench {
         let gen_func = |cnt: usize, range: usize, exp: f64| -> Vec<_> {
             use rand::distributions::Distribution;
             let mut rng = rand::thread_rng();
-            let zipf = zipf::ZipfDistribution::new(range, exp).unwrap();
-            (0..cnt).into_iter().map(|_| {
+            let zipf: zipf::ZipfDistribution = zipf::ZipfDistribution::new(range, exp).unwrap();
+            let mut idx_set = HashSet::new();
+            while idx_set.len() < cnt {
                 let sample_idx = zipf.sample(&mut rng) - 1;
-                self.key_pairs[sample_idx].clone()
-            })
-            .collect()
+                idx_set.insert(sample_idx);
+            }
+            idx_set.into_iter().map(|idx| self.key_pairs[idx].clone()).collect()
         };
+
         let sampled_pairs: Vec<(Vec<u8>, Vec<u8>)> = gen_func(update_count, self.key_pairs.len(), self.cli.update_skew_exp);
         let mut ops = Vec::new();
         for (pkey, join_key) in sampled_pairs {
