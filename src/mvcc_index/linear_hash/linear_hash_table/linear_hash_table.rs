@@ -1,7 +1,7 @@
 use core::panic;
 use std::{
-    collections::BTreeMap,
-    sync::{atomic::AtomicU64, Arc},
+    collections::{BTreeMap, HashMap},
+    sync::{atomic::{AtomicBool, AtomicU64}, Arc, Mutex},
 };
 
 use crate::{
@@ -19,6 +19,11 @@ use super::{
     linear_sub_table::LinearSubTable,
 };
 
+pub struct LinearBulkUpdate {
+    pub update_entries: HashMap<Vec<u8>, Vec<u8>>,
+    pub old_entries: Vec<MvccEntry>,
+}
+
 pub struct LinearHashTable<T: MemPool> {
     mem_pool: Arc<T>,
     c_key: ContainerKey,
@@ -26,6 +31,8 @@ pub struct LinearHashTable<T: MemPool> {
     recent: Arc<LinearSubTable<T>>,
     history: Arc<LinearSubTable<T>>,
     largest_txn_ts: AtomicU64,
+    is_bulk_update: AtomicBool,
+    bulk_update: Mutex<LinearBulkUpdate>,
 }
 
 impl<T: MemPool + 'static> LinearHashTable<T> {
@@ -33,18 +40,40 @@ impl<T: MemPool + 'static> LinearHashTable<T> {
         let recent =
             LinearSubTable::new_with_bucket_num(mem_pool.clone(), c_key.clone(), bucket_num);
         let history =
-            LinearSubTable::new_with_bucket_num(mem_pool.clone(), c_key.clone(), bucket_num);
+            LinearSubTable::new_with_bucket_num(mem_pool.clone(), c_key.clone(), bucket_num * 2);
         Self {
             mem_pool,
             c_key,
             recent: Arc::new(recent),
             history: Arc::new(history),
             largest_txn_ts: AtomicU64::new(0),
+            is_bulk_update: AtomicBool::new(false),
+            bulk_update: Mutex::new(LinearBulkUpdate {
+                update_entries: HashMap::new(),
+                old_entries: Vec::new(),
+            }),
         }
     }
+
     fn set_largest_txn_ts(&self, ts: Timestamp) {
         self.largest_txn_ts
             .store(ts, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn bulk_update(&self) -> Result<(), AccessMethodError> {
+        let mut bulk_update = self.bulk_update.lock().unwrap();
+        self.recent.bulk_update_recent(self.largest_txn_ts.load(std::sync::atomic::Ordering::Acquire), &mut bulk_update)?;
+
+        for entry in &bulk_update.old_entries {
+            let history_rec = RecordRef::new(&entry.key(), &entry.pkey(), &entry.value());
+            self.history
+               .insert_history(&history_rec, entry.start_ts(), entry.end_ts())
+               .unwrap();
+        }
+
+        bulk_update.update_entries.clear();
+        bulk_update.old_entries.clear();
+        Ok(())
     }
 }
 
@@ -145,20 +174,26 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         // let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         let rec = RecordRef::new(&key, &pkey, &value);
 
-        match self.recent.update(&rec, ts, Timestamp::MAX) {
-            Ok(mut old_res) => {
-                old_res.set_end_ts(&ts);
-                let history_rec = RecordRef::new(&old_res.key(), &old_res.pkey(), &old_res.value());
-                self.history
-                    .insert_history(&history_rec, old_res.start_ts(), old_res.end_ts())
-                    .unwrap();
-                return Ok(());
-            }
-            Err(AccessMethodError::KeyNotFound) => {
-                return Err(AccessMethodError::KeyNotFound);
-            }
-            Err(e) => {
-                panic!("unexpected error: {:?}", e);
+        if self.is_bulk_update.load(std::sync::atomic::Ordering::Acquire) {
+            let mut bulk_update = self.bulk_update.lock().unwrap();
+            bulk_update.update_entries.insert(pkey, value);
+            return Ok(());
+        } else {
+            match self.recent.update(&rec, ts, Timestamp::MAX) {
+                Ok(mut old_res) => {
+                    old_res.set_end_ts(&ts);
+                    let history_rec = RecordRef::new(&old_res.key(), &old_res.pkey(), &old_res.value());
+                    self.history
+                        .insert_history(&history_rec, old_res.start_ts(), old_res.end_ts())
+                        .unwrap();
+                    return Ok(());
+                }
+                Err(AccessMethodError::KeyNotFound) => {
+                    return Err(AccessMethodError::KeyNotFound);
+                }
+                Err(e) => {
+                    panic!("unexpected error: {:?}", e);
+                }
             }
         }
     }
@@ -353,9 +388,12 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     }
 
     fn bulk_update_end(&self) -> Result<(), Self::Error> {
+        self.is_bulk_update.store(false, std::sync::atomic::Ordering::Release);
+        self.bulk_update()?;
         Ok(())
     }
     fn bulk_update_start(&self) -> Result<(), Self::Error> {
+        self.is_bulk_update.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 }

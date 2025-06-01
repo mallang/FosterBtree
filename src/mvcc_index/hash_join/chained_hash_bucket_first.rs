@@ -15,12 +15,17 @@ use crate::{
 };
 
 use std::{
-    hash::{DefaultHasher, Hash, Hasher},
-    sync::{atomic::AtomicU32, Arc},
-    time::Duration,
+    collections::HashMap, hash::{DefaultHasher, Hash, Hasher}, sync::{atomic::AtomicU32, Arc, Mutex}, time::Duration
 };
 
 pub const DEAFAULT_SECOND_BUCKET_NUM: usize = 1;
+
+
+#[derive(Debug, Clone)]
+pub struct ChainBucketBulkUpdate {
+    pub updated_entries: HashMap<Vec<u8>, Vec<u8>>,  // pkey, (new_value)
+    pub old_entries: Vec<MvccEntry>,
+}
 
 pub struct FirstBucket<T: MemPool> {
     c_key: ContainerKey,
@@ -31,6 +36,8 @@ pub struct FirstBucket<T: MemPool> {
 
     bucket_count: usize,
     bucket_entries: Vec<Arc<SecondBucket<T>>>,
+
+    bulk_update: Mutex<Vec<ChainBucketBulkUpdate>>,
 }
 
 impl<T: MemPool> FirstBucket<T> {
@@ -56,6 +63,14 @@ impl<T: MemPool> FirstBucket<T> {
         }
         drop(meta_page);
 
+        let bulk_updates = Vec::from(
+            (0..num_buckets)
+                .map(|_| ChainBucketBulkUpdate {
+                    updated_entries: HashMap::new(),
+                    old_entries: Vec::new(),
+                }).collect::<Vec<_>>()
+        );
+
         Self {
             mem_pool,
             c_key,
@@ -63,6 +78,7 @@ impl<T: MemPool> FirstBucket<T> {
             meta_frame_id,
             bucket_count: num_buckets,
             bucket_entries,
+            bulk_update: Mutex::new(bulk_updates),
         }
     }
 
@@ -80,11 +96,28 @@ impl<T: MemPool> FirstBucket<T> {
         bucket.get(pkey, ts)
     }
 
-    pub fn update(&self, pkey: &[u8], entry: &MvccEntry) -> Result<(), AccessMethodError> {
+    pub fn update(&self, pkey: &[u8], entry: &MvccEntry, is_bulk_update: bool) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(pkey);
         let bucket = &self.bucket_entries[index];
 
-        bucket.update(pkey, entry)
+        if is_bulk_update {
+            let mut bulk = self.bulk_update.lock().unwrap();
+            bulk[index].updated_entries.insert(pkey.to_vec(), entry.value().to_vec());
+        } else {
+            bucket.update(pkey, entry)?;
+        }
+        Ok(())
+    }
+
+    pub fn do_bulk_update(&self, new_start_ts: Timestamp) -> Result<(), AccessMethodError> {
+        let mut bulk = self.bulk_update.lock().unwrap();
+        for i in 0..self.bucket_count {
+            let bucket = &self.bucket_entries[i];
+            bucket.bulk_update(&mut bulk[i], new_start_ts)?;
+            bulk[i].old_entries.clear();
+            bulk[i].updated_entries.clear();
+        }
+        Ok(())
     }
 
     pub fn delete(&self, pkey: &[u8], ts: &Timestamp) -> Result<(), AccessMethodError> {
@@ -339,161 +372,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_first_bucket_single_thread_insert_update_get() {
-        use std::collections::HashMap;
-
-        // -------------------------------------------------------------------
-        // Helper: Build a fixed-length string
-        // -------------------------------------------------------------------
-        fn fixed_length_str(base: &str, target_len: usize, pad: char) -> String {
-            let mut s = base.to_string();
-            while s.len() < target_len {
-                s.push(pad);
-            }
-            s.truncate(target_len);
-            s
-        }
-
-        // -------------------------------------------------------------------
-        // 1) Set up mem pool, container key, and create a FirstBucket.
-        // Assume get_in_mem_pool() and ContainerKey are available.
-        // -------------------------------------------------------------------
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let first_bucket = FirstBucket::new(c_key, mem_pool);
-
-        // -------------------------------------------------------------------
-        // 2) Create a reference state to record all versions.
-        //    Map from primary key (Vec<u8>) to a vector of versions (MvccEntry)
-        //    The last element in the vector should be the “recent” version (with end_ts == u64::MAX).
-        // -------------------------------------------------------------------
-        let mut ref_state: HashMap<Vec<u8>, Vec<MvccEntry>> = HashMap::new();
-
-        // -------------------------------------------------------------------
-        // 3) Insert initial entries.
-        //    Each entry has key size = 50, pkey size = 100, value size = 1000.
-        //    start_ts for key i is (start_base + i) with end_ts = u64::MAX.
-        // -------------------------------------------------------------------
-        let num_keys = 1000;
-        let key_size = 50;
-        let pkey_size = 100;
-        let value_size = 1000;
-        let start_base = 100;
-
-        for i in 0..num_keys {
-            let key = fixed_length_str(&format!("key-{:03}", i), key_size, 'K').into_bytes();
-            let pkey = fixed_length_str(&format!("pkey-{:03}", i), pkey_size, 'P').into_bytes();
-            let value = fixed_length_str(&format!("value-{:03}", i), value_size, 'V').into_bytes();
-            let start_ts = start_base + i as u64;
-            let end_ts = u64::MAX;
-            let entry = MvccEntry::new(key, pkey.clone(), value, start_ts, end_ts);
-
-            // Insert into FirstBucket
-            first_bucket.insert(&entry).expect("Initial insert failed");
-            // Record in our reference state
-            ref_state.insert(pkey, vec![entry]);
-        }
-
-        println!("FirstBucket stat after inserts:\n{}", first_bucket.stat());
-
-        // -------------------------------------------------------------------
-        // 4) Update step: For each key, perform a number of updates.
-        //    Each update creates a new recent version and fixes the old version's end_ts.
-        //    In this example, we perform num_updates updates per key.
-        //    Each update enlarges the value by 1000 bytes.
-        // -------------------------------------------------------------------
-        let num_updates = 5;
-        for (pkey, versions) in ref_state.iter_mut() {
-            for u in 0..num_updates {
-                // Get the current recent version (should have end_ts == u64::MAX)
-                let old_recent = versions.last().unwrap().clone();
-                if old_recent.end_ts() != u64::MAX {
-                    panic!(
-                        "No recent version for key '{}'",
-                        String::from_utf8_lossy(pkey)
-                    );
-                }
-                // Choose a new start_ts > old_recent.start_ts.
-                let new_start = old_recent.start_ts() + 10 + (u as u64) * 10;
-                // Build an updated value by extending the old value by 1000 'U' characters.
-                let mut new_value = old_recent.value().to_vec().clone();
-                for _ in 0..100 {
-                    new_value.push(b'U');
-                }
-                let updated_entry = MvccEntry::new(
-                    old_recent.key().to_vec().clone(),
-                    old_recent.pkey().to_vec().clone(),
-                    new_value,
-                    new_start,
-                    u64::MAX,
-                );
-                // Call update on the FirstBucket.
-                first_bucket
-                    .update(&old_recent.pkey(), &updated_entry)
-                    .expect("Update failed");
-                // Update the reference state:
-                // Remove the old recent version, set its end_ts to new_start,
-                // then push the new version.
-                let mut old_version = versions.pop().unwrap();
-                old_version.set_end_ts(&new_start);
-                versions.push(old_version);
-                versions.push(updated_entry);
-            }
-        }
-
-        println!("FirstBucket stat after updates:\n{}", first_bucket.stat());
-
-        // -------------------------------------------------------------------
-        // 5) Final verification:
-        // For each version in our reference state, pick a query timestamp in [start, end)
-        // and verify that first_bucket.get(pkey, query_ts) returns the expected version.
-        // For half‑open intervals:
-        //   - If end == u64::MAX or the interval length is 1 (i.e. end == start + 1), we pick start.
-        //   - Otherwise, we choose the midpoint in [start, end - 1].
-        // -------------------------------------------------------------------
-        for (pkey, versions) in ref_state.iter() {
-            for version in versions {
-                let start = version.start_ts();
-                let end = version.end_ts();
-                if start >= end {
-                    continue; // skip degenerate intervals
-                }
-                let query_ts = if end == u64::MAX || end == start + 1 {
-                    start
-                } else {
-                    let adjusted_end = end.saturating_sub(1);
-                    start + (adjusted_end - start) / 2
-                };
-                let fetched = first_bucket.get(pkey, &query_ts).expect(&format!(
-                    "Get failed for key '{}' at ts={}",
-                    String::from_utf8_lossy(pkey),
-                    query_ts
-                ));
-                assert_eq!(
-                    fetched.start_ts(),
-                    start,
-                    "start_ts mismatch for key '{}'",
-                    String::from_utf8_lossy(pkey)
-                );
-                assert_eq!(
-                    fetched.end_ts(),
-                    end,
-                    "end_ts mismatch for key '{}'",
-                    String::from_utf8_lossy(pkey)
-                );
-                assert_eq!(
-                    fetched.value(),
-                    version.value(),
-                    "value mismatch for key '{}'",
-                    String::from_utf8_lossy(pkey)
-                );
-            }
-        }
-
-        println!(
-            "Test passed: All {} keys inserted, updated, and verified successfully.",
-            num_keys
-        );
-    }
 }

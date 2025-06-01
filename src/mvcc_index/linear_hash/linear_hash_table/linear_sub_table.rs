@@ -11,7 +11,8 @@ use crate::{
             get_hashed_bucket_index, read_page, write_page, BucketEntry, DEFAULT_BUCKET_NUM,
         },
         hash_join_page::{self, record::RecordRef, HashJoinPage},
-        MvccEntry, MvccIndex,
+        MvccEntry, 
+        linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate,
     },
     page::{self, Page, PageId},
     prelude::{AccessMethodError, Timestamp},
@@ -49,7 +50,7 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
     }
 
     fn get_ite_threshold(readguard: &Vec<BucketEntry>) -> usize {
-        readguard.len() / 16 + 1
+        readguard.len() / 8 + 1
     }
 
     fn _rehash(&self, new_size: u32, guard: &mut Vec<BucketEntry>, is_recent: bool) {
@@ -318,6 +319,25 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             }
         }
         Err(AccessMethodError::KeyNotFound)
+    }
+
+    pub fn bulk_update_recent(
+        &self,
+        new_start_ts: Timestamp,
+        bulk: &mut LinearBulkUpdate,
+    ) -> Result<(), AccessMethodError> {
+        let buckets = &self.buckets.upgradable_read();
+        let buckets_num = buckets.len();
+        for i in 0..buckets_num {
+            let pid = buckets[i].page_id();
+            let fid = buckets[i].frame_id();
+            let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
+            let mut write_page = write_page(&*self.mem_pool, page_f_key);
+            let mut page = &mut *write_page;
+            <Page as HashJoinPage>::linear_bulk_update_slots_recent(&mut page, bulk, new_start_ts);
+        }
+
+        Ok(())
     }
 
     fn _update(

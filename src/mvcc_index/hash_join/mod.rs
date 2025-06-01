@@ -1,7 +1,7 @@
-mod chained_hash_bucket_first;
+pub mod chained_hash_bucket_first;
 pub mod chained_hash_bucket_second;
 pub mod chained_hash_history_chain;
-mod chained_hash_recent_chain;
+pub mod chained_hash_recent_chain;
 pub mod chained_hash_table;
 
 use serde::{Deserialize, Serialize};

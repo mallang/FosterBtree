@@ -185,40 +185,6 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         Ok(())
     }
 
-    pub fn scan_unique(&self, ts: Timestamp) -> Result<Vec<MvccEntry>, AccessMethodError> {
-        let mut best_candidates = HashMap::new();
-        // let mut idx = 0;
-        for p in self.partitions.iter() {
-            if ts >= p.range.0 && ts < p.range.1 {
-                p.chain.scan_unique(ts, &mut best_candidates).unwrap();
-            }
-        }
-        Ok(vec![])
-    }
-
-    pub fn scan_unique_read_repair(
-        &self,
-        ts: Timestamp,
-    ) -> Result<Vec<MvccEntry>, AccessMethodError> {
-        let mut best_candidates = HashMap::new();
-        let mut versions_map = HashMap::new();
-        // let mut idx = 0;
-        // iterate in natural order
-        for p in self.partitions.iter() {
-            if ts >= p.range.0 && ts < p.range.1 {
-                p.chain
-                    .scan_unique_read_repair(ts, &mut best_candidates, &mut versions_map)
-                    .unwrap();
-            }
-        }
-
-        for versions in versions_map.into_values() {
-            read_repair_vec(&self.mem_pool, &versions, self.c_key);
-        }
-
-        Ok(best_candidates.into_values().collect())
-    }
-
     pub fn scan_with_key(
         &self,
         ts: Timestamp,

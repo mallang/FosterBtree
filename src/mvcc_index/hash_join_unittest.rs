@@ -1331,4 +1331,54 @@ mod test_ops {
         read_most_recent_same_ts::<TsPartitionedTable<_>>();
         read_most_recent_same_ts::<ChainedHashTable<_>>();
     }
+
+    fn bulk_update<I>()
+    where
+        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>,Error = AccessMethodError>
+    {
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let hash_join_table =
+            Arc::new(I::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
+                as Arc<
+                    dyn MvccIndex<
+                        InMemPool,
+                        Key = Vec<u8>,
+                        Value = Vec<u8>,
+                        PKey = Vec<u8>,
+                        Error = AccessMethodError,
+                    >,
+                >;
+
+        for i in 0..100 {
+            let key = format!("key{:010}", i).into_bytes();
+            let pkey = format!("pkey{:010}", i).into_bytes();
+            let value = format!("value{:010}", i).into_bytes();
+            hash_join_table.insert(key.clone(), pkey.clone(), 0, 1, value.clone()).unwrap();
+        }
+        hash_join_table.bulk_update_start().unwrap();
+
+        for i in 0..100 {
+            let key = format!("key{:010}", i).into_bytes();
+            let pkey = format!("pkey{:010}", i).into_bytes();
+            let value = format!("value{:010}", i + 100).into_bytes();
+            hash_join_table.update(key.clone(), pkey.clone(), 1, 1, value.clone()).unwrap();
+        }
+
+        hash_join_table.bulk_update_end().unwrap();
+
+        for i in 0..100 {
+            let key = format!("key{:010}", i).into_bytes();
+            let pkey = format!("pkey{:010}", i).into_bytes();
+            let value = format!("value{:010}", i + 100).into_bytes();
+            let get_res = hash_join_table.get(&key, &pkey, 1).unwrap();
+            assert_eq!(get_res.unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn test_bulk_update() {
+        bulk_update::<ChainedHashTable<_>>();
+        bulk_update::<LinearHashTable<_>>();
+    }
 }

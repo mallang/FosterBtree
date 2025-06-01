@@ -22,7 +22,7 @@ use crate::{
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::Timestamp;
+use super::{chained_hash_bucket_first::ChainBucketBulkUpdate, Timestamp};
 
 pub struct ChainedHashRecentChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -343,6 +343,93 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
             }
             Err(e) => {
                 return Err(e);
+            }
+        }
+    }
+
+    pub fn do_bulk_update(&self, bulk: &mut ChainBucketBulkUpdate, new_start_ts: Timestamp) -> Result<(), AccessMethodError> {
+        match self.traverse_to_endofchain_for_bulk_update(self.first_key(), bulk, new_start_ts) {
+            Ok(_) => {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
+    fn try_traverse_to_endofchain_for_bulk_update(
+        &self,
+        page_key: PageFrameKey,
+        bulk: &mut ChainBucketBulkUpdate,
+        new_start_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let mut current_page = self.write_page(page_key);
+        loop {
+            current_page.chain_bulk_update_slots_recent(bulk, new_start_ts);
+
+            if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
+                let next_page = self.write_page(PageFrameKey::new_with_frame_id(
+                    self.c_key,
+                    next_page_id,
+                    next_frame_id,
+                ));
+                if next_page.frame_id() != next_frame_id {
+                    log_debug!(
+                        "Frame of the next page has been changed. Trying to fix the frame id"
+                    );
+                    let new_frame_key = PageFrameKey::new_with_frame_id(
+                        self.c_key,
+                        next_page_id,
+                        next_page.frame_id(),
+                    );
+                    let _ = fix_frame_id2(&mut current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    fn traverse_to_endofchain_for_bulk_update(
+        &self,
+        page_key: PageFrameKey,
+        bulk: &mut ChainBucketBulkUpdate,
+        new_start_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let base = 2;
+        let mut attempts = 0;
+        loop {
+            let find_page = self.try_traverse_to_endofchain_for_bulk_update(page_key, bulk, new_start_ts);
+            match find_page {
+                Ok(_) => {
+                    return Ok(());
+                }
+                Err(AccessMethodError::PageWriteLatchFailed) => {
+                    attempts += 1;
+                    log_info!(
+                        "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
+                        attempts,
+                        u64::pow(base, attempts)
+                    );
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                }
+                Err(AccessMethodError::OutOfSpaceForUpdate(old_val)) => {
+                    log_debug!(
+                        "Should not happen in YCSB workload. key({}) old_value({})",
+                        pkey,
+                        old_val
+                    );
+                    return Err(AccessMethodError::OutOfSpaceForUpdate(old_val));
+                }
+                Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry)) => {
+                    return Err(AccessMethodError::OutOfSpaceForMvccUpdate(old_entry));
+                }
+                Err(e) => {
+                    log_debug!("Error while traverse for upadate: {:?}", e);
+                    return Err(e);
+                }
             }
         }
     }
@@ -784,6 +871,11 @@ fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> F
             read_guard
         }
     }
+}
+
+/// Opportunistically try to fix the next page frame id
+fn fix_frame_id2<'a>(this: &mut FrameWriteGuard<'a>, new_frame_key: &PageFrameKey) {
+    this.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
 }
 
 // Implement Clone for MvccHashJoinRecentChain to allow cloning
