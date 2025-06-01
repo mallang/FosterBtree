@@ -771,7 +771,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         loop {
-            current_page.scan_recent_into(ts, results);
+            current_page.chain_scan_into_vec(ts, results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
                 let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key, next_pid, next_fid,

@@ -645,9 +645,8 @@ pub trait HashJoinPage {
         results: &mut Vec<MvccEntry>,
     );
 
-    fn scan_recent_into(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>);
+    fn chain_scan_into_vec(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>);
 
-    fn scan_history_into(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>);
 
     fn scan_key_heap_read_repair(
         &self,
@@ -1722,7 +1721,7 @@ impl HashJoinPage for Page {
         }
     }
 
-    fn scan_recent_into(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
+    fn chain_scan_into_vec(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
         let ts = *ts;
         let slot_count = self.slot_count();
 
@@ -1750,33 +1749,6 @@ impl HashJoinPage for Page {
         }
     }
 
-    fn scan_history_into(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
-        let ts = *ts;
-        let slot_count = self.slot_count();
-
-        for i in 0..slot_count {
-            let slot = self.unsafe_slot(i);
-
-            // 1) Check if this version is visible at time `ts`.
-            let st = slot.start_ts();
-            let et = slot.end_ts();
-            if ts < st || et <= ts {
-                continue;
-            }
-
-            // 2) Read the entire record to confirm pkey equality.
-            let rec = self.record_ref_from_slot(&slot);
-            // 4) Finally, build an MvccEntry
-            let entry = MvccEntry::new(
-                rec.key().to_vec(),
-                rec.pkey().to_vec(),
-                rec.val().to_vec(),
-                st,
-                et,
-            );
-            results.push(entry);
-        }
-    }
 
     /// Returns one MvccEntry per pkey for `search_key` visible at `ts`,
     /// using a page sorted by end_ts. O(logN + K) time, skipping old versions.
