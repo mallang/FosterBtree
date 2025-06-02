@@ -194,7 +194,7 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
                 self._rehash(new_size, &mut *write_guard, true);
                 self._insert_with_guard(&rec, start_ts, end_ts, &*write_guard)
                     .unwrap();
-                log_warn!("[rehashing] rehash to {:?}", new_size);
+                // log_warn!("[rehashing] rehash to {:?}", new_size);
                 Ok(())
             }
             Err(e) => {

@@ -571,17 +571,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
         let mut results = Vec::new();
-        log_warn!(
-            "[chain scan] max txn ts: {:?}",
-            self.largest_txn_ts
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
+        // log_warn!(
+        //     "[chain scan] max txn ts: {:?}",
+        //     self.largest_txn_ts
+        //         .load(std::sync::atomic::Ordering::Acquire)
+        // );
         if ts
             >= self
                 .largest_txn_ts
                 .load(std::sync::atomic::Ordering::Acquire)
         {
-            log_warn!("[chain scan] only scan recent!");
+            // log_warn!("[chain scan] only scan recent!");
             ChainedHashTable::scan_into_vec_recent(self, &ts, &mut results)?;
         } else {
             ChainedHashTable::scan_into_vec(self, &ts, &mut results)?;

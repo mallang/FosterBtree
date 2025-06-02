@@ -717,6 +717,31 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         Ok(())
     }
 
+    pub fn scan_unique_write_repair(
+        self: &Arc<Self>,
+        ts: Timestamp,
+        results: &mut Vec<MvccEntry>,
+    ) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        loop {
+            // println!("scan a page");
+            current_page.chain_scan_into_vec(&ts, results);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
+                if next_page.frame_id() != next_fid {
+                    let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Scan for all entries visible at `ts` and return only the best candidate
     /// per primary key. The “best” is defined here as the entry with the highest
     /// start timestamp that is visible at `ts`.
@@ -1157,6 +1182,7 @@ impl<'a, T: MemPool + 'static> Iterator for HeapChainScanner<'a, T> {
                 if self.move_to_next_page() {
                     return None;
                 }
+                // println!("scan a page");
                 continue;
             }
         }
@@ -2022,9 +2048,5 @@ mod tests {
             .collect::<Vec<_>>();
         // that does not matter, for better optimization in scan
         // assert_eq!(all_entries.len(), 2, "Expected 2 entries");
-
-        for entry in all_entries {
-            log_warn!("Entry: {:?}", entry);
-        }
     }
 }

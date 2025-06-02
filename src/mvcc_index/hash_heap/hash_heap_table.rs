@@ -42,6 +42,8 @@ pub struct HeapHashTable<T: MemPool + 'static> {
     latest_update_ts: AtomicU64,
     // bulk update
     update_bulk_repair: BulkUpdate,
+    // write repair
+    is_write_repair: AtomicBool,
 }
 
 impl<T: MemPool + 'static> HeapHashTable<T> {
@@ -73,6 +75,7 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
             read_repair_ts: AtomicU64::new(0),
             latest_update_ts: AtomicU64::new(0),
             update_bulk_repair: BulkUpdate::new(num_buckets),
+            is_write_repair: AtomicBool::new(false),
         }
     }
 
@@ -146,7 +149,7 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
     }
 
     /// Updates an existing key-value pair in the hash join table.
-    pub fn update(
+    pub fn _update(
         &self,
         key: &[u8],
         pkey: &[u8],
@@ -159,7 +162,7 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         heap_chain.update_no_repair(pkey, entry)
     }
 
-    pub fn update_write_reapair(
+    pub fn _update_write_reapair(
         &self,
         key: &[u8],
         pkey: &[u8],
@@ -240,7 +243,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     ) -> Result<(), Self::Error> {
         self.latest_update_ts.store(ts, Ordering::SeqCst);
         let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
-        self.update(&entry.key(), &entry.pkey(), &entry)
+        self._update(&entry.key(), &entry.pkey(), &entry)
     }
 
     fn update_write_repair(
@@ -252,14 +255,15 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         self.latest_update_ts.store(ts, Ordering::SeqCst);
+        self.is_write_repair.store(true, Ordering::SeqCst);
         let entry =
             MvccEntry::new_with_tx_id(key.clone(), pkey.clone(), value, ts, u64::MAX, tx_id);
         if self.update_bulk_repair.get_flag() {
             self.update_bulk_repair
                 .put_updated_pkeys(&pkey, self.get_bucket_index(&key));
-            self.update(&entry.key(), &entry.pkey(), &entry)
+            self._update(&entry.key(), &entry.pkey(), &entry)
         } else {
-            self.update_write_reapair(&key, &pkey, &entry)
+            self._update_write_reapair(&key, &pkey, &entry)
         }
     }
 
@@ -392,9 +396,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
-            let mut best_candidates = HashMap::new();
-            bucket.scan_unique(ts, &mut best_candidates)?;
-            result.extend(best_candidates.into_values());
+            if self.is_write_repair.load(Ordering::SeqCst) {
+                bucket.scan_unique_write_repair(ts, &mut result)?;
+            } else {
+                let mut best_candidates = HashMap::new();
+                bucket.scan_unique(ts, &mut best_candidates)?;
+                result.extend(best_candidates.into_values());
+            }
         }
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
@@ -531,7 +539,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
                     read_repair_vec(&self.mem_pool, &versions, self.c_key);
                 }
 
-                log_warn!("stat: {:?}", bucket.stat());
                 best_candidates.into_values()
             } else {
                 bucket.scan_unique(ts, &mut best_candidates)?;

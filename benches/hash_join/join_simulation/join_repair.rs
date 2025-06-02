@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const PKEY_PER_JOIN_KEY: usize = 500;
-const JOIN_KEY_PER_BUCKET: usize = 5;
+const JOIN_KEY_PER_BUCKET: usize = 20;
 const LINEAR_BUCKET_NUM: usize = 2048;
 
 #[derive(Debug, Clone)]

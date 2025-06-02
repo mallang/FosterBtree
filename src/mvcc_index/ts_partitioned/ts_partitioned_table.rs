@@ -1,29 +1,20 @@
 use crate::{
-    bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
+    bp::{ContainerKey, MemPool},
     log_warn,
     mvcc_index::{
         hash_common::{read_repair_vec, BulkUpdate, DEFAULT_BUCKET_NUM},
         Delta, MvccEntry, MvccIndex, TxId,
     },
-    page::{Page, PageId},
     prelude::{AccessMethodError, Timestamp},
 };
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
-    error::Error,
-    fmt::Debug,
+    collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock,
     },
-    time::Duration,
-    vec::IntoIter,
 };
-
-use dashmap::mapref::entry;
-use rand::seq::index;
-use serde::{Deserialize, Serialize};
 
 use super::ts_partitioned_collection::TimestampPartitionCollection;
 
@@ -38,6 +29,9 @@ pub struct TsPartitionedTable<T: MemPool + 'static> {
     latest_update_ts: AtomicU64,
     // bulk update
     bulk_update: BulkUpdate,
+
+    // write repair
+    is_write_repair: AtomicBool,
 }
 
 impl<T: MemPool + 'static> TsPartitionedTable<T> {
@@ -69,6 +63,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             read_repair_ts: AtomicU64::new(0),
             latest_update_ts: AtomicU64::new(0),
             bulk_update: BulkUpdate::new(num_buckets),
+            is_write_repair: AtomicBool::new(false),
         }
     }
 
@@ -256,6 +251,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         self.latest_update_ts.store(ts, Ordering::SeqCst);
+        self.is_write_repair.store(true, Ordering::SeqCst);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         if self.bulk_update.get_flag() {
             self.bulk_update
@@ -337,15 +333,29 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
             let partition_collection = bucket.read().unwrap();
-            let mut best_candidates = HashMap::new();
-            // let mut idx = 0;
-            for p in partition_collection.partitions().iter() {
-                if ts >= p.get_range().0 && ts < p.get_range().1 {
-                    p.chain().scan_unique(ts, &mut best_candidates).unwrap();
+            if self.is_write_repair.load(Ordering::SeqCst) {
+                for p in partition_collection.partitions().iter() {
+                    if ts >= p.get_range().0 && ts < p.get_range().1 {
+                        // println!("scan partition: {:?}, ts: {}", p.get_range(), ts);
+                        p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
+                    } else {
+                        // println!("skip partition: {:?}, ts: {}", p.get_range(), ts);
+                    }
                 }
-            }
+            } else {
+                let mut best_candidates = HashMap::new();
+                // let mut idx = 0;
+                for p in partition_collection.partitions().iter() {
+                    if ts >= p.get_range().0 && ts < p.get_range().1 {
+                        // println!("scan partition: {:?}, ts: {}", p.get_range(), ts);
+                        p.chain().scan_unique(ts, &mut best_candidates).unwrap();
+                    } else {
+                        // println!("skip partition: {:?}, ts: {}", p.get_range(), ts);
+                    }
+                }
 
-            result.extend(best_candidates.into_values());
+                result.extend(best_candidates.into_values());
+            }
         }
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
