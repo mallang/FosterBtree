@@ -330,7 +330,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     > {
         let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
         let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
-        let is_need_repair = if to_ts > repair_ts && repair_ts < latest_update_ts  {
+        let is_need_repair = if to_ts > repair_ts && repair_ts < latest_update_ts {
             let new_repair_ts = std::cmp::min(to_ts, latest_update_ts);
             self.read_repair_ts.store(new_repair_ts, Ordering::SeqCst);
             true

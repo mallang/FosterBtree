@@ -1291,37 +1291,52 @@ mod test_ops {
 
     fn read_most_recent_same_ts<I>()
     where
-        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>,Error = AccessMethodError>
+        I: MvccIndex<
+            InMemPool,
+            Key = Vec<u8>,
+            PKey = Vec<u8>,
+            Value = Vec<u8>,
+            Error = AccessMethodError,
+        >,
     {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table =
-            Arc::new(I::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
-                as Arc<
-                    dyn MvccIndex<
-                        InMemPool,
-                        Key = Vec<u8>,
-                        Value = Vec<u8>,
-                        PKey = Vec<u8>,
-                        Error = AccessMethodError,
-                    >,
-                >;
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
+            as Arc<
+                dyn MvccIndex<
+                    InMemPool,
+                    Key = Vec<u8>,
+                    Value = Vec<u8>,
+                    PKey = Vec<u8>,
+                    Error = AccessMethodError,
+                >,
+            >;
         let key = format!("key{}", 0).into_bytes();
         let pkey = format!("pkey{}", 0).into_bytes();
         let value = format!("value{}", 0).into_bytes();
-        hash_join_table.insert(key.clone(), pkey.clone(), 1, 1, value.clone()).unwrap();
+        hash_join_table
+            .insert(key.clone(), pkey.clone(), 1, 1, value.clone())
+            .unwrap();
         for i in (1..10).into_iter().step_by(1) {
             let value = format!("value{}", i).into_bytes();
-            hash_join_table.update(key.clone(), pkey.clone(), 1, 1, value).unwrap();
+            hash_join_table
+                .update(key.clone(), pkey.clone(), 1, 1, value)
+                .unwrap();
         }
 
         let scan_res = hash_join_table.scan(1).unwrap().collect::<Vec<_>>();
         assert_eq!(scan_res.len(), 1);
         assert_eq!(scan_res[0].2, format!("value{}", 9).into_bytes());
 
-        let scan_delta_res = hash_join_table.delta_scan(0, 1).unwrap().collect::<Vec<_>>();
+        let scan_delta_res = hash_join_table
+            .delta_scan(0, 1)
+            .unwrap()
+            .collect::<Vec<_>>();
         assert_eq!(scan_delta_res.len(), 1);
-        assert_eq!(scan_delta_res[0].2, Delta::Inserted(format!("value{}", 9).into_bytes()));
+        assert_eq!(
+            scan_delta_res[0].2,
+            Delta::Inserted(format!("value{}", 9).into_bytes())
+        );
     }
 
     #[test]
@@ -1334,27 +1349,34 @@ mod test_ops {
 
     fn bulk_update<I>()
     where
-        I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>,Error = AccessMethodError>
+        I: MvccIndex<
+            InMemPool,
+            Key = Vec<u8>,
+            PKey = Vec<u8>,
+            Value = Vec<u8>,
+            Error = AccessMethodError,
+        >,
     {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let hash_join_table =
-            Arc::new(I::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
-                as Arc<
-                    dyn MvccIndex<
-                        InMemPool,
-                        Key = Vec<u8>,
-                        Value = Vec<u8>,
-                        PKey = Vec<u8>,
-                        Error = AccessMethodError,
-                    >,
-                >;
+        let hash_join_table = Arc::new(I::create_with_bucket_num(c_key, mem_pool, 4).unwrap())
+            as Arc<
+                dyn MvccIndex<
+                    InMemPool,
+                    Key = Vec<u8>,
+                    Value = Vec<u8>,
+                    PKey = Vec<u8>,
+                    Error = AccessMethodError,
+                >,
+            >;
 
         for i in 0..100 {
             let key = format!("key{:010}", i).into_bytes();
             let pkey = format!("pkey{:010}", i).into_bytes();
             let value = format!("value{:010}", i).into_bytes();
-            hash_join_table.insert(key.clone(), pkey.clone(), 0, 1, value.clone()).unwrap();
+            hash_join_table
+                .insert(key.clone(), pkey.clone(), 0, 1, value.clone())
+                .unwrap();
         }
         hash_join_table.bulk_update_start().unwrap();
 
@@ -1362,7 +1384,9 @@ mod test_ops {
             let key = format!("key{:010}", i).into_bytes();
             let pkey = format!("pkey{:010}", i).into_bytes();
             let value = format!("value{:010}", i + 100).into_bytes();
-            hash_join_table.update(key.clone(), pkey.clone(), 1, 1, value.clone()).unwrap();
+            hash_join_table
+                .update(key.clone(), pkey.clone(), 1, 1, value.clone())
+                .unwrap();
         }
 
         hash_join_table.bulk_update_end().unwrap();

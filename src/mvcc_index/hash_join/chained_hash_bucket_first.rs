@@ -14,15 +14,17 @@ use crate::{
 };
 
 use std::{
-    collections::HashMap, hash::{DefaultHasher, Hash, Hasher}, sync::{atomic::AtomicU32, Arc, Mutex}, time::Duration
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::{atomic::AtomicU32, Arc, Mutex},
+    time::Duration,
 };
 
 pub const DEAFAULT_SECOND_BUCKET_NUM: usize = 1;
 
-
 #[derive(Debug, Clone)]
 pub struct ChainBucketBulkUpdate {
-    pub updated_entries: HashMap<Vec<u8>, Vec<u8>>,  // pkey, (new_value)
+    pub updated_entries: HashMap<Vec<u8>, Vec<u8>>, // pkey, (new_value)
     pub old_entries: Vec<MvccEntry>,
 }
 
@@ -67,7 +69,8 @@ impl<T: MemPool> FirstBucket<T> {
                 .map(|_| ChainBucketBulkUpdate {
                     updated_entries: HashMap::new(),
                     old_entries: Vec::new(),
-                }).collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
         );
 
         Self {
@@ -95,13 +98,20 @@ impl<T: MemPool> FirstBucket<T> {
         bucket.get(pkey, ts)
     }
 
-    pub fn update(&self, pkey: &[u8], entry: &MvccEntry, is_bulk_update: bool) -> Result<(), AccessMethodError> {
+    pub fn update(
+        &self,
+        pkey: &[u8],
+        entry: &MvccEntry,
+        is_bulk_update: bool,
+    ) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(pkey);
         let bucket = &self.bucket_entries[index];
 
         if is_bulk_update {
             let mut bulk = self.bulk_update.lock().unwrap();
-            bulk[index].updated_entries.insert(pkey.to_vec(), entry.value().to_vec());
+            bulk[index]
+                .updated_entries
+                .insert(pkey.to_vec(), entry.value().to_vec());
         } else {
             bucket.update(pkey, entry)?;
         }
@@ -176,7 +186,12 @@ impl<T: MemPool> FirstBucket<T> {
         }
     }
 
-    pub fn scan_into_delta(&self, from: Timestamp, to: Timestamp, results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,) {
+    pub fn scan_into_delta(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
+    ) {
         for bucket in &self.bucket_entries {
             bucket.delta_scan(from, to, results).unwrap();
         }
@@ -376,5 +391,4 @@ mod tests {
             num_entries
         );
     }
-
 }

@@ -1,19 +1,26 @@
 use std::{
-    collections::HashMap, sync::{
+    collections::HashMap,
+    sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
-    }, time::{Duration, Instant}
+    },
+    time::{Duration, Instant},
 };
 
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{hash_common::{KVWithTs, RowDelta}, Delta, MvccEntry, TxId},
+    mvcc_index::{
+        hash_common::{KVWithTs, RowDelta},
+        Delta, MvccEntry, TxId,
+    },
     prelude::{AccessMethodError, Timestamp},
 };
 
 use super::{
-    chained_hash_bucket_first::ChainBucketBulkUpdate, chained_hash_history_chain::ChainedHashHistoryChain, chained_hash_recent_chain::ChainedHashRecentChain
+    chained_hash_bucket_first::ChainBucketBulkUpdate,
+    chained_hash_history_chain::ChainedHashHistoryChain,
+    chained_hash_recent_chain::ChainedHashRecentChain,
 };
 
 pub static RECENT_GET_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
@@ -84,7 +91,11 @@ impl<T: MemPool> SecondBucket<T> {
         }
     }
 
-    pub fn bulk_update(&self, bulk: &mut ChainBucketBulkUpdate, new_start_ts: Timestamp) -> Result<(), AccessMethodError> {
+    pub fn bulk_update(
+        &self,
+        bulk: &mut ChainBucketBulkUpdate,
+        new_start_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
         self.recent_chain.do_bulk_update(bulk, new_start_ts)?;
         for old_entry in bulk.old_entries.iter() {
             self.history_chain.insert(old_entry)?;
@@ -157,8 +168,10 @@ impl<T: MemPool> SecondBucket<T> {
         results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
     ) -> Result<(), AccessMethodError> {
         let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
-        self.recent_chain.scan_delta_into(from, to, &mut delta_map)?;
-        self.history_chain.scan_delta_into(from, to, &mut delta_map)?;
+        self.recent_chain
+            .scan_delta_into(from, to, &mut delta_map)?;
+        self.history_chain
+            .scan_delta_into(from, to, &mut delta_map)?;
 
         results.extend(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
             let (from_kv, to_kv) = from_to_delta.split();
@@ -186,7 +199,7 @@ impl<T: MemPool> SecondBucket<T> {
                 }
             }
         }));
-        
+
         Ok(())
     }
 }
@@ -998,7 +1011,7 @@ mod tests {
 
         println!("Bucket stat after update:\n{}", bucket.stat());
     }
-    
+
     #[ignore = "failed"]
     #[test]
     fn test_second_bucket_multi_thread_insert_update_history() {

@@ -396,7 +396,11 @@ pub mod record {
 }
 use record::*;
 
-use super::{hash_common::{KVWithTs, MvccEntryLoc, RowDelta}, hash_join::chained_hash_bucket_first::ChainBucketBulkUpdate, linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate};
+use super::{
+    hash_common::{KVWithTs, MvccEntryLoc, RowDelta},
+    hash_join::chained_hash_bucket_first::ChainBucketBulkUpdate,
+    linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate,
+};
 
 pub trait HashJoinPage {
     fn init(&mut self);
@@ -467,8 +471,16 @@ pub trait HashJoinPage {
         // self.binary_search(sort_key)
         self.linear_search(sort_key)
     }
-    fn chain_bulk_update_slots_recent(&mut self, bulk: &mut ChainBucketBulkUpdate, new_start_ts: Timestamp);
-    fn linear_bulk_update_slots_recent(&mut self, bulk: &mut LinearBulkUpdate, new_start_ts: Timestamp);
+    fn chain_bulk_update_slots_recent(
+        &mut self,
+        bulk: &mut ChainBucketBulkUpdate,
+        new_start_ts: Timestamp,
+    );
+    fn linear_bulk_update_slots_recent(
+        &mut self,
+        bulk: &mut LinearBulkUpdate,
+        new_start_ts: Timestamp,
+    );
     fn binary_search(&self, sort_key: &[u8]) -> (bool, usize); // (found, slot_id)
     fn linear_search(&self, sort_key: &[u8]) -> (bool, usize); // (found, slot_id)
     /// Return slot idx of the first slot whose end_ts is greater than to target_end_ts
@@ -757,11 +769,11 @@ impl HashJoinPage for Page {
         assert!(end_ts == Timestamp::max_value());
         let header = self.unsafe_header_mut();
         header.inc_recent_slot_cnt();
-        log_warn!(
-            "[INC] page_id: {}, slot_count: {}",
-            self.get_id(),
-            header.slot_count()
-        );
+        // log_warn!(
+        //     "[INC] page_id: {}, slot_count: {}",
+        //     self.get_id(),
+        //     header.slot_count()
+        // );
         header.try_set_page_min_start_ts(start_ts);
 
         Ok(())
@@ -1799,7 +1811,6 @@ impl HashJoinPage for Page {
         }
     }
 
-
     /// Returns one MvccEntry per pkey for `search_key` visible at `ts`,
     /// using a page sorted by end_ts. O(logN + K) time, skipping old versions.
     fn scan_key_history_into(
@@ -1869,7 +1880,11 @@ impl HashJoinPage for Page {
         }
     }
 
-    fn chain_bulk_update_slots_recent(&mut self, bulk: &mut ChainBucketBulkUpdate, new_start_ts: Timestamp) {
+    fn chain_bulk_update_slots_recent(
+        &mut self,
+        bulk: &mut ChainBucketBulkUpdate,
+        new_start_ts: Timestamp,
+    ) {
         let updated_entries = &mut bulk.updated_entries;
         for i in 0..self.slot_count() {
             let slot = self.unsafe_slot(i);
@@ -1881,19 +1896,30 @@ impl HashJoinPage for Page {
                 let old_k = old_rec.key().to_owned();
                 let old_pk: Vec<u8> = old_rec.pkey().to_owned();
                 let old_start_ts = slot.start_ts();
-    
+
                 assert!(new_value.len() == old_v.len());
-                self.write_bytes(slot.offset() + slot.key_size() + slot.pkey_size(), new_value);
-                bulk.old_entries.push(MvccEntry::new(
-                    old_k, old_pk, old_v, old_start_ts, new_start_ts)
+                self.write_bytes(
+                    slot.offset() + slot.key_size() + slot.pkey_size(),
+                    new_value,
                 );
+                bulk.old_entries.push(MvccEntry::new(
+                    old_k,
+                    old_pk,
+                    old_v,
+                    old_start_ts,
+                    new_start_ts,
+                ));
                 let slot_mut = self.unsafe_slot_mut(i);
                 slot_mut.set_start_ts(new_start_ts);
                 slot_mut.set_end_ts(Timestamp::MAX);
             }
         }
     }
-    fn linear_bulk_update_slots_recent(&mut self, bulk: &mut LinearBulkUpdate, new_start_ts: Timestamp) {
+    fn linear_bulk_update_slots_recent(
+        &mut self,
+        bulk: &mut LinearBulkUpdate,
+        new_start_ts: Timestamp,
+    ) {
         let updated_entries: &mut HashMap<Vec<u8>, Vec<u8>> = &mut bulk.update_entries;
         for i in 0..self.slot_count() {
             let slot = self.unsafe_slot(i);
@@ -1905,12 +1931,19 @@ impl HashJoinPage for Page {
                 let old_k = old_rec.key().to_owned();
                 let old_pk = old_rec.pkey().to_owned();
                 let old_start_ts = slot.start_ts();
-    
+
                 assert!(new_value.len() == old_v.len());
-                self.write_bytes(slot.offset() + slot.key_size() + slot.pkey_size(), new_value);
-                bulk.old_entries.push(MvccEntry::new(
-                    old_k, old_pk, old_v, old_start_ts, new_start_ts)
+                self.write_bytes(
+                    slot.offset() + slot.key_size() + slot.pkey_size(),
+                    new_value,
                 );
+                bulk.old_entries.push(MvccEntry::new(
+                    old_k,
+                    old_pk,
+                    old_v,
+                    old_start_ts,
+                    new_start_ts,
+                ));
                 let slot_mut = self.unsafe_slot_mut(i);
                 slot_mut.set_start_ts(new_start_ts);
                 slot_mut.set_end_ts(Timestamp::MAX);

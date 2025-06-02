@@ -429,7 +429,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
         let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
-        let is_need_repair = if ts > repair_ts && repair_ts < latest_update_ts { true } else { false };
+        let is_need_repair = if ts > repair_ts && repair_ts < latest_update_ts {
+            true
+        } else {
+            false
+        };
         let idx = self.get_bucket_index(key);
         let partitions = &self.bucket_entries[idx];
 

@@ -1,5 +1,8 @@
 use core::panic;
-use std::{collections::HashMap, sync::{atomic::AtomicU32, Arc}};
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicU32, Arc},
+};
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 
@@ -8,8 +11,12 @@ use crate::{
     log_warn,
     mvcc_index::{
         hash_common::{
-            get_hashed_bucket_index, read_page, write_page, BucketEntry, RowDelta, DEFAULT_BUCKET_NUM
-        }, hash_join_page::{self, record::RecordRef, HashJoinPage}, linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate, MvccEntry
+            get_hashed_bucket_index, read_page, write_page, BucketEntry, RowDelta,
+            DEFAULT_BUCKET_NUM,
+        },
+        hash_join_page::{self, record::RecordRef, HashJoinPage},
+        linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate,
+        MvccEntry,
     },
     page::{self, Page, PageId},
     prelude::{AccessMethodError, Timestamp},

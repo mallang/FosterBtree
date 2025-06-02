@@ -1,8 +1,10 @@
 use std::{
-    collections::HashMap, sync::{
+    collections::HashMap,
+    sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
-    }, time::Duration
+    },
+    time::Duration,
 };
 
 use crate::{
@@ -10,7 +12,9 @@ use crate::{
     bp::prelude::*,
     log_debug, log_trace, log_warn,
     mvcc_index::{
-        hash_common::RowDelta, hash_join_page::{record::RecordRef, HashJoinPage}, MvccEntry
+        hash_common::RowDelta,
+        hash_join_page::{record::RecordRef, HashJoinPage},
+        MvccEntry,
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };

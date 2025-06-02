@@ -16,7 +16,9 @@ use crate::{
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
-        hash_common::RowDelta, hash_join_page::{record::RecordRef, HashJoinPage}, MvccEntry, TxId
+        hash_common::RowDelta,
+        hash_join_page::{record::RecordRef, HashJoinPage},
+        MvccEntry, TxId,
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
@@ -346,7 +348,11 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         }
     }
 
-    pub fn do_bulk_update(&self, bulk: &mut ChainBucketBulkUpdate, new_start_ts: Timestamp) -> Result<(), AccessMethodError> {
+    pub fn do_bulk_update(
+        &self,
+        bulk: &mut ChainBucketBulkUpdate,
+        new_start_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
         match self.traverse_to_endofchain_for_bulk_update(self.first_key(), bulk, new_start_ts) {
             Ok(_) => {
                 return Ok(());
@@ -400,7 +406,8 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         let base = 2;
         let mut attempts = 0;
         loop {
-            let find_page = self.try_traverse_to_endofchain_for_bulk_update(page_key, bulk, new_start_ts);
+            let find_page =
+                self.try_traverse_to_endofchain_for_bulk_update(page_key, bulk, new_start_ts);
             match find_page {
                 Ok(_) => {
                     return Ok(());

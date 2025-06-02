@@ -235,12 +235,12 @@ pub fn read_repair_btree(
             slot.set_end_ts(*next_ts);
             let header = <Page as HashJoinPage>::unsafe_header_mut(&current_page);
             header.try_set_page_max_end_ts(*next_ts);
-            log_warn!(
-                "[DEC slot: {}] page_id: {}, slot_cnt: {}",
-                loc.slot_id(),
-                loc.page_id(),
-                header.recent_slot_cnt()
-            );
+            // log_warn!(
+            //     "[DEC slot: {}] page_id: {}, slot_cnt: {}",
+            //     loc.slot_id(),
+            //     loc.page_id(),
+            //     header.recent_slot_cnt()
+            // );
             header.dec_recent_slot_cnt();
         }
     }
@@ -268,12 +268,12 @@ pub fn read_repair_vec(
         slot.set_end_ts(*next_ts);
         let header = <Page as HashJoinPage>::unsafe_header_mut(&current_page);
         header.try_set_page_max_end_ts(*next_ts);
-        log_warn!(
-            "[DEC slot: {}] page_id: {}, slot_cnt: {}",
-            loc_and_need_repair.slot_id(),
-            loc_and_need_repair.page_id(),
-            header.recent_slot_cnt()
-        );
+        // log_warn!(
+        //     "[DEC slot: {}] page_id: {}, slot_cnt: {}",
+        //     loc_and_need_repair.slot_id(),
+        //     loc_and_need_repair.page_id(),
+        //     header.recent_slot_cnt()
+        // );
         header.dec_recent_slot_cnt();
     }
 }

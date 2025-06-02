@@ -22,10 +22,8 @@ use super::{
     Timestamp, TxId, TxInfo,
 };
 
-
 pub const PAGE_ID_SIZE: usize = std::mem::size_of::<PageId>();
 pub const DEAFAULT_FIRST_BUCKET_NUM: usize = 128;
-
 
 pub struct ChainedHashTable<T: MemPool> {
     c_key: ContainerKey,
@@ -69,7 +67,6 @@ impl<T: MemPool> ChainedHashTable<T> {
             bucket_entries.push(Arc::new(second_table));
         }
         drop(meta_page);
-
 
         Self {
             mem_pool,
@@ -242,8 +239,8 @@ impl<T: MemPool> ChainedHashTable<T> {
 
     fn delta_scan_into_vec(
         &self,
-        from: Timestamp, 
-        to: Timestamp, 
+        from: Timestamp,
+        to: Timestamp,
         results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
     ) -> Result<(), AccessMethodError> {
         for bucket in &self.bucket_entries {
@@ -419,7 +416,9 @@ impl<T: MemPool> ChainedHashTable<T> {
     }
 
     fn bulk_update(&self) -> Result<(), AccessMethodError> {
-        let new_start_ts = self.largest_txn_ts.load(std::sync::atomic::Ordering::Acquire);
+        let new_start_ts = self
+            .largest_txn_ts
+            .load(std::sync::atomic::Ordering::Acquire);
         for bucket in &self.bucket_entries {
             bucket.do_bulk_update(new_start_ts)?;
         }
@@ -445,7 +444,7 @@ impl<T: MemPool> Clone for ChainedHashTable<T> {
             ),
             is_bulk_update: AtomicBool::new(
                 self.is_bulk_update
-                   .load(std::sync::atomic::Ordering::Acquire),
+                    .load(std::sync::atomic::Ordering::Acquire),
             ),
         }
     }
@@ -525,7 +524,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     ) -> Result<(), Self::Error> {
         self.set_largest_txn_ts(ts);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
-        ChainedHashTable::update(self, entry.key(), entry.pkey(), &entry, self.is_bulk_update.load(std::sync::atomic::Ordering::Acquire))
+        ChainedHashTable::update(
+            self,
+            entry.key(),
+            entry.pkey(),
+            &entry,
+            self.is_bulk_update
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
     }
 
     fn update_write_repair(
@@ -538,7 +544,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     ) -> Result<(), Self::Error> {
         self.set_largest_txn_ts(ts);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
-        ChainedHashTable::update(self, entry.key(), entry.pkey(), &entry, self.is_bulk_update.load(std::sync::atomic::Ordering::Acquire))
+        ChainedHashTable::update(
+            self,
+            entry.key(),
+            entry.pkey(),
+            &entry,
+            self.is_bulk_update
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
     }
 
     fn delete(
@@ -664,12 +677,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
     }
 
     fn bulk_update_end(&self) -> Result<(), Self::Error> {
-        self.is_bulk_update.store(false, std::sync::atomic::Ordering::Release);
+        self.is_bulk_update
+            .store(false, std::sync::atomic::Ordering::Release);
         self.bulk_update()?;
         Ok(())
     }
     fn bulk_update_start(&self) -> Result<(), Self::Error> {
-        self.is_bulk_update.store(true, std::sync::atomic::Ordering::Release);
+        self.is_bulk_update
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 }

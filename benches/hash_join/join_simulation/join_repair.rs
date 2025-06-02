@@ -419,10 +419,14 @@ impl TxBench {
                 let sample_idx = zipf.sample(&mut rng) - 1;
                 idx_set.insert(sample_idx);
             }
-            idx_set.into_iter().map(|idx| self.key_pairs[idx].clone()).collect()
+            idx_set
+                .into_iter()
+                .map(|idx| self.key_pairs[idx].clone())
+                .collect()
         };
 
-        let sampled_pairs: Vec<(Vec<u8>, Vec<u8>)> = gen_func(update_count, self.key_pairs.len(), self.cli.update_skew_exp);
+        let sampled_pairs: Vec<(Vec<u8>, Vec<u8>)> =
+            gen_func(update_count, self.key_pairs.len(), self.cli.update_skew_exp);
         let mut ops = Vec::new();
         for (pkey, join_key) in sampled_pairs {
             let new_val = self.random_bytes(self.cli.value_size);

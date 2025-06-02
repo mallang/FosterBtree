@@ -1,15 +1,19 @@
 use core::panic;
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{atomic::{AtomicBool, AtomicU64}, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc, Mutex,
+    },
 };
 
 use crate::{
     bp::{ContainerKey, MemPool},
     log_warn,
     mvcc_index::{
-        hash_common::{KVWithTs, DEFAULT_BUCKET_NUM}, hash_join_page::record::RecordRef, Delta, MvccEntry,
-        MvccIndex,
+        hash_common::{KVWithTs, DEFAULT_BUCKET_NUM},
+        hash_join_page::record::RecordRef,
+        Delta, MvccEntry, MvccIndex,
     },
     prelude::{AccessMethodError, Timestamp},
 };
@@ -62,13 +66,17 @@ impl<T: MemPool + 'static> LinearHashTable<T> {
 
     fn bulk_update(&self) -> Result<(), AccessMethodError> {
         let mut bulk_update = self.bulk_update.lock().unwrap();
-        self.recent.bulk_update_recent(self.largest_txn_ts.load(std::sync::atomic::Ordering::Acquire), &mut bulk_update)?;
+        self.recent.bulk_update_recent(
+            self.largest_txn_ts
+                .load(std::sync::atomic::Ordering::Acquire),
+            &mut bulk_update,
+        )?;
 
         for entry in &bulk_update.old_entries {
             let history_rec = RecordRef::new(&entry.key(), &entry.pkey(), &entry.value());
             self.history
-               .insert_history(&history_rec, entry.start_ts(), entry.end_ts())
-               .unwrap();
+                .insert_history(&history_rec, entry.start_ts(), entry.end_ts())
+                .unwrap();
         }
 
         bulk_update.update_entries.clear();
@@ -78,8 +86,8 @@ impl<T: MemPool + 'static> LinearHashTable<T> {
 
     fn delta_scan_into_vec(
         &self,
-        from: Timestamp, 
-        to: Timestamp, 
+        from: Timestamp,
+        to: Timestamp,
         results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
     ) -> Result<(), AccessMethodError> {
         let mut delta_map = HashMap::new();
@@ -213,7 +221,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         // let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         let rec = RecordRef::new(&key, &pkey, &value);
 
-        if self.is_bulk_update.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .is_bulk_update
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             let mut bulk_update = self.bulk_update.lock().unwrap();
             bulk_update.update_entries.insert(pkey, value);
             return Ok(());
@@ -221,7 +232,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
             match self.recent.update(&rec, ts, Timestamp::MAX) {
                 Ok(mut old_res) => {
                     old_res.set_end_ts(&ts);
-                    let history_rec = RecordRef::new(&old_res.key(), &old_res.pkey(), &old_res.value());
+                    let history_rec =
+                        RecordRef::new(&old_res.key(), &old_res.pkey(), &old_res.value());
                     self.history
                         .insert_history(&history_rec, old_res.start_ts(), old_res.end_ts())
                         .unwrap();
@@ -405,12 +417,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     }
 
     fn bulk_update_end(&self) -> Result<(), Self::Error> {
-        self.is_bulk_update.store(false, std::sync::atomic::Ordering::Release);
+        self.is_bulk_update
+            .store(false, std::sync::atomic::Ordering::Release);
         self.bulk_update()?;
         Ok(())
     }
     fn bulk_update_start(&self) -> Result<(), Self::Error> {
-        self.is_bulk_update.store(true, std::sync::atomic::Ordering::Release);
+        self.is_bulk_update
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 }
