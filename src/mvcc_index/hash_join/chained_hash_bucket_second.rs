@@ -5,12 +5,10 @@ use std::{
     }, time::{Duration, Instant}
 };
 
-use dashmap::mapref::entry;
-
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{MvccEntry, TxId},
+    mvcc_index::{hash_common::{KVWithTs, RowDelta}, Delta, MvccEntry, TxId},
     prelude::{AccessMethodError, Timestamp},
 };
 
@@ -30,8 +28,6 @@ pub struct SecondBucket<T: MemPool> {
 
     recent_chain: Arc<ChainedHashRecentChain<T>>,
     history_chain: Arc<ChainedHashHistoryChain<T>>,
-
-    bulk_update: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 impl<T: MemPool> SecondBucket<T> {
@@ -44,7 +40,6 @@ impl<T: MemPool> SecondBucket<T> {
             mem_pool,
             recent_chain,
             history_chain,
-            bulk_update: HashMap::new(),
         }
     }
 
@@ -152,6 +147,46 @@ impl<T: MemPool> SecondBucket<T> {
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         self.recent_chain.scan_into_vec(ts, results)?;
+        Ok(())
+    }
+
+    pub fn delta_scan(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
+    ) -> Result<(), AccessMethodError> {
+        let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
+        self.recent_chain.scan_delta_into(from, to, &mut delta_map)?;
+        self.history_chain.scan_delta_into(from, to, &mut delta_map)?;
+
+        results.extend(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
+            let (from_kv, to_kv) = from_to_delta.split();
+            if &to_kv == &KVWithTs::default() {
+                // both invalid
+                None
+            } else if &from_kv == &KVWithTs::default() {
+                // from is invalid but to is valid
+                Some((
+                    to_kv.get_k().to_vec(),
+                    pk,
+                    Delta::Inserted(to_kv.get_v().to_vec()),
+                ))
+            } else {
+                // both is valid
+                if from_kv.get_v() == to_kv.get_v() {
+                    // no change
+                    None
+                } else {
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Updated(to_kv.get_v().to_vec()),
+                    ))
+                }
+            }
+        }));
+        
         Ok(())
     }
 }

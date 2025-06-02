@@ -181,6 +181,12 @@ impl KVWithTs {
             self.start_ts = new_st;
         }
     }
+
+    pub fn set(&mut self, new_st: Timestamp, new_k: &[u8], new_v: &[u8]) {
+        self.k = new_k.to_vec();
+        self.v = new_v.to_vec();
+        self.start_ts = new_st;
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Debug)]

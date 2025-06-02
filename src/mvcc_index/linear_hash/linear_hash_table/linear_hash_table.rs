@@ -8,7 +8,7 @@ use crate::{
     bp::{ContainerKey, MemPool},
     log_warn,
     mvcc_index::{
-        hash_common::DEFAULT_BUCKET_NUM, hash_join_page::record::RecordRef, Delta, MvccEntry,
+        hash_common::{KVWithTs, DEFAULT_BUCKET_NUM}, hash_join_page::record::RecordRef, Delta, MvccEntry,
         MvccIndex,
     },
     prelude::{AccessMethodError, Timestamp},
@@ -73,6 +73,45 @@ impl<T: MemPool + 'static> LinearHashTable<T> {
 
         bulk_update.update_entries.clear();
         bulk_update.old_entries.clear();
+        Ok(())
+    }
+
+    fn delta_scan_into_vec(
+        &self,
+        from: Timestamp, 
+        to: Timestamp, 
+        results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
+    ) -> Result<(), AccessMethodError> {
+        let mut delta_map = HashMap::new();
+        self.recent.scan_delta_into(from, to, &mut delta_map)?;
+        self.history.scan_delta_into(from, to, &mut delta_map)?;
+
+        results.extend(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
+            let (from_kv, to_kv) = from_to_delta.split();
+            if &to_kv == &KVWithTs::default() {
+                // both invalid
+                None
+            } else if &from_kv == &KVWithTs::default() {
+                // from is invalid but to is valid
+                Some((
+                    to_kv.get_k().to_vec(),
+                    pk,
+                    Delta::Inserted(to_kv.get_v().to_vec()),
+                ))
+            } else {
+                // both is valid
+                if from_kv.get_v() == to_kv.get_v() {
+                    // no change
+                    None
+                } else {
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Updated(to_kv.get_v().to_vec()),
+                    ))
+                }
+            }
+        }));
         Ok(())
     }
 }
@@ -329,31 +368,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        let mut map = BTreeMap::<Vec<u8>, (Vec<u8>, Delta<Vec<u8>>)>::new();
-        let to = self.scan(to_ts)?;
-        for entry in to {
-            map.insert(entry.1, (entry.0, Delta::Inserted(entry.2)));
-        }
-
-        let from = self.scan(from_ts)?;
-        for entry in from {
-            log_warn!(
-                "from ts : {} get entry: {:?}",
-                from_ts,
-                String::from_utf8(entry.0.clone())
-            );
-            let e = map.get_mut(&entry.1);
-            if let Some(map_entry) = e {
-                if map_entry.1.get_value().unwrap() == &entry.2 {
-                    map.remove(&entry.1);
-                } else {
-                    map_entry.1 = Delta::Updated(map_entry.1.get_value().unwrap().to_vec());
-                }
-            } else {
-                map.insert(entry.1, (entry.0, Delta::Deleted));
-            }
-        }
-        Ok(Box::new(map.into_iter().map(|(pk, kv)| (kv.0, pk, kv.1))))
+        let mut results = Vec::new();
+        LinearHashTable::delta_scan_into_vec(self, from_ts, to_ts, &mut results)?;
+        Ok(Box::new(results.into_iter()))
     }
 
     fn scan_read_repair(

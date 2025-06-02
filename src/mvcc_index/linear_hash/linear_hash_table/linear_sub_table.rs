@@ -1,5 +1,5 @@
 use core::panic;
-use std::sync::{atomic::AtomicU32, Arc};
+use std::{collections::HashMap, sync::{atomic::AtomicU32, Arc}};
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 
@@ -8,11 +8,8 @@ use crate::{
     log_warn,
     mvcc_index::{
         hash_common::{
-            get_hashed_bucket_index, read_page, write_page, BucketEntry, DEFAULT_BUCKET_NUM,
-        },
-        hash_join_page::{self, record::RecordRef, HashJoinPage},
-        MvccEntry, 
-        linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate,
+            get_hashed_bucket_index, read_page, write_page, BucketEntry, RowDelta, DEFAULT_BUCKET_NUM
+        }, hash_join_page::{self, record::RecordRef, HashJoinPage}, linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate, MvccEntry
     },
     page::{self, Page, PageId},
     prelude::{AccessMethodError, Timestamp},
@@ -231,6 +228,25 @@ impl<T: MemPool + 'static> LinearSubTable<T> {
             let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
             let mut write_page = write_page(&*self.mem_pool, page_f_key);
             <Page as HashJoinPage>::chained_hash_garbage_collect(&mut *write_page, &ts)?;
+        }
+        Ok(())
+    }
+
+    pub fn scan_delta_into(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        deltas: &mut HashMap<Vec<u8>, RowDelta>,
+    ) -> Result<(), AccessMethodError> {
+        let readguard = self.buckets.read();
+        let buckets = &readguard;
+        let buckets_num = buckets.len();
+        for i in 0..buckets_num {
+            let pid = buckets[i].page_id();
+            let fid = buckets[i].frame_id();
+            let page_f_key = PageFrameKey::new_with_frame_id(self.c_key, pid, fid);
+            let read_page = read_page(&*self.mem_pool, page_f_key);
+            <Page as HashJoinPage>::chain_scan_delta_into(&read_page, from, to, deltas);
         }
         Ok(())
     }

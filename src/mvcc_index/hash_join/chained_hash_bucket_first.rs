@@ -8,8 +8,7 @@ use super::{
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::hash_join_page::ChainedHashMetaPage,
-    mvcc_index::{MvccEntry, TxId},
+    mvcc_index::{hash_join_page::ChainedHashMetaPage, Delta, MvccEntry, TxId},
     page::PageId,
     prelude::AccessMethodError,
 };
@@ -174,6 +173,12 @@ impl<T: MemPool> FirstBucket<T> {
     pub fn scan_into_vec_recent(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
         for bucket in &self.bucket_entries {
             bucket.scan_into_vec_recent(ts, results).unwrap();
+        }
+    }
+
+    pub fn scan_into_delta(&self, from: Timestamp, to: Timestamp, results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,) {
+        for bucket in &self.bucket_entries {
+            bucket.delta_scan(from, to, results).unwrap();
         }
     }
 

@@ -1,6 +1,6 @@
 use core::panic;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         atomic::{self, AtomicU32, AtomicU64},
         Arc,
@@ -16,8 +16,7 @@ use crate::{
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
-        hash_join_page::{record::RecordRef, HashJoinPage},
-        MvccEntry, TxId,
+        hash_common::RowDelta, hash_join_page::{record::RecordRef, HashJoinPage}, MvccEntry, TxId
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
@@ -772,6 +771,32 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         let mut current_page = self.first_page();
         loop {
             current_page.chain_scan_into_vec(ts, results);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn scan_delta_into(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        results: &mut HashMap<Vec<u8>, RowDelta>,
+    ) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        loop {
+            current_page.chain_scan_delta_into(from, to, results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
                 let next_page = self.read_page(PageFrameKey::new_with_frame_id(
                     self.c_key, next_pid, next_fid,

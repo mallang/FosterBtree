@@ -1,9 +1,8 @@
 use std::{
-    sync::{
+    collections::HashMap, sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
-    },
-    time::Duration,
+    }, time::Duration
 };
 
 use crate::{
@@ -11,8 +10,7 @@ use crate::{
     bp::prelude::*,
     log_debug, log_trace, log_warn,
     mvcc_index::{
-        hash_join_page::{record::RecordRef, HashJoinPage},
-        MvccEntry,
+        hash_common::RowDelta, hash_join_page::{record::RecordRef, HashJoinPage}, MvccEntry
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
@@ -359,6 +357,32 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
                     log_debug!(
                         "Frame of the next page has been changed. Trying to fix the frame id"
                     );
+                    let new_frame_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
+                    let _ = fix_frame_id(current_page, &new_frame_key);
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn scan_delta_into(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        results: &mut HashMap<Vec<u8>, RowDelta>,
+    ) -> Result<(), AccessMethodError> {
+        let mut current_page = self.first_page();
+        loop {
+            current_page.chain_scan_delta_into(from, to, results);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
+                    self.c_key, next_pid, next_fid,
+                ));
+                if next_page.frame_id() != next_fid {
                     let new_frame_key =
                         PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
                     let _ = fix_frame_id(current_page, &new_frame_key);

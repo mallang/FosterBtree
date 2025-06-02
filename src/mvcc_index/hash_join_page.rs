@@ -646,7 +646,12 @@ pub trait HashJoinPage {
     );
 
     fn chain_scan_into_vec(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>);
-
+    fn chain_scan_delta_into(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        results: &mut HashMap<Vec<u8>, RowDelta>,
+    );
 
     fn scan_key_heap_read_repair(
         &self,
@@ -1746,6 +1751,51 @@ impl HashJoinPage for Page {
                 et,
             );
             results.push(entry);
+        }
+    }
+
+    fn chain_scan_delta_into(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+        delta_map: &mut HashMap<Vec<u8>, RowDelta>,
+    ) {
+        let slot_count = self.slot_count();
+
+        for i in 0..slot_count {
+            let slot = self.unsafe_slot(i);
+
+            // 1) Check if this version is visible at time `ts`.
+            let st = slot.start_ts();
+            let et = slot.end_ts();
+
+            if st <= from && et > from {
+                // from in the slot
+                let rec = self.record_ref_from_slot(&slot);
+
+                let delta_entry = delta_map.get_mut(rec.pkey());
+                if let Some(entry_v) = delta_entry {
+                    entry_v.from().set(from, rec.key(), rec.val());
+                } else {
+                    let mut row_delta = RowDelta::new();
+                    row_delta.from().set(from, rec.key(), rec.val());
+                    delta_map.insert(rec.pkey().to_vec(), row_delta);
+                }
+            }
+
+            if st <= to && et > to {
+                // to in the slot
+                let rec = self.record_ref_from_slot(&slot);
+
+                let delta_entry = delta_map.get_mut(rec.pkey());
+                if let Some(entry_v) = delta_entry {
+                    entry_v.to().set(to, rec.key(), rec.val());
+                } else {
+                    let mut row_delta = RowDelta::new();
+                    row_delta.to().set(to, rec.key(), rec.val());
+                    delta_map.insert(rec.pkey().to_vec(), row_delta);
+                }
+            }
         }
     }
 

@@ -240,6 +240,18 @@ impl<T: MemPool> ChainedHashTable<T> {
         Ok(())
     }
 
+    fn delta_scan_into_vec(
+        &self,
+        from: Timestamp, 
+        to: Timestamp, 
+        results: &mut Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>,
+    ) -> Result<(), AccessMethodError> {
+        for bucket in &self.bucket_entries {
+            bucket.scan_into_delta(from, to, results);
+        }
+        Ok(())
+    }
+
     pub fn scan_into_vec_recent(
         &self,
         ts: &Timestamp,
@@ -618,31 +630,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         Box<dyn Iterator<Item = (Self::Key, Self::PKey, Delta<Self::Value>)> + Send>,
         Self::Error,
     > {
-        let mut map = BTreeMap::<Vec<u8>, (Vec<u8>, Delta<Vec<u8>>)>::new();
-        let to = self.scan(to_ts)?;
-        for entry in to {
-            map.insert(entry.1, (entry.0, Delta::Inserted(entry.2)));
-        }
-
-        let from = self.scan(from_ts)?;
-        for entry in from {
-            log_warn!(
-                "from ts : {} get entry: {:?}",
-                from_ts,
-                String::from_utf8(entry.0.clone())
-            );
-            let e = map.get_mut(&entry.1);
-            if let Some(map_entry) = e {
-                if map_entry.1.get_value().unwrap() == &entry.2 {
-                    map.remove(&entry.1);
-                } else {
-                    map_entry.1 = Delta::Updated(map_entry.1.get_value().unwrap().to_vec());
-                }
-            } else {
-                map.insert(entry.1, (entry.0, Delta::Deleted));
-            }
-        }
-        Ok(Box::new(map.into_iter().map(|(pk, kv)| (kv.0, pk, kv.1))))
+        let mut results = Vec::new();
+        ChainedHashTable::delta_scan_into_vec(self, from_ts, to_ts, &mut results)?;
+        Ok(Box::new(results.into_iter()))
     }
 
     fn delta_scan_read_repair(
