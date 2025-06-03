@@ -335,7 +335,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
             let partition_collection = bucket.read().unwrap();
             if self.is_write_repair.load(Ordering::SeqCst) {
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 && ts < p.get_range().1 {
+                    if ts >= p.get_range().0 {
                         // println!("scan partition: {:?}, ts: {}", p.get_range(), ts);
                         p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
                     } else {
@@ -346,7 +346,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
                 let mut best_candidates = HashMap::new();
                 // let mut idx = 0;
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 && ts < p.get_range().1 {
+                    if ts >= p.get_range().0 {
                         // println!("scan partition: {:?}, ts: {}", p.get_range(), ts);
                         p.chain().scan_unique(ts, &mut best_candidates).unwrap();
                     } else {
@@ -384,7 +384,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
                     let mut best_candidates = HashMap::new();
                     let mut versions_map = HashMap::new();
                     for p in partition_collection.partitions().iter() {
-                        if ts >= p.get_range().0 && ts < p.get_range().1 {
+                        if ts >= p.get_range().0 {
                             p.chain()
                                 .scan_unique_read_repair(
                                     ts,

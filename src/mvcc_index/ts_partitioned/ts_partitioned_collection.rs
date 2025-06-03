@@ -45,6 +45,10 @@ impl<T: MemPool + 'static> TimestampPartition<T> {
         &self.range
     }
 
+    pub fn set_max_start_ts(&mut self, new_ts: Timestamp) {
+        self.range.1 = new_ts;
+    }
+
     pub fn chain(&self) -> &Arc<HeapHashChain<T>> {
         &self.chain
     }
@@ -70,18 +74,19 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
 
     pub fn split_last_partition_at(&mut self, new_ts: Timestamp) -> Result<(), AccessMethodError> {
         let last_idx = self.partitions.len().saturating_sub(1);
-        let last_partition = &self.partitions[last_idx];
-        let (start, end) = last_partition.get_range();
+        let last_partition = &mut self.partitions[last_idx];
+        last_partition.set_max_start_ts(new_ts - 1);
 
-        if &new_ts <= start || &new_ts >= end {
-            panic!(
-                "Invalid timestamp for partition split, start & end ts: ({} {}), new_ts: {}",
-                start, end, new_ts
-            );
-        }
+        // if &new_ts <= start || &new_ts >= end {
+        //     panic!(
+        //         "Invalid timestamp for partition split, start & end ts: ({} {}), new_ts: {}",
+        //         start, end, new_ts
+        //     );
+        // }
+
 
         let new_partition =
-            TimestampPartition::new(self.c_key, self.mem_pool.clone(), (new_ts, *end));
+            TimestampPartition::new(self.c_key, self.mem_pool.clone(), (new_ts, Timestamp::MAX));
 
         self.partitions.push(new_partition);
 
@@ -100,7 +105,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         ts: Timestamp,
     ) -> Result<MvccEntry, AccessMethodError> {
         for p in self.partitions.iter().rev() {
-            if ts >= p.range.0 && ts < p.range.1 {
+            if ts >= p.range.0 {
                 match p.chain.get_no_repair(pkey, &ts) {
                     Ok(entry) => return Ok(entry),
                     Err(AccessMethodError::KeyNotFound) => continue,
@@ -121,7 +126,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         // MUST reverse order
         let mut ret = Err(AccessMethodError::KeyNotFound);
         for p in self.partitions.iter().rev() {
-            if ts >= p.range.0 && ts < p.range.1 {
+            if ts >= p.range.0 {
                 match p.chain.get_read_repair(pkey, &ts, &mut versions) {
                     Ok(entry) => {
                         ret = Ok(entry);
@@ -175,7 +180,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
 
     pub fn delete(&self, ts: Timestamp, pkey: &[u8]) -> Result<(), AccessMethodError> {
         for p in self.partitions.iter().rev() {
-            if ts >= p.range.0 && ts < p.range.1 {
+            if ts >= p.range.0 {
                 if p.chain.delete(pkey, &ts).is_ok() {
                     return Ok(());
                 }
@@ -192,7 +197,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let mut best_candidates = HashMap::new();
         for p in self.partitions.iter() {
-            if ts >= p.range.0 && ts < p.range.1 {
+            if ts >= p.range.0 {
                 let partition_scanner = p.chain.scan_key_vec_read_repair(key, &ts, None)?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
@@ -213,7 +218,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         let mut versions_map = HashMap::new();
         // iterate in natural order
         for p in self.partitions.iter() {
-            if ts >= p.range.0 && ts < p.range.1 {
+            if ts >= p.range.0 {
                 let partition_scanner =
                     p.chain
                         .scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
@@ -294,6 +299,10 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>> {
         let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
         for p in self.partitions.iter() {
+            let (_min_start_ts, max_start_ts) = p.get_range().to_owned();
+            if from > max_start_ts {
+                continue;
+            }
             p.chain.scan_delta(from, to, &mut delta_map);
         }
 
