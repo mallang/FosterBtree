@@ -18,7 +18,6 @@ use std::time::{Duration, Instant};
 
 const PKEY_PER_JOIN_KEY: usize = 500;
 const JOIN_KEY_PER_BUCKET: usize = 20;
-const LINEAR_BUCKET_NUM: usize = 2048;
 
 #[derive(Debug, Clone)]
 pub enum OperationType {
@@ -1400,7 +1399,7 @@ fn main() -> Result<()> {
     // no_repair
     {
         let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
+        let c_key = ContainerKey::new(1, 1);
 
         let mut table_no_repair = match hash_table_t {
             HashTableType::RecentHistoryChained => Box::new(
@@ -1433,7 +1432,7 @@ fn main() -> Result<()> {
     // read_repair
     {
         let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 1);
+        let c_key = ContainerKey::new(2, 2);
 
         let mut table_read_repair = match hash_table_t {
             HashTableType::RecentHistoryChained => Box::new(
@@ -1466,7 +1465,7 @@ fn main() -> Result<()> {
     // write_repair
     {
         let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 2);
+        let c_key = ContainerKey::new(3, 3);
 
         let mut table_write_repair = match hash_table_t {
             HashTableType::RecentHistoryChained => Box::new(
