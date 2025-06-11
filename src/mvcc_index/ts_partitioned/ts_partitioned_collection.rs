@@ -84,7 +84,6 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         //     );
         // }
 
-
         let new_partition =
             TimestampPartition::new(self.c_key, self.mem_pool.clone(), (new_ts, Timestamp::MAX));
 

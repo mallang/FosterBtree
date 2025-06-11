@@ -396,7 +396,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
-            if self.is_write_repair.load(Ordering::SeqCst) {
+            if self.is_write_repair.load(Ordering::SeqCst)
+                || (ts == 1 && self.latest_update_ts.load(Ordering::SeqCst) == 0)
+            {
                 bucket.scan_unique_write_repair(ts, &mut result)?;
             } else {
                 let mut best_candidates = HashMap::new();
@@ -528,29 +530,29 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         } else {
             false
         };
+        if is_need_repair {
+            let mut result = vec![];
+            for bucket in &self.bucket_entries {
+                let mut best_candidates = HashMap::new();
+                let bucket_chain_result = {
+                    let mut versions_map = HashMap::new();
+                    bucket.scan_unique_read_repair(ts, &mut best_candidates, &mut versions_map)?;
+                    for versions in versions_map.into_values() {
+                        read_repair_vec(&self.mem_pool, &versions, self.c_key);
+                    }
 
-        let mut result = vec![];
-        for bucket in &self.bucket_entries {
-            let mut best_candidates = HashMap::new();
-            let bucket_chain_result = if is_need_repair {
-                let mut versions_map = HashMap::new();
-                bucket.scan_unique_read_repair(ts, &mut best_candidates, &mut versions_map)?;
-                for versions in versions_map.into_values() {
-                    read_repair_vec(&self.mem_pool, &versions, self.c_key);
-                }
+                    best_candidates.into_values()
+                };
 
-                best_candidates.into_values()
-            } else {
-                bucket.scan_unique(ts, &mut best_candidates)?;
-                best_candidates.into_values()
-            };
+                result.extend(bucket_chain_result);
+            }
 
-            result.extend(bucket_chain_result);
+            Ok(Box::new(
+                result.into_iter().map(|e| (e.key, e.pkey, e.value)),
+            ))
+        } else {
+            self.scan(ts)
         }
-
-        Ok(Box::new(
-            result.into_iter().map(|e| (e.key, e.pkey, e.value)),
-        ))
     }
 
     fn bulk_update_start(&self) -> Result<(), Self::Error> {
