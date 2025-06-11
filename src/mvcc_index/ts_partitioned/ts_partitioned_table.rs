@@ -333,12 +333,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
             let partition_collection = bucket.read().unwrap();
-            if self.is_write_repair.load(Ordering::SeqCst)
-                || (ts == 1 && self.latest_update_ts.load(Ordering::SeqCst) == 0)
-            {
+            if self.is_write_repair.load(Ordering::SeqCst) {
+                // write repair -> no need to use map to track best candidates
                 for p in partition_collection.partitions().iter() {
                     if ts >= p.get_range().0 {
-                        // println!("scan partition: {:?}, ts: {}", p.get_range(), ts);
                         p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
                     } else {
                         // println!("skip partition: {:?}, ts: {}", p.get_range(), ts);

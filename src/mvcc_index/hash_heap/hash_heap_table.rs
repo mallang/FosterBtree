@@ -396,9 +396,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
-            if self.is_write_repair.load(Ordering::SeqCst)
-                || (ts == 1 && self.latest_update_ts.load(Ordering::SeqCst) == 0)
-            {
+            if self.is_write_repair.load(Ordering::SeqCst) {
+                // write repair -> no need to use map to track best candidates
                 bucket.scan_unique_write_repair(ts, &mut result)?;
             } else {
                 let mut best_candidates = HashMap::new();
