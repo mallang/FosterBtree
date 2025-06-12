@@ -397,12 +397,18 @@ pub mod record {
 use record::*;
 
 use super::{
+    chain_hash::chained_hash_bucket_second::ChainBucketBulkUpdate,
     hash_common::{KVWithTs, MvccEntryLoc, RowDelta},
-    hash_join::chained_hash_bucket_first::ChainBucketBulkUpdate,
     linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate,
 };
 
 pub trait HashJoinPage {
+    fn chain_scan_key(&self, search_key: &[u8], ts: &Timestamp, result_map: &mut Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), AccessMethodError>;
+    fn chain_update_recent(
+        &mut self,
+        new_entry: &MvccEntry,
+        new_ts: Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError>;
     fn init(&mut self);
 
     fn insert_heap_no_repair(
@@ -657,7 +663,7 @@ pub trait HashJoinPage {
         results: &mut Vec<MvccEntry>,
     );
 
-    fn chain_scan_into_vec(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>);
+    fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>);
     fn chain_scan_delta_into(
         &self,
         from: Timestamp,
@@ -681,7 +687,7 @@ pub trait HashJoinPage {
     fn max_end_ts(&self) -> Timestamp;
 
     // bulk update get repaired versions
-    fn heap_scan_bulk_update_repair(
+    fn heap_bulk_update_repair_collect(
         &self,
         write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
     ) -> Result<(), AccessMethodError>;
@@ -766,7 +772,7 @@ impl HashJoinPage for Page {
         self.insert_entry_at_slot_id(self.slot_count(), &rec, start_ts, end_ts)?;
 
         // update min-max info
-        assert!(end_ts == Timestamp::max_value());
+        assert_eq!(end_ts, Timestamp::max_value());
         let header = self.unsafe_header_mut();
         header.inc_recent_slot_cnt();
         // log_warn!(
@@ -797,32 +803,6 @@ impl HashJoinPage for Page {
             // TODO: Need to compact the page
             return Err(AccessMethodError::OutOfSpace);
         }
-
-        // // 2) For any existing slot whose end_ts() > entry.start_ts() (found via binary_search_by_end_ts),
-        // //    if that slot’s pkey matches, adjust end_ts either on the old version or the new version.
-        // let start_idx = self.binary_search_by_end_ts(entry.start_ts());
-        // for idx in start_idx..self.slot_count() {
-        //     let slot = self.slot(idx);
-        //     // If slot.start_ts() <= new entry’s start_ts,
-        //     // we fix the old version’s end_ts to the new entry’s start_ts.
-        //     // Else the new version’s end_ts is set to the old slot’s start_ts.
-        //     if slot.start_ts() <= entry.start_ts() {
-        //         // Use slot_pkey_matches to skip reading record unless prefix is promising.
-        //         if let Some(_existing_rec) = self.slot_pkey_matches(&slot, entry.pkey()) {
-        //             // The slot’s pkey matches => fix up its end_ts
-        //             let mut updated_slot = slot;
-        //             updated_slot.set_end_ts(entry.start_ts());
-        //             // Remove the slot from idx, then insert it at start_idx to keep it sorted by end_ts
-        //             self.delete_slot_at_id(idx);
-        //             self.insert_slot_at_id(&updated_slot, start_idx);
-        //         }
-        //     } else {
-        //         // slot.start_ts() > entry.start_ts() => new version’s end_ts = slot.start_ts()
-        //         if let Some(_existing_rec) = self.slot_pkey_matches(&slot, entry.pkey()) {
-        //             entry.set_end_ts(&slot.start_ts());
-        //         }
-        //     }
-        // }
 
         // 3) Now insert the new record into the page.
         let new_rec_offset = self.rec_start_offset() - new_rec_ref.size();
@@ -907,7 +887,7 @@ impl HashJoinPage for Page {
                 continue;
             }
             let end = slot.end_ts();
-            if end < *ts {
+            if end <= *ts {
                 // This slot is too old; skip it.
                 continue;
             }
@@ -981,7 +961,7 @@ impl HashJoinPage for Page {
         }
     }
 
-    fn heap_scan_bulk_update_repair(
+    fn heap_bulk_update_repair_collect(
         &self,
         write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
     ) -> Result<(), AccessMethodError> {
@@ -1033,7 +1013,6 @@ impl HashJoinPage for Page {
             new_rec.val(),
             0, // for temporary use
         );
-        let new_rec = RecordRef::new(new_rec.key(), new_rec.pkey(), new_rec.val());
 
         let old_rec = HashJoinPage::record_ref_from_slotid(self, slot_id);
 
@@ -1096,6 +1075,25 @@ impl HashJoinPage for Page {
         HashJoinPage::increase_total_bytes_used(self, new_rec_size);
         HashJoinPage::decrease_total_bytes_used(self, old_rec_size);
         Ok(old_entry)
+    }
+
+    fn chain_update_recent(
+        &mut self,
+        new_entry: &MvccEntry,
+        new_ts: Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
+        for i in 0..self.slot_count() {
+            let slot = self.unsafe_slot(i);
+            if slot.start_ts() > new_ts {
+                continue;
+            }
+            if let Some(_) = self.slot_pkey_matches(&slot, new_entry.pkey()) {
+                // update it 
+                let new_rec = RecordRef::new(new_entry.key(), new_entry.pkey(), new_entry.value());
+                return Ok(self.update_at_slot_id(&new_rec, new_ts, Timestamp::MAX, i).unwrap());
+            }
+        }
+        Err(AccessMethodError::KeyNotFound)
     }
 
     fn update_heap_write_repair(
@@ -1652,6 +1650,48 @@ impl HashJoinPage for Page {
         Ok(())
     }
 
+    /// For “heap” pages, we do a linear scan.  But *instead* of returning a Vec,
+    /// we pass in a &mut HashMap so we can update the "best version" logic
+    /// directly without creating an intermediate Vec.
+    /// Both  Read Repair and No Repair
+    fn chain_scan_key(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        result_map: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), AccessMethodError> {
+        let ts = *ts;
+        // For each slot:
+        for slot_idx in 0..self.slot_count() {
+            let slot = self.unsafe_slot(slot_idx);
+
+            // timestamp filter
+            if slot.start_ts() > ts || slot.end_ts() <= ts {
+                continue;
+            }
+
+            // 1) Compare prefix, etc. (same as your existing logic)
+            let slot_key_len = slot.key_size();
+            if slot_key_len != search_key.len() {
+                continue;
+            }
+            let prefix_len = std::cmp::min(SLOT_KEY_PREFIX_SIZE, slot_key_len);
+            let slot_prefix = &slot.key_prefix()[..prefix_len];
+            let input_prefix = &search_key[..prefix_len];
+            if slot_prefix != input_prefix {
+                continue;
+            }
+
+            // 2) If prefix matches, load the record
+            let rec = self.record_ref_from_slot(&slot);
+            if rec.key() == search_key {
+                let pkey = rec.pkey();
+                result_map.push((pkey.to_vec(), rec.val().to_vec()));
+            }
+        }
+        Ok(())
+    }
+
     fn scan_all_for_gc_read_repair(
         &self,
         best_map: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
@@ -1738,8 +1778,7 @@ impl HashJoinPage for Page {
         }
     }
 
-    fn chain_scan_into_vec(&self, ts: &Timestamp, results: &mut Vec<MvccEntry>) {
-        let ts = *ts;
+    fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>) {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {

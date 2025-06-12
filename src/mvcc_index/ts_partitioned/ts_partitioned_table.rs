@@ -139,7 +139,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             // let mut idx = 0;
             for p in partition_collection.partitions().iter() {
                 p.chain()
-                    .traverse_to_endofchain_for_bulk_update(bulk_repair)?;
+                    .heap_bulk_update_collect(bulk_repair)?;
             }
             // repair
             for versions in bulk_repair.values() {

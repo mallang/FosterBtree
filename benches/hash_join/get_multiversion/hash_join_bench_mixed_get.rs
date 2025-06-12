@@ -1,22 +1,12 @@
-use dashmap::mapref::entry;
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
-use fbtree::mvcc_index::hash_join::chained_hash_bucket_second::{
-    HISTORY_GET_COUNT, HISTORY_GET_TOTAL_NS, RECENT_GET_COUNT, RECENT_GET_TOTAL_NS,
-};
-use fbtree::mvcc_index::hash_join::chained_hash_history_chain::HCHAIN_PAGE_READ_COUNT;
-use fbtree::mvcc_index::hash_join_page::HISTORY_SLOT_CMP_CNT;
 use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
-use fbtree::{mvcc_index::hash_join::chained_hash_table::ChainedHashTable, prelude::*};
-use std::collections::{HashMap, HashSet};
+use fbtree::{mvcc_index::chain_hash::chained_hash_table::ChainedHashTable, prelude::*};
 use std::env;
 use std::error::Error;
-use std::hash::Hash;
-use std::str::from_utf8;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -298,63 +288,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ChainedHashTable::<InMemPool>::stat(chained_hash_table)
             );
         }
-
-        println!(
-            "Total time spent in recent_chain.get(): {} ns",
-            RECENT_GET_TOTAL_NS.load(Ordering::Relaxed)
-        );
-        let recent_get_count = RECENT_GET_COUNT.load(Ordering::Relaxed);
-        println!("Total count of recent_chain.get(): {}", recent_get_count);
-        if recent_get_count > 0 {
-            println!(
-                "Avg time spent in recent_chain.get(): {} ns",
-                RECENT_GET_TOTAL_NS.load(Ordering::Relaxed) / recent_get_count
-            );
-        } else {
-            println!("Avg time spent in recent_chain.get(): 0 ns");
-        }
-
-        println!(
-            "Total time spent in history_chain.get(): {} ns",
-            HISTORY_GET_TOTAL_NS.load(Ordering::Relaxed)
-        );
-        let history_get_count = HISTORY_GET_COUNT.load(Ordering::Relaxed);
-        println!("Total count of history_chain.get(): {}", history_get_count);
-        if history_get_count > 0 {
-            println!(
-                "Avg time spent in history_chain.get(): {} ns",
-                HISTORY_GET_TOTAL_NS.load(Ordering::Relaxed) / history_get_count
-            );
-        } else {
-            println!("Avg time spent in history_chain.get(): 0 ns");
-        }
-
-        let history_page_read_count = HCHAIN_PAGE_READ_COUNT.load(Ordering::Relaxed);
-        println!(
-            "Total Page Read in history_chain.get(): {}",
-            history_page_read_count
-        );
-        if history_get_count > 0 {
-            println!(
-                "Avg Page Read in history_chain.get(): {}",
-                history_page_read_count / history_get_count
-            );
-        } else {
-            println!("Avg Page Read in history_chain.get(): 0");
-        }
-        println!(
-            "Total slot compare in page when history_chain.get(): {}",
-            HISTORY_SLOT_CMP_CNT.load(Ordering::Relaxed)
-        );
-        if history_page_read_count > 0 {
-            println!(
-                "Avg slot compare in page when history_chain.get(): {}",
-                HISTORY_SLOT_CMP_CNT.load(Ordering::Relaxed) / history_page_read_count
-            );
-        } else {
-            println!("Avg slot compare in page when history_chain.get(): 0");
-        }
-        println!("===STAT_END===");
 
         println!();
     }

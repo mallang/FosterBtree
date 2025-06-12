@@ -334,3 +334,8 @@ pub fn fix_frame_id<'a>(
         }
     }
 }
+
+/// Opportunistically try to fix the next page frame id
+pub fn fix_frame_id2<'a>(this: &mut FrameWriteGuard<'a>, new_frame_key: &PageFrameKey) {
+    this.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
+}

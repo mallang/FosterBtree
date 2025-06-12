@@ -6,24 +6,22 @@ use std::{
         Arc,
     },
     time::Duration,
-    vec::IntoIter,
 };
-
-use dashmap::mapref::entry;
 
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
-        hash_common::RowDelta,
+        hash_common::{fix_frame_id, fix_frame_id2, RowDelta},
         hash_join_page::{record::RecordRef, HashJoinPage},
         MvccEntry, TxId,
+        chain_hash::chained_hash_bucket_second::ChainBucketBulkUpdate
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::{chained_hash_bucket_first::ChainBucketBulkUpdate, Timestamp};
+use super::{Timestamp};
 
 pub struct ChainedHashRecentChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -165,12 +163,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                     log_debug!(
                         "Frame of the next page has been changed. Trying to fix the frame id"
                     );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
-                        next_page_id,
-                        next_page.frame_id(),
-                    );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -277,7 +270,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
     //                     next_page_id,
     //                     next_page.frame_id(),
     //                 );
-    //                 let _ = fix_frame_id(current_page, &new_frame_key);
+    //                 let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
     //             }
     //             current_page = next_page;
     //         } else {
@@ -311,12 +304,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                         ));
                         if next_page.frame_id() != next_frame_id {
                             log_debug!("Frame of the next page has been changed. Trying to fix the frame id");
-                            let new_frame_key = PageFrameKey::new_with_frame_id(
-                                self.c_key,
-                                next_page_id,
-                                next_page.frame_id(),
-                            );
-                            let _ = fix_frame_id(current_page, &new_frame_key);
+                            let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                         }
                         current_page = next_page;
                     } else {
@@ -538,7 +526,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                         next_page_id,
                         next_page.frame_id(),
                     );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -631,7 +619,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                         next_page_id,
                         next_page.frame_id(),
                     );
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_page_id, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -759,9 +747,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                     self.c_key, next_pid, next_fid,
                 ));
                 if next_page.frame_id() != next_fid {
-                    let new_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -772,7 +758,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
 
     pub fn scan_into_vec(
         &self,
-        ts: &Timestamp,
+        ts: Timestamp,
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
@@ -783,9 +769,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                     self.c_key, next_pid, next_fid,
                 ));
                 if next_page.frame_id() != next_fid {
-                    let new_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -809,9 +793,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
                     self.c_key, next_pid, next_fid,
                 ));
                 if next_page.frame_id() != next_fid {
-                    let new_frame_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_page.frame_id());
-                    let _ = fix_frame_id(current_page, &new_frame_key);
+                    let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                 }
                 current_page = next_page;
             } else {
@@ -890,25 +872,7 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
     }
 }
 
-/// Opportunistically try to fix the next page frame id
-fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> FrameReadGuard<'a> {
-    match this.try_upgrade(true) {
-        Ok(mut write_guard) => {
-            write_guard.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
-            log_debug!("Fixed frame id of the next page");
-            write_guard.downgrade()
-        }
-        Err(read_guard) => {
-            log_debug!("Failed to fix frame id of the next page");
-            read_guard
-        }
-    }
-}
 
-/// Opportunistically try to fix the next page frame id
-fn fix_frame_id2<'a>(this: &mut FrameWriteGuard<'a>, new_frame_key: &PageFrameKey) {
-    this.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
-}
 
 // Implement Clone for MvccHashJoinRecentChain to allow cloning
 impl<T: MemPool> Clone for ChainedHashRecentChain<T> {

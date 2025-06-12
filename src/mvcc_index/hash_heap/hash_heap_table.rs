@@ -563,7 +563,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let mut updated_pkeys = self.update_bulk_repair.get_updated_pkeys();
         for (idx, bulk_versions_bucket) in updated_pkeys.iter_mut().enumerate() {
             let chain = &self.bucket_entries[idx];
-            chain.traverse_to_endofchain_for_bulk_update(bulk_versions_bucket)?;
+            chain.heap_bulk_update_collect(bulk_versions_bucket)?;
             for versions in bulk_versions_bucket.values() {
                 read_repair_vec(&self.mem_pool, versions, self.c_key);
             }

@@ -1,19 +1,14 @@
 #[cfg(test)]
 mod test_ops {
-    use dashmap::mapref::entry;
-
     use crate::bp::{get_in_mem_pool, ContainerKey, InMemPool};
 
     use crate::log_warn;
+    use crate::mvcc_index::chain_hash::chained_hash_table::ChainedHashTable;
     use crate::mvcc_index::hash_heap::hash_heap_table::{self, HeapHashTable};
-    use crate::mvcc_index::hash_join::chained_hash_table::ChainedHashTable;
     use crate::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
     use crate::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-    use crate::mvcc_index::{hash_join, Delta, MvccIndex};
-    use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
+    use crate::mvcc_index::{chain_hash, Delta, MvccIndex};
     use crate::prelude::{AccessMethodError, Timestamp};
-    use core::str;
-    use std::marker::PhantomData;
     use std::sync::Arc;
 
     #[test]

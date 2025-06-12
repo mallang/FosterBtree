@@ -347,7 +347,7 @@ impl<T: MemPool> ChainedHashHistoryChain<T> {
 
     pub fn scan_into_vec(
         self: &Arc<Self>,
-        ts: &Timestamp,
+        ts: Timestamp,
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();

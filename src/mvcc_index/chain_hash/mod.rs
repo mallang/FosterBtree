@@ -1,4 +1,3 @@
-pub mod chained_hash_bucket_first;
 pub mod chained_hash_bucket_second;
 pub mod chained_hash_history_chain;
 pub mod chained_hash_recent_chain;
@@ -22,3 +21,5 @@ static mut PARAMS: UnsafeCell<Option<Parameters>> = UnsafeCell::new(None);
 pub fn get_params() -> Parameters {
     unsafe { PARAMS.get().as_ref().unwrap().clone().unwrap() }
 }
+
+
