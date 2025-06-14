@@ -1,4 +1,4 @@
-pub mod chain_hash;
+pub mod dual_heap_hash;
 pub mod hash_common;
 pub mod hash_heap;
 pub mod hash_join_page;

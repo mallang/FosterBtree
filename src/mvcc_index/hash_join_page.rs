@@ -397,7 +397,7 @@ pub mod record {
 use record::*;
 
 use super::{
-    chain_hash::chained_hash_bucket_second::ChainBucketBulkUpdate,
+    dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate,
     hash_common::{KVWithTs, MvccEntryLoc, RowDelta},
     linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate,
 };

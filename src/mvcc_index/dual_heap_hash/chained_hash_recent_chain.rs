@@ -16,7 +16,7 @@ use crate::{
         hash_common::{fix_frame_id, fix_frame_id2, RowDelta},
         hash_join_page::{record::RecordRef, HashJoinPage},
         MvccEntry, TxId,
-        chain_hash::chained_hash_bucket_second::ChainBucketBulkUpdate
+        dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };

@@ -1,6 +1,6 @@
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
-use fbtree::{mvcc_index::chain_hash::chained_hash_table::ChainedHashTable, prelude::*};
+use fbtree::{mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;

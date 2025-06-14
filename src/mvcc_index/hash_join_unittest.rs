@@ -3,11 +3,11 @@ mod test_ops {
     use crate::bp::{get_in_mem_pool, ContainerKey, InMemPool};
 
     use crate::log_warn;
-    use crate::mvcc_index::chain_hash::chained_hash_table::ChainedHashTable;
+    use crate::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
     use crate::mvcc_index::hash_heap::hash_heap_table::{self, HeapHashTable};
     use crate::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
     use crate::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-    use crate::mvcc_index::{chain_hash, Delta, MvccIndex};
+    use crate::mvcc_index::{dual_heap_hash, Delta, MvccIndex};
     use crate::prelude::{AccessMethodError, Timestamp};
     use std::sync::Arc;
 

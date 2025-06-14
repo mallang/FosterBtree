@@ -1,7 +1,7 @@
 use anyhow::{Ok, Result};
 use clap::{Parser, ValueEnum};
 use fbtree::bp::{get_in_mem_pool, ContainerKey};
-use fbtree::mvcc_index::chain_hash::chained_hash_table::ChainedHashTable;
+use fbtree::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;

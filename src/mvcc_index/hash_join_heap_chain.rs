@@ -20,7 +20,7 @@ use crate::{
     prelude::Timestamp,
 };
 
-use super::{chain_hash::chained_hash_bucket_second::ChainBucketBulkUpdate, hash_common::{read_page, write_page, MvccEntryLoc, RowDelta}};
+use super::{dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate, hash_common::{read_page, write_page, MvccEntryLoc, RowDelta}};
 
 pub struct HeapHashChain<T: MemPool> {
     mem_pool: Arc<T>,
