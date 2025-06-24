@@ -130,6 +130,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     type Value = Vec<u8>;
     type Error = AccessMethodError;
 
+    fn collect_page_num(&self) -> usize {
+        0
+    }
+
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>
     where
         Self: Sized,

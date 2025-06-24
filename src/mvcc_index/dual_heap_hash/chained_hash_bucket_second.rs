@@ -31,6 +31,9 @@ pub struct SecondBucket<T: MemPool> {
 }
 
 impl<T: MemPool + 'static> SecondBucket<T> {
+    pub fn collect_page_num(&self) -> usize {
+        self.recent_chain.collect_page_num() + self.history_chain.collect_page_num()
+    }
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         let recent_chain = Arc::new(HeapHashChain::new(c_key, mem_pool.clone()));
         let history_chain = Arc::new(HeapHashChain::new(c_key, mem_pool.clone()));

@@ -1,12 +1,8 @@
 use anyhow::{Ok, Result};
 use clap::{Parser, ValueEnum};
-use fbtree::bp::{get_in_mem_pool, ContainerKey};
-use fbtree::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
-use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
-use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
-use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
-use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccIndex, TxId};
+use fbtree::bp::{get_in_mem_pool, ContainerKey, InMemPool};
+use fbtree::mvcc_index::TxId;
+use fbtree::naive_hash_index::NaiveMvHashTable;
 use fbtree::prelude::Timestamp;
 use num_format::{Locale, ToFormattedString};
 use rand::rngs::{SmallRng, StdRng};
@@ -18,6 +14,8 @@ use std::time::{Duration, Instant};
 
 const PKEY_PER_JOIN_KEY: usize = 500;
 const JOIN_KEY_PER_BUCKET: usize = 20;
+
+type MvccNaiveHashTable = NaiveMvHashTable<InMemPool>;
 
 #[derive(Debug, Clone)]
 pub enum OperationType {
@@ -755,72 +753,45 @@ impl TxBench {
     pub fn run_tx_no_repair(
         &self,
         txs_idx: TxId,
-        hash_join_table: &mut BoxMvccIndexMemPool,
+        hash_join_table: &mut MvccNaiveHashTable,
     ) -> Result<Duration> {
         let tx = &self.txs[txs_idx as usize];
-        let start = Instant::now();
+        let mut start = Instant::now();
         match tx.tx_type {
             OperationType::Insert => {
                 for op in &tx.ops {
                     hash_join_table
-                        .insert(
-                            op.join_key.clone(),
-                            op.pkey.clone(),
-                            op.tx_ts,
-                            op.tx_id,
-                            op.value.clone(),
-                        )
-                        .unwrap();
+                        .add_insert_rec(&op.join_key, &op.pkey, &op.value);
                 }
-                hash_join_table
-                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-                    .unwrap();
             }
             OperationType::Update => {
                 for op in &tx.ops {
                     hash_join_table
-                        .update(
-                            op.join_key.clone(),
-                            op.pkey.clone(),
+                        .add_update_rec(
+                            &op.join_key,
+                            &op.pkey,
+                            &op.value,
                             op.tx_ts,
-                            op.tx_id,
-                            op.value.clone(),
-                        )
-                        .unwrap();
+                        );
                 }
-                hash_join_table
-                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-                    .unwrap();
             }
             OperationType::Delete => {
-                for op in &tx.ops {
-                    hash_join_table
-                        .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
-                        .unwrap();
-                }
+                todo!();
             }
             OperationType::Get => {
-                for op in &tx.ops {
-                    let _ = hash_join_table
-                        .get(&op.join_key, &op.pkey, op.read_ts)
-                        .unwrap();
-                }
+                todo!();
             }
             OperationType::ScanKey => {
-                for op in &tx.ops {
-                    let _ = hash_join_table
-                        .scan_key_vec(&op.join_key, op.read_ts)
-                        .unwrap();
-                }
+                todo!();
             }
             OperationType::Scan => {
-                for op in &tx.ops {
-                    let _ = hash_join_table.scan(op.read_ts).unwrap();
-                }
+                todo!();
             }
             OperationType::DeltaScan => {
+                hash_join_table.build_tables(&[tx.ops[0].read_ts, tx.ops[0].tx_ts]);
+                start = Instant::now();
                 for op in &tx.ops {
-                    let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
+                    let _ = hash_join_table.delta_scan_tables(op.read_ts, op.tx_ts).unwrap();
                 }
             }
         }
@@ -861,243 +832,9 @@ impl TxBench {
         Ok(elapsed)
     }
 
-    pub fn run_all_txs_no_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
+    pub fn run_all_txs_no_repair(&self, hash_join_table: &mut MvccNaiveHashTable) {
         for txs_idx in 0..self.txs.len() {
             let _ = self.run_tx_no_repair(txs_idx as TxId, hash_join_table);
-        }
-    }
-
-    pub fn run_tx_read_repair(
-        &self,
-        txs_idx: TxId,
-        hash_join_table: &mut BoxMvccIndexMemPool,
-    ) -> Result<Duration> {
-        let tx = &self.txs[txs_idx as usize];
-        let start = Instant::now();
-        match tx.tx_type {
-            OperationType::Insert => {
-                for op in &tx.ops {
-                    hash_join_table
-                        .insert(
-                            op.join_key.clone(),
-                            op.pkey.clone(),
-                            op.tx_ts,
-                            op.tx_id,
-                            op.value.clone(),
-                        )
-                        .unwrap();
-                }
-                hash_join_table
-                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-                    .unwrap();
-            }
-            OperationType::Update => {
-                for op in &tx.ops {
-                    hash_join_table
-                        .update(
-                            op.join_key.clone(),
-                            op.pkey.clone(),
-                            op.tx_ts,
-                            op.tx_id,
-                            op.value.clone(),
-                        )
-                        .unwrap();
-                }
-                hash_join_table
-                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-                    .unwrap();
-            }
-            OperationType::Delete => {
-                for op in &tx.ops {
-                    hash_join_table
-                        .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
-                        .unwrap();
-                }
-            }
-            OperationType::Get => {
-                for op in &tx.ops {
-                    let _ = hash_join_table
-                        .get_read_repair(&op.join_key, &op.pkey, op.read_ts)
-                        .unwrap();
-                }
-            }
-            OperationType::ScanKey => {
-                for op in &tx.ops {
-                    let _ = hash_join_table
-                        .scan_key_vec_read_repair(&op.join_key, op.read_ts)
-                        .unwrap();
-                }
-            }
-            OperationType::Scan => {
-                for op in &tx.ops {
-                    let _ = hash_join_table.scan_read_repair(op.read_ts).unwrap();
-                }
-            }
-            OperationType::DeltaScan => {
-                for op in &tx.ops {
-                    let _ = hash_join_table
-                        .delta_scan_read_repair(op.read_ts, op.tx_ts)
-                        .unwrap();
-                }
-            }
-        }
-        let elapsed = start.elapsed();
-        print!(
-            "[Read Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
-            txs_idx,
-            tx.tx_id,
-            format!("{:?}", tx.tx_type),
-            elapsed
-        );
-        match tx.tx_type {
-            OperationType::Insert => {
-                println!(" Insert count: {:?}", tx.ops.len());
-            }
-            OperationType::Update => {
-                println!(" Update count: {:?}", tx.ops.len());
-            }
-            OperationType::Delete => {
-                println!(" Delete count: {:?}", tx.ops.len());
-            }
-            OperationType::Get => {
-                println!(" Get count: {:?}", tx.ops.len());
-            }
-            OperationType::ScanKey => {
-                println!(" read_ts: {:?}", tx.ops[0].read_ts);
-            }
-            OperationType::Scan => {
-                println!(" read_ts: {:?}", tx.ops[0].read_ts);
-            }
-            OperationType::DeltaScan => {
-                println!(
-                    " from read_ts: {:?} to tx_ts: {:?}",
-                    tx.ops[0].read_ts, tx.ops[0].tx_ts
-                );
-            }
-        }
-        Ok(elapsed)
-    }
-
-    pub fn run_all_txs_read_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
-        for txs_idx in 0..self.txs.len() {
-            let _ = self.run_tx_read_repair(txs_idx as TxId, hash_join_table);
-        }
-    }
-
-    fn run_tx_write_repair(
-        &self,
-        txs_idx: TxId,
-        hash_join_table: &mut BoxMvccIndexMemPool,
-    ) -> Result<Duration> {
-        let tx = &self.txs[txs_idx as usize];
-        let start = Instant::now();
-        match tx.tx_type {
-            OperationType::Insert => {
-                for op in &tx.ops {
-                    hash_join_table
-                        .insert(
-                            op.join_key.clone(),
-                            op.pkey.clone(),
-                            op.tx_ts,
-                            op.tx_id,
-                            op.value.clone(),
-                        )
-                        .unwrap();
-                }
-                hash_join_table
-                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-                    .unwrap();
-            }
-            OperationType::Update => {
-                hash_join_table.bulk_update_start().unwrap();
-                for op in &tx.ops {
-                    hash_join_table
-                        .update_write_repair(
-                            op.join_key.clone(),
-                            op.pkey.clone(),
-                            op.tx_ts,
-                            op.tx_id,
-                            op.value.clone(),
-                        )
-                        .unwrap();
-                }
-                hash_join_table.bulk_update_end().unwrap();
-                hash_join_table
-                    .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-                    .unwrap();
-            }
-            OperationType::Delete => {
-                for op in &tx.ops {
-                    hash_join_table
-                        .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
-                        .unwrap();
-                }
-            }
-            OperationType::Get => {
-                for op in &tx.ops {
-                    let _ = hash_join_table
-                        .get(&op.join_key, &op.pkey, op.read_ts)
-                        .unwrap();
-                }
-            }
-            OperationType::ScanKey => {
-                for op in &tx.ops {
-                    let _ = hash_join_table
-                        .scan_key_vec(&op.join_key, op.read_ts)
-                        .unwrap();
-                }
-            }
-            OperationType::Scan => {
-                for op in &tx.ops {
-                    let _ = hash_join_table.scan(op.read_ts).unwrap();
-                }
-            }
-            OperationType::DeltaScan => {
-                for op in &tx.ops {
-                    let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
-                }
-            }
-        }
-        let elapsed = start.elapsed();
-        print!(
-            "[Write Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
-            txs_idx,
-            tx.tx_id,
-            format!("{:?}", tx.tx_type),
-            elapsed
-        );
-        match tx.tx_type {
-            OperationType::Insert => {
-                println!(" Insert count: {:?}", tx.ops.len());
-            }
-            OperationType::Update => {
-                println!(" Update count: {:?}", tx.ops.len());
-            }
-            OperationType::Delete => {
-                println!(" Delete count: {:?}", tx.ops.len());
-            }
-            OperationType::Get => {
-                println!(" Get count: {:?}", tx.ops.len());
-            }
-            OperationType::ScanKey => {
-                println!(" read_ts: {:?}", tx.ops[0].read_ts);
-            }
-            OperationType::Scan => {
-                println!(" read_ts: {:?}", tx.ops[0].read_ts);
-            }
-            OperationType::DeltaScan => {
-                println!(
-                    " from read_ts: {:?} to tx_ts: {:?}",
-                    tx.ops[0].read_ts, tx.ops[0].tx_ts
-                );
-            }
-        }
-        Ok(elapsed)
-    }
-
-    pub fn run_all_txs_write_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
-        for txs_idx in 0..self.txs.len() {
-            let _ = self.run_tx_write_repair(txs_idx as TxId, hash_join_table);
         }
     }
 
@@ -1353,13 +1090,7 @@ fn main() -> Result<()> {
     bench.print_txs();
 
     // Create HashJoin table
-    let hash_table_t = match bench.cli.table_type {
-        TableType::Chain => HashTableType::RecentHistoryChained,
-        TableType::Heap => HashTableType::HeapTable,
-        TableType::Rust => HashTableType::RustHashMap,
-        TableType::Linear => HashTableType::LinearHashTable,
-        TableType::Partition => HashTableType::TsPartitionChained,
-    };
+
     let bucket_num = bench.cli.bucket_num.unwrap();
 
     println!("No Repair");
@@ -1368,131 +1099,28 @@ fn main() -> Result<()> {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
 
-        let mut table_no_repair = match hash_table_t {
-            HashTableType::RecentHistoryChained => Box::new(
-                ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-            HashTableType::HeapTable => Box::new(HeapHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::RustHashMap => Box::new(MvccRustHashMap::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::TsPartitionChained => Box::new(
-                TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-        };
+        let mut table_no_repair = NaiveMvHashTable::new_with_bucket_num(
+            c_key,
+            mem_pool.clone(),
+            bucket_num
+        );
         bench.run_all_txs_no_repair(&mut table_no_repair);
-        println!("pages num: {:?}", table_no_repair.collect_page_num());
+        table_no_repair.print_stats();
     }
 
-    println!();
     println!("No Repair");
     // no_repair
     {
         let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(1, 1);
+        let c_key = ContainerKey::new(0, 0);
 
-        let mut table_no_repair = match hash_table_t {
-            HashTableType::RecentHistoryChained => Box::new(
-                ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-            HashTableType::HeapTable => Box::new(HeapHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::RustHashMap => Box::new(MvccRustHashMap::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::TsPartitionChained => Box::new(
-                TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-        };
+        let mut table_no_repair = NaiveMvHashTable::new_with_bucket_num(
+            c_key,
+            mem_pool.clone(),
+            bucket_num
+        );
         bench.run_all_txs_no_repair(&mut table_no_repair);
+        table_no_repair.print_stats();
     }
-
-    println!();
-    println!("Read Repair");
-    // read_repair
-    {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(2, 2);
-
-        let mut table_read_repair = match hash_table_t {
-            HashTableType::RecentHistoryChained => Box::new(
-                ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-            HashTableType::HeapTable => Box::new(HeapHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::RustHashMap => Box::new(MvccRustHashMap::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::TsPartitionChained => Box::new(
-                TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-        };
-        bench.run_all_txs_read_repair(&mut table_read_repair);
-    }
-
-    println!();
-    println!("Write Repair");
-    // write_repair
-    {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(3, 3);
-
-        let mut table_write_repair = match hash_table_t {
-            HashTableType::RecentHistoryChained => Box::new(
-                ChainedHashTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-            HashTableType::HeapTable => Box::new(HeapHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::RustHashMap => Box::new(MvccRustHashMap::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::TsPartitionChained => Box::new(
-                TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
-            ) as BoxMvccIndexMemPool,
-        };
-        bench.run_all_txs_write_repair(&mut table_write_repair);
-    }
-
     Ok(())
 }

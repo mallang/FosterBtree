@@ -572,6 +572,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         self.update_bulk_repair.reset_flag();
         Ok(())
     }
+
+    fn collect_page_num(&self) -> usize {
+        let mut page_num = 0;
+        for bucket in &self.bucket_entries {
+            page_num += bucket.collect_page_num();
+        }
+        page_num
+    }
 }
 
 #[test]

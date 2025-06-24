@@ -460,6 +460,13 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
+    fn collect_page_num(&self) -> usize {
+        let mut total_page_num = 0;
+        for bucket in &self.bucket_entries {
+            total_page_num += bucket.collect_page_num();
+        }
+        total_page_num
+    }
 }
 
 #[cfg(test)]

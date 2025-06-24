@@ -19,6 +19,10 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
     type Value = Vec<u8>;
     type Error = crate::mvcc_index::AccessMethodError;
 
+    fn collect_page_num(&self) -> usize {
+        0
+    }
+
     fn create(
         c_key: crate::prelude::ContainerKey,
         mem_pool: std::sync::Arc<T>,

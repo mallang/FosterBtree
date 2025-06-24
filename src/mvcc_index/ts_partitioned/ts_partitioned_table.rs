@@ -503,4 +503,20 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         self.bulk_update.reset_flag();
         Ok(())
     }
+
+    fn collect_page_num(&self) -> usize {
+        self.bucket_entries
+            .iter()
+            .map(|bucket| {
+                bucket
+                    .read()
+                    .unwrap()
+                    .partitions()
+                    .iter()
+                    .map(|p| p.chain().collect_page_num())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
 }

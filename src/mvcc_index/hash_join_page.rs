@@ -13,28 +13,38 @@ use std::{
 pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
 pub static HISTORY_SLOT_CMP_CNT: AtomicU64 = AtomicU64::new(0);
 
-mod header {
+pub mod header {
+    #[macro_export]
+    macro_rules! define_header_with_common {
+        ($name:ident { $($field:ident : $type:ty),* $(,)? }) => {
+            #[derive(Copy, Clone, Debug)]
+            pub struct $name {
+                next_page_id: PageId,
+                next_frame_id: u32,
+                total_bytes_used: u32, // (PAGE_HEADER_SIZE + slots + records)
+                slot_count: u32,
+                rec_start_offset: u32,
+                $(
+                    $field: $type,
+                )*
+            }
+        };
+    }
+    
+    define_header_with_common!(Header {
+        // for optimization
+        page_min_start_ts: Timestamp,
+        page_max_end_ts: Timestamp,
+        page_recent_slot_cnt: u32,
+        // for linear hash
+        is_full: u8,
+    });
+
     use crate::{
         page::{PageId, AVAILABLE_PAGE_SIZE},
         prelude::Timestamp,
     };
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
-
-    #[derive(Copy, Clone, Debug)]
-    pub struct Header {
-        next_page_id: PageId,
-        next_frame_id: u32,
-        total_bytes_used: u32, // (PAGE_HEADER_SIZE + slots + records)
-        slot_count: u32,
-        rec_start_offset: u32,
-
-        // for optimization
-        page_min_start_ts: Timestamp,
-        page_max_end_ts: Timestamp,
-        page_recent_slot_cnt: u32,
-
-        is_full: u8,
-    }
 
     impl Header {
         pub fn new() -> Self {
@@ -175,19 +185,30 @@ pub mod slot {
     pub const SLOT_KEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
     pub const SLOT_PKEY_PREFIX_SIZE: usize = std::mem::size_of::<[u8; 8]>();
 
-    #[derive(PartialEq, Copy, Clone)]
-    #[repr(C)]
-    pub struct Slot {
-        key_size: u32,
-        key_prefix: [u8; SLOT_KEY_PREFIX_SIZE],
-        pkey_size: u32,
-        pkey_prefix: [u8; SLOT_PKEY_PREFIX_SIZE],
-        tx_id: TxId,
+    #[macro_export]
+    macro_rules! define_slot_with_common {
+        ($name:ident { $($field:ident : $type:ty),* $(,)? }) => {
+            #[derive(PartialEq, Copy, Clone)]
+            #[repr(C)]
+            pub struct $name {
+                key_size: u32,
+                key_prefix: [u8; SLOT_KEY_PREFIX_SIZE],
+                pkey_size: u32,
+                pkey_prefix: [u8; SLOT_PKEY_PREFIX_SIZE],
+                tx_id: TxId,
+                val_size: u32,
+                offset: u32,
+                $(
+                    $field: $type,
+                )*
+            }
+        };
+    }
+
+    define_slot_with_common!(Slot {
         start_ts: Timestamp,
         end_ts: Timestamp,
-        val_size: u32,
-        offset: u32,
-    }
+    });
 
     impl Debug for Slot {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -362,9 +383,15 @@ pub mod record {
             let val = &bytes[key_size + pkey_size..key_size + pkey_size + val_size];
             Self { key, pkey, val }
         }
+        pub fn to_rec(&self) -> Record {
+            Record { key: self.key.to_vec(), pkey: self.pkey.to_vec(), val: self.val.to_vec() }
+        }
     }
 
     impl Record {
+        pub fn new(key: Vec<u8>, pkey: Vec<u8>, val: Vec<u8>) -> Self {
+            Record { key, pkey, val }
+        }
         pub fn key(&self) -> &[u8] {
             &self.key
         }

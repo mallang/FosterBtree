@@ -296,6 +296,8 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
 
     // only has effect for ts_partitioned table (ts >= current max ts + 1)
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error>;
+
+    fn collect_page_num(&self) -> usize;
 }
 
 /// Represents a change (delta) in the value of a key-primary key tuple.

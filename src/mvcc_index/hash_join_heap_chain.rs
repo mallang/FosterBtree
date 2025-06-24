@@ -34,6 +34,26 @@ pub struct HeapHashChain<T: MemPool> {
 }
 
 impl<T: MemPool + 'static> HeapHashChain<T> {
+    pub fn collect_page_num(&self) -> usize {
+        let mut page_num = 0;
+        let mut current_page = self.first_page();
+        loop {
+            page_num += 1;
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
+                if next_page.frame_id() != next_fid {
+                    let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
+                }
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+        page_num
+    }
     pub fn scan_delta_into(
         &self,
         from: Timestamp,

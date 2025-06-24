@@ -7,6 +7,7 @@ pub mod tpcc;
 pub mod txn_storage;
 pub mod write_ahead_log;
 
+pub mod naive_hash_index;
 mod file_manager;
 mod hybrid_latch;
 mod logger;

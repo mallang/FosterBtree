@@ -120,3 +120,8 @@ path = "benches/hash_join/bench_join_simulation_repair/join_simulation_repair.rs
 [[bin]]
 name = "join_repair"
 path = "benches/hash_join/join_simulation/join_repair.rs"
+
+
+[[bin]]
+name = "naive_join"
+path = "benches/hash_join/naive_join_simulation/naive_join.rs"
