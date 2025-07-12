@@ -8,11 +8,18 @@ use std::{
 };
 
 use crate::{
-    access_method::AccessMethodError, bp::prelude::*, log_debug, log_info, log_trace, log_warn, mvcc_index::{
-        hash_common::{fix_frame_id, fix_frame_id2, read_page, write_page, RowDelta}, hash_join_page::record::{Record, RecordRef}, MvccEntry
-    }, page::{Page, PageId, AVAILABLE_PAGE_SIZE}, prelude::Timestamp, naive_hash_index::naive_hash_table::hash_join_page::NaiveHashPage
+    access_method::AccessMethodError,
+    bp::prelude::*,
+    log_debug, log_info, log_trace, log_warn,
+    mvcc_index::{
+        hash_common::{fix_frame_id, fix_frame_id2, read_page, write_page, RowDelta},
+        hash_join_page::record::{Record, RecordRef},
+        MvccEntry,
+    },
+    naive_hash_index::naive_hash_table::hash_join_page::NaiveHashPage,
+    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+    prelude::Timestamp,
 };
-
 
 pub struct HeapHashChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -32,9 +39,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         loop {
             page_num += 1;
             if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = read_page(&*self.mem_pool, PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
                 if next_page.frame_id() != next_fid {
                     let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                 }
@@ -54,9 +62,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         loop {
             current_page.scan_delta_as_from(results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = read_page(&*from.mem_pool, PageFrameKey::new_with_frame_id(
-                    from.c_key, next_pid, next_fid,
-                ));
+                let next_page = read_page(
+                    &*from.mem_pool,
+                    PageFrameKey::new_with_frame_id(from.c_key, next_pid, next_fid),
+                );
                 if next_page.frame_id() != next_fid {
                     let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                 }
@@ -70,9 +79,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         loop {
             current_page.scan_delta_as_to(results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = read_page(&*to.mem_pool, PageFrameKey::new_with_frame_id(
-                    to.c_key, next_pid, next_fid,
-                ));
+                let next_page = read_page(
+                    &*to.mem_pool,
+                    PageFrameKey::new_with_frame_id(to.c_key, next_pid, next_fid),
+                );
                 if next_page.frame_id() != next_fid {
                     let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                 }
@@ -208,10 +218,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
     }
 
-    pub fn get_no_repair(
-        &self,
-        pkey: &[u8],
-    ) -> Result<MvccEntry, AccessMethodError> {
+    pub fn get_no_repair(&self, pkey: &[u8]) -> Result<MvccEntry, AccessMethodError> {
         let mut current_page = self.first_page();
 
         loop {
@@ -235,8 +242,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
 
         Err(AccessMethodError::KeyNotFound)
     }
-
-
 
     pub fn first_page_id(&self) -> PageId {
         self.first_page_id.load(Ordering::Acquire)
@@ -296,8 +301,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         first_page
     }
 
-
-
     pub fn scan_into_vec(
         self: &Arc<Self>,
         ts: Timestamp,
@@ -322,8 +325,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
         Ok(())
     }
-
-
 
     /// in chain, iterate in increasing order of start_ts
     /// => tail is newer than head
@@ -368,5 +369,4 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         todo!()
         // return Ok(());
     }
-
 }

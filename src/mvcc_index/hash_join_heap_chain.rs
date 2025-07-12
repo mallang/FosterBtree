@@ -20,7 +20,10 @@ use crate::{
     prelude::Timestamp,
 };
 
-use super::{dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate, hash_common::{read_page, write_page, MvccEntryLoc, RowDelta}};
+use super::{
+    dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate,
+    hash_common::{read_page, write_page, MvccEntryLoc, RowDelta},
+};
 
 pub struct HeapHashChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -64,9 +67,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         loop {
             current_page.chain_scan_delta_into(from, to, results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
-                let next_page = read_page(&*self.mem_pool, PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
                 if next_page.frame_id() != next_fid {
                     let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
                 }
@@ -542,7 +546,11 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         self.traverse_to_endofchain_for_delete(self.first_key(), pkey, ts)
     }
 
-    pub fn chain_update_recent(&self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError> {
+    pub fn chain_update_recent(
+        &self,
+        pkey: &[u8],
+        entry: &MvccEntry,
+    ) -> Result<MvccEntry, AccessMethodError> {
         let mut current_page = self.first_page_write();
 
         loop {
@@ -564,7 +572,6 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             }
         }
     }
-
 
     fn traverse_to_endofchain_for_delete(
         &self,
@@ -864,10 +871,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         loop {
-            current_page.chain_scan_into_vec(
-                ts,
-                res,
-            );
+            current_page.chain_scan_into_vec(ts, res);
 
             if let Some((next_pid, next_fid)) = current_page.next_page() {
                 let next_page = read_page(
@@ -1087,11 +1091,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                 } else if header.recent_slot_cnt() == 0 && ts >= &header.page_max_end_ts() {
                     // do nothing
                 } else {
-                    current_page.chain_scan_key(
-                        search_key,
-                        ts,
-                        res,
-                    )?;
+                    current_page.chain_scan_key(search_key, ts, res)?;
                 }
 
                 if let Some((next_pid, next_fid)) = current_page.next_page() {
@@ -1192,11 +1192,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             current_page.chain_bulk_update_slots_recent(bulk, new_start_ts);
 
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = write_page(&*self.mem_pool, PageFrameKey::new_with_frame_id(
-                    self.c_key,
-                    next_page_id,
-                    next_frame_id,
-                ));
+                let next_page = write_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                );
                 if next_page.frame_id() != next_frame_id {
                     log_debug!(
                         "Frame of the next page has been changed. Trying to fix the frame id"
@@ -1299,9 +1298,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                     if let Some((next_pid, next_fid)) = current_page.next_page() {
                         // Promote the next page as the new first page.
                         self.set_first_page_id(next_pid);
-                        current_page = read_page(&*self.mem_pool, PageFrameKey::new_with_frame_id(
-                            self.c_key, next_pid, next_fid,
-                        ));
+                        current_page = read_page(
+                            &*self.mem_pool,
+                            PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                        );
                         // Continue without updating prev_page.
                         continue;
                     } else {
@@ -1327,9 +1327,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
 
             // Move to the next page, if any.
             if let Some((next_pid, next_fid)) = prev_page.as_ref().unwrap().next_page() {
-                current_page = read_page(&*self.mem_pool, PageFrameKey::new_with_frame_id(
-                    self.c_key, next_pid, next_fid,
-                ));
+                current_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
             } else {
                 break;
             }

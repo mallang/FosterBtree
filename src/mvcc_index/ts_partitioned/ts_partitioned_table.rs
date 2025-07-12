@@ -138,8 +138,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
             let partition_collection = bucket.read().unwrap();
             // let mut idx = 0;
             for p in partition_collection.partitions().iter() {
-                p.chain()
-                    .heap_bulk_update_collect(bulk_repair)?;
+                p.chain().heap_bulk_update_collect(bulk_repair)?;
             }
             // repair
             for versions in bulk_repair.values() {
@@ -518,5 +517,4 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
             })
             .sum()
     }
-
 }

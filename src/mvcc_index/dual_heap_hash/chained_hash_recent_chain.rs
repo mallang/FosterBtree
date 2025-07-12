@@ -13,15 +13,15 @@ use crate::{
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
+        dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate,
         hash_common::{fix_frame_id, fix_frame_id2, RowDelta},
         hash_join_page::{record::RecordRef, HashJoinPage},
         MvccEntry, TxId,
-        dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::{Timestamp};
+use super::Timestamp;
 
 pub struct ChainedHashRecentChain<T: MemPool> {
     mem_pool: Arc<T>,
@@ -871,8 +871,6 @@ impl<T: MemPool> ChainedHashRecentChain<T> {
         (page_count, total_kv_count, usage_sum, max_usage, min_usage)
     }
 }
-
-
 
 // Implement Clone for MvccHashJoinRecentChain to allow cloning
 impl<T: MemPool> Clone for ChainedHashRecentChain<T> {

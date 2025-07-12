@@ -1,9 +1,13 @@
 use crate::{
-    bp::{ContainerKey, MemPool}, mvcc_index::{
-        hash_common::{
-            read_repair_btree, read_repair_vec
-        }, hash_join_page::record::RecordRef, Delta, MvccEntry, MvccIndex, TxId
-    }, naive_hash_index::naive_hash_table::{hash_join_chain::HeapHashChain, SingleTsHashTable}, page::{Page, PageId}, prelude::{AccessMethodError, Timestamp}
+    bp::{ContainerKey, MemPool},
+    mvcc_index::{
+        hash_common::{read_repair_btree, read_repair_vec},
+        hash_join_page::record::RecordRef,
+        Delta, MvccEntry, MvccIndex, TxId,
+    },
+    naive_hash_index::naive_hash_table::{hash_join_chain::HeapHashChain, SingleTsHashTable},
+    page::{Page, PageId},
+    prelude::{AccessMethodError, Timestamp},
 };
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
@@ -78,11 +82,7 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
     }
 
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
-    pub fn get(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-    ) -> Result<MvccEntry, AccessMethodError> {
+    pub fn get(&self, key: &[u8], pkey: &[u8]) -> Result<MvccEntry, AccessMethodError> {
         let index = self.get_bucket_index(key);
         let heap_chain = &self.bucket_entries[index];
 
@@ -108,8 +108,6 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
         ))
     }
-    
-
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -124,51 +122,4 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
         Ok(())
     }
 }
-
-// impl<T: MemPool + 'static> SingleTsHashTable<T> for NaiveHashTable<T> {
-//     type Error = AccessMethodError;
-//     type Key = Vec<u8>;
-//     type PKey = Vec<u8>;
-//     type Value = Vec<u8>;
-//     fn insert(
-//         &self,
-//         key: Self::Key,
-//         pkey: Self::PKey,
-//         tx_id: TxId,
-//         value: Self::Value,
-//     ) -> Result<(), Self::Error> {
-//         let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, 0, 0, tx_id);
-//         self.insert(&entry)
-//     }
-//     fn get(
-//         &self,
-//         key: &[u8],
-//         pkey: &[u8],
-//     ) -> Result<Option<Self::Value>, Self::Error> {
-//         let v = self.get(key, pkey).map_or(None, |e| {
-//             // log_warn!("get entry: {:?}", e);
-//             if e.value().is_empty() {
-//                 None
-//             } else {
-//                 Some(e.value().to_vec())
-//             }
-//         });
-//         Ok(v)
-//     }
-
-
-
-//     fn create_with_bucket_num(
-//         c_key: ContainerKey,
-//         mem_pool: Arc<T>,
-//         num_buckets: usize,
-//     ) -> Result<Self, Self::Error>
-//     where
-//         Self: Sized,
-//     {
-//         Ok(Self::new_with_bucket_num(c_key, mem_pool, num_buckets))
-//     }
-
-    
-// }
 

@@ -40,7 +40,6 @@ mod header {
             }
         }
 
-      
         pub fn set_next_page_id(&mut self, next_page_id: PageId) {
             self.next_page_id = next_page_id;
         }
@@ -98,7 +97,6 @@ use std::collections::HashMap;
 
 use header::*;
 
-
 pub mod slot {
     use std::fmt::Debug;
 
@@ -110,8 +108,7 @@ pub mod slot {
 
     use crate::define_slot_with_common;
 
-    define_slot_with_common!(Slot {
-    });
+    define_slot_with_common!(Slot {});
 
     impl Debug for Slot {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,13 +143,7 @@ pub mod slot {
             &mut *(bytes.as_ptr() as *mut Slot)
         }
 
-        pub fn new(
-            key: &[u8],
-            pkey: &[u8],
-            tx_id: TxId,
-            val: &[u8],
-            offset: usize,
-        ) -> Self {
+        pub fn new(key: &[u8], pkey: &[u8], tx_id: TxId, val: &[u8], offset: usize) -> Self {
             let key_size = key.len() as u32;
             let val_size = val.len() as u32;
 
@@ -220,8 +211,15 @@ pub mod slot {
 }
 use slot::*;
 
-use crate::{mvcc_index::{hash_common::RowDelta, hash_join_page::record::{Record, RecordRef}, MvccEntry}, page::{Page, PageId, AVAILABLE_PAGE_SIZE}, prelude::{AccessMethodError, Timestamp}};
-
+use crate::{
+    mvcc_index::{
+        hash_common::RowDelta,
+        hash_join_page::record::{Record, RecordRef},
+        MvccEntry,
+    },
+    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+    prelude::{AccessMethodError, Timestamp},
+};
 
 pub trait NaiveHashPage {
     fn init(&mut self);
@@ -248,7 +246,6 @@ pub trait NaiveHashPage {
     ) -> Result<(), AccessMethodError>;
 
     fn heap_get(&self, pkey: &[u8]) -> Result<MvccEntry, AccessMethodError>;
-
 
     fn read_bytes(&self, offset: usize, len: usize) -> &[u8];
     fn write_bytes(&mut self, offset: usize, bytes: &[u8]);
@@ -383,14 +380,8 @@ pub trait NaiveHashPage {
     fn slot_cmp_key(&self, slot_id: usize, search_key: &[u8]) -> std::cmp::Ordering;
 
     fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>);
-    fn scan_delta_as_from(
-        &self,
-        delta_map: &mut HashMap<Vec<u8>, RowDelta>,
-    );
-    fn scan_delta_as_to(
-        &self,
-        delta_map: &mut HashMap<Vec<u8>, RowDelta>,
-    );
+    fn scan_delta_as_from(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>);
+    fn scan_delta_as_to(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>);
 }
 
 impl NaiveHashPage for Page {
@@ -471,13 +462,18 @@ impl NaiveHashPage for Page {
 
             // Attempt a cheap pkey check first; if no match, skip it.
             if let Some(rec) = self.slot_pkey_matches(slot, pkey) {
-                return Ok(MvccEntry::new(rec.key().to_vec(), rec.pkey().to_vec(), rec.val().to_vec(), 0, 0));
+                return Ok(MvccEntry::new(
+                    rec.key().to_vec(),
+                    rec.pkey().to_vec(),
+                    rec.val().to_vec(),
+                    0,
+                    0,
+                ));
             }
         }
 
         Err(AccessMethodError::KeyNotFound)
     }
-
 
     fn read_bytes(&self, offset: usize, len: usize) -> &[u8] {
         &self[offset..offset + len]
@@ -588,7 +584,7 @@ impl NaiveHashPage for Page {
 
         // If the entire pkey fits within the prefix, we've already confirmed equality:
         if pkey.len() <= SLOT_PKEY_PREFIX_SIZE {
-            return true
+            return true;
         }
 
         // 3) pkey is longer than the prefix => compare the remainder.
@@ -660,8 +656,6 @@ impl NaiveHashPage for Page {
         slot_pkey.cmp(search_key)
     }
 
-
-
     fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>) {
         let slot_count = self.slot_count();
 
@@ -676,7 +670,7 @@ impl NaiveHashPage for Page {
                 rec.pkey().to_vec(),
                 rec.val().to_vec(),
                 0,
-                0
+                0,
             );
             results.push(entry);
         }
@@ -689,10 +683,7 @@ impl NaiveHashPage for Page {
         }
     }
 
-    fn scan_delta_as_from(
-        &self,
-        delta_map: &mut HashMap<Vec<u8>, RowDelta>,
-    ) {
+    fn scan_delta_as_from(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>) {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {
@@ -712,10 +703,7 @@ impl NaiveHashPage for Page {
         }
     }
 
-    fn scan_delta_as_to(
-        &self,
-        delta_map: &mut HashMap<Vec<u8>, RowDelta>,
-    ) {
+    fn scan_delta_as_to(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>) {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {

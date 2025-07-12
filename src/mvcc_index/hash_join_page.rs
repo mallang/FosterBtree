@@ -30,7 +30,7 @@ pub mod header {
             }
         };
     }
-    
+
     define_header_with_common!(Header {
         // for optimization
         page_min_start_ts: Timestamp,
@@ -384,7 +384,11 @@ pub mod record {
             Self { key, pkey, val }
         }
         pub fn to_rec(&self) -> Record {
-            Record { key: self.key.to_vec(), pkey: self.pkey.to_vec(), val: self.val.to_vec() }
+            Record {
+                key: self.key.to_vec(),
+                pkey: self.pkey.to_vec(),
+                val: self.val.to_vec(),
+            }
         }
     }
 
@@ -430,7 +434,12 @@ use super::{
 };
 
 pub trait HashJoinPage {
-    fn chain_scan_key(&self, search_key: &[u8], ts: &Timestamp, result_map: &mut Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), AccessMethodError>;
+    fn chain_scan_key(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        result_map: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), AccessMethodError>;
     fn chain_update_recent(
         &mut self,
         new_entry: &MvccEntry,
@@ -1115,9 +1124,11 @@ impl HashJoinPage for Page {
                 continue;
             }
             if let Some(_) = self.slot_pkey_matches(&slot, new_entry.pkey()) {
-                // update it 
+                // update it
                 let new_rec = RecordRef::new(new_entry.key(), new_entry.pkey(), new_entry.value());
-                return Ok(self.update_at_slot_id(&new_rec, new_ts, Timestamp::MAX, i).unwrap());
+                return Ok(self
+                    .update_at_slot_id(&new_rec, new_ts, Timestamp::MAX, i)
+                    .unwrap());
             }
         }
         Err(AccessMethodError::KeyNotFound)

@@ -1,10 +1,13 @@
 use std::{any::Any, error::Error, fmt::Debug, sync::Arc};
 
-use crate::{bp::{ContainerKey, MemPool}, mvcc_index::{MvccEntry, TxId}};
+use crate::{
+    bp::{ContainerKey, MemPool},
+    mvcc_index::{MvccEntry, TxId},
+};
 
+pub mod hash_join_chain;
 mod hash_join_page;
 pub mod hash_join_table;
-pub mod hash_join_chain;
 
 pub trait SingleTsHashTable<T: MemPool>: Send + Sync + Any {
     type Key: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
@@ -20,11 +23,7 @@ pub trait SingleTsHashTable<T: MemPool>: Send + Sync + Any {
         value: Self::Value,
     ) -> Result<(), Self::Error>;
 
-    fn get(
-        &self,
-        key: &[u8],
-        pkey: &[u8],
-    ) -> Result<Option<Self::Value>, Self::Error>;
+    fn get(&self, key: &[u8], pkey: &[u8]) -> Result<Option<Self::Value>, Self::Error>;
 
     fn create_with_bucket_num(
         c_key: ContainerKey,
@@ -33,5 +32,4 @@ pub trait SingleTsHashTable<T: MemPool>: Send + Sync + Any {
     ) -> Result<Self, Self::Error>
     where
         Self: Sized;
-    
 }

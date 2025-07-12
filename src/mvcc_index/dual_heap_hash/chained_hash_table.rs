@@ -14,14 +14,11 @@ use std::{
     },
 };
 
-use super::{
-    chained_hash_bucket_second::SecondBucket, Timestamp, TxId, TxInfo
-};
-
+use super::{chained_hash_bucket_second::SecondBucket, Timestamp, TxId, TxInfo};
 
 pub const DEAFAULT_FIRST_BUCKET_NUM: usize = 128;
 
-pub struct ChainedHashTable<T: MemPool> {
+pub struct ChainedHashTable<T: MemPool + 'static> {
     c_key: ContainerKey,
     mem_pool: Arc<T>,
 
@@ -136,7 +133,6 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
     pub fn bucket_count(&self) -> usize {
         self.bucket_count
     }
-
 
     pub fn scan_into_vec(
         &self,

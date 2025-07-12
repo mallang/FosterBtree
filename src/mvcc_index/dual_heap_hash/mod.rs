@@ -21,5 +21,3 @@ static mut PARAMS: UnsafeCell<Option<Parameters>> = UnsafeCell::new(None);
 pub fn get_params() -> Parameters {
     unsafe { PARAMS.get().as_ref().unwrap().clone().unwrap() }
 }
-
-

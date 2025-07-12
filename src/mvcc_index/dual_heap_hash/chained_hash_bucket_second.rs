@@ -8,11 +8,16 @@ use std::{
 };
 
 use crate::{
-    bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey}, log_debug, log_info, log_warn, mvcc_index::{
-        hash_common::{fix_frame_id2, write_page, KVWithTs, RowDelta}, hash_join_heap_chain::HeapHashChain, hash_join_page::HashJoinPage, Delta, MvccEntry, TxId
-    }, prelude::{AccessMethodError, Timestamp}
+    bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
+    log_debug, log_info, log_warn,
+    mvcc_index::{
+        hash_common::{fix_frame_id2, write_page, KVWithTs, RowDelta},
+        hash_join_heap_chain::HeapHashChain,
+        hash_join_page::HashJoinPage,
+        Delta, MvccEntry, TxId,
+    },
+    prelude::{AccessMethodError, Timestamp},
 };
-
 
 #[derive(Debug, Clone)]
 pub struct ChainBucketBulkUpdate {
@@ -43,7 +48,10 @@ impl<T: MemPool + 'static> SecondBucket<T> {
             mem_pool,
             recent_chain,
             history_chain,
-            bulk_update: Mutex::new(ChainBucketBulkUpdate { updated_entries: HashMap::new(), old_entries: vec![] }),
+            bulk_update: Mutex::new(ChainBucketBulkUpdate {
+                updated_entries: HashMap::new(),
+                old_entries: vec![],
+            }),
         }
     }
 
@@ -68,11 +76,15 @@ impl<T: MemPool + 'static> SecondBucket<T> {
         }
     }
 
-    pub fn update(&self, pkey: &[u8], entry: &MvccEntry, is_bulk_update: bool) -> Result<(), AccessMethodError> {
+    pub fn update(
+        &self,
+        pkey: &[u8],
+        entry: &MvccEntry,
+        is_bulk_update: bool,
+    ) -> Result<(), AccessMethodError> {
         if is_bulk_update {
             let mut bulk = self.bulk_update.lock().unwrap();
-            bulk
-                .updated_entries
+            bulk.updated_entries
                 .insert(pkey.to_vec(), entry.value().to_vec());
             return Ok(());
         }
@@ -86,13 +98,15 @@ impl<T: MemPool + 'static> SecondBucket<T> {
         }
     }
 
-    pub fn do_bulk_update(
-        &self,
-        new_start_ts: Timestamp,
-    ) -> Result<(), AccessMethodError> {
+    pub fn do_bulk_update(&self, new_start_ts: Timestamp) -> Result<(), AccessMethodError> {
         let mut bulk = self.bulk_update.lock().unwrap();
-        self.recent_chain.chain_bulk_update_collect_old_entries(self.recent_chain.first_key(), &mut bulk, new_start_ts)?;
-        self.history_chain.chain_bulk_update_history_entries(&bulk)?;
+        self.recent_chain.chain_bulk_update_collect_old_entries(
+            self.recent_chain.first_key(),
+            &mut bulk,
+            new_start_ts,
+        )?;
+        self.history_chain
+            .chain_bulk_update_history_entries(&bulk)?;
         bulk.old_entries.clear();
         bulk.updated_entries.clear();
         Ok(())
@@ -114,8 +128,6 @@ impl<T: MemPool + 'static> SecondBucket<T> {
         self.history_chain.garbage_collect(ts)
     }
 
-   
-
     pub fn stat(&self) -> String {
         // Obtain stats from both chains.
         let recent_stat = self.recent_chain.stat();
@@ -127,7 +139,12 @@ impl<T: MemPool + 'static> SecondBucket<T> {
         )
     }
 
-    pub fn scan_key_into(&self, search_key: &[u8], ts: &Timestamp, res: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+    pub fn scan_key_into(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        res: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
         self.recent_chain.chain_scan_key(search_key, ts, res);
         self.history_chain.chain_scan_key(search_key, ts, res);
     }
