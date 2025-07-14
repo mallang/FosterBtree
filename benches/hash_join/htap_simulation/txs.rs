@@ -163,14 +163,27 @@ impl TxBench {
         let (tx_id, tx_ts) = self.gen_new_tx();
         self.data_source.generate_customer_table();
         self.txs
-            .push(Tx::new(OperationType::InitialLoad, tx_id, tx_ts, vec![]));
+            .push(Tx::new(OperationType::InitLoad, tx_id, tx_ts, vec![]));
     }
 
     pub fn gen_update_tx(&mut self, update_count: usize) {
         let (tx_id, tx_ts) = self.gen_new_tx();
         let mut ops = Vec::new();
+        let mut pkey_set = HashSet::new();
         for _ in 0..update_count {
-            let op = self.data_source.generate_transactional_op();
+            // remove duplicate
+            let mut op = self.data_source.generate_transactional_op();
+            loop {
+                if pkey_set.contains(&op.pkey) {
+                    op = self.data_source.generate_transactional_op();
+                    continue;
+                } else {
+                    pkey_set.insert(op.pkey.clone());
+                    break;
+                }
+            }
+
+            // insert op
             ops.push(TxOperation::new_update(
                 tx_id,
                 tx_ts,
@@ -181,6 +194,52 @@ impl TxBench {
         }
         self.txs
             .push(Tx::new(OperationType::Update, tx_id, tx_ts, ops));
+    }
+
+    pub fn gen_scan_txs(&mut self, scan_ts: Timestamp) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        assert!(self.read_ts_candidates.contains(&scan_ts));
+        let mut ops = Vec::new();
+
+        let op = TxOperation::new(
+            tx_id,
+            tx_ts,
+            OperationType::Scan,
+            scan_ts,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        ops.push(op);
+        let tx = Tx::new(OperationType::Scan, tx_id, tx_ts, ops);
+        self.txs.push(tx);
+    }
+
+    pub fn gen_scan_txs_random(&mut self) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        let scan_ts = self
+            .read_ts_candidates
+            .choose(&mut self.rng)
+            .unwrap()
+            .to_owned();
+        let mut ops = Vec::new();
+
+        let op = TxOperation::new(
+            tx_id,
+            tx_ts,
+            OperationType::Scan,
+            scan_ts,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        ops.push(op);
+        let tx = Tx::new(OperationType::Scan, tx_id, tx_ts, ops);
+        self.txs.push(tx);
     }
 
     pub fn gen_mark_ts_txs(&mut self, mark_ts: Timestamp) {
@@ -231,6 +290,28 @@ impl TxBench {
         self.read_txs.push(tx);
     }
 
+    pub fn gen_full_delta_scan_tx(&mut self) {
+        let all_ts = &self.read_ts_candidates;
+
+        if all_ts.len() < 2 {
+            panic!("Not enough read_ts candidates for delta scan, at least 2 required");
+        }
+
+        let read_ts1 = all_ts.iter().min().unwrap();
+        let read_ts2 = all_ts.iter().max().unwrap();
+        assert!(
+            read_ts1 != read_ts2,
+            "Selected timestamps must be different"
+        );
+        let from_ts = read_ts1.min(read_ts2);
+        let to_ts = read_ts1.max(read_ts2);
+
+        let op = TxOperation::new_delta_scan(0, *to_ts, *from_ts);
+        let tx = Tx::new(OperationType::DeltaScan, 0, 0, vec![op]);
+        self.txs.push(tx.clone());
+        self.read_txs.push(tx);
+    }
+
     pub fn gen_txs(&mut self) {
         if self.cli.manual_txs.is_none() {
             self.gen_random_txs();
@@ -248,9 +329,13 @@ impl TxBench {
         // load markts txn
         self.gen_mark_ts_txs(1);
 
-        for i in 2..self.cli.txn_count - 1 {
+        for i in 2..self.cli.txn_count - 2 {
             let tx_type = if self.rng.gen_bool(self.cli.analytical_ratio) {
-                OperationType::MarkTs
+                if self.rng.gen_bool(0.9) {
+                    OperationType::MarkTs
+                } else {
+                    OperationType::Scan
+                }
             } else {
                 OperationType::Update
             };
@@ -265,17 +350,23 @@ impl TxBench {
                 OperationType::MarkTs => {
                     self.gen_mark_ts_txs(i as Timestamp);
                 }
+                OperationType::Scan => {
+                    self.gen_scan_txs_random();
+                }
                 _default => {
                     panic!();
                 }
             }
         }
 
-        self.gen_mark_ts_txs(self.cli.txn_count as u64 - 1);
-
-        for i in 0..self.cli.delta_count {
+        self.gen_mark_ts_txs(self.cli.txn_count as u64 - 2);
+        self.gen_scan_txs(self.cli.txn_count as u64 - 2);
+        self.gen_scan_txs(self.cli.txn_count as u64 - 2);
+        for i in 0..self.cli.delta_count - 1 {
             self.gen_delta_scan_tx();
         }
+        self.gen_full_delta_scan_tx();
+
     }
 
     pub fn gen_manual_txs(&mut self) {
@@ -290,9 +381,9 @@ impl TxBench {
         let tx = &self.txs[txs_idx as usize];
         let start = Instant::now();
         match tx.tx_type {
-            OperationType::InitialLoad => {
+            OperationType::InitLoad => {
                 hash_join_table
-                    .begin_txs(OperationType::InitialLoad)
+                    .begin_txs(OperationType::InitLoad)
                     .unwrap();
                 for op in self.data_source.get_custoemr_vec() {
                     hash_join_table.insert(
@@ -301,25 +392,32 @@ impl TxBench {
                         &op.generate_value(),
                     );
                 }
-                hash_join_table.end_txs().unwrap();
+                hash_join_table.end_txs(OperationType::InitLoad).unwrap();
             }
             OperationType::MarkTs => {
                 let ts = tx.tx_ts;
                 hash_join_table.mark_ts(ts);
             }
             OperationType::Update => {
-                hash_join_table
-                    .begin_txs(OperationType::InitialLoad)
-                    .unwrap();
+                hash_join_table.begin_txs(OperationType::Update).unwrap();
                 for op in &tx.ops {
                     hash_join_table.update(&op.join_key, &op.pkey, &op.value, op.tx_ts);
                 }
-                hash_join_table.end_txs().unwrap();
+                hash_join_table.end_txs(OperationType::Update).unwrap();
             }
             OperationType::DeltaScan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
-                    let _ = hash_join_table.scan_delta(op.read_ts, op.tx_ts);
+                    let _ = hash_join_table.scan_delta(op.read_ts, op.tx_ts, false);
+                }
+            }
+            OperationType::UpdateWR => {
+                panic!("should not exist");
+            }
+            OperationType::Scan => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.scan(op.read_ts, false);
                 }
             }
         }
@@ -332,23 +430,194 @@ impl TxBench {
             elapsed
         );
         match tx.tx_type {
-            OperationType::InitialLoad => {
+            OperationType::InitLoad => {
                 println!(
-                    " InitialLoad count: {:?}",
+                    "InitialLoad count: {:?}",
                     self.data_source.get_custoemr_vec().len()
                 );
             }
             OperationType::Update => {
-                println!(" Update count: {:?}", tx.ops.len());
+                println!("Update count: {:?}", tx.ops.len());
             }
             OperationType::MarkTs => {
-                println!("mark ts at ts: {:?}", tx.ops[0].tx_ts);
+                println!("MarkTs at read_ts: {:?}", tx.ops[0].tx_ts);
             }
             OperationType::DeltaScan => {
                 println!(
-                    " from read_ts: {:?} to tx_ts: {:?}",
+                    "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
                     tx.ops[0].read_ts, tx.ops[0].tx_ts
                 );
+            }
+            OperationType::UpdateWR => {
+                panic!();
+            }
+            OperationType::Scan => {
+                println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
+            }
+        }
+        Ok(elapsed)
+    }
+
+    pub fn run_tx_read_repair(
+        &self,
+        txs_idx: TxId,
+        hash_join_table: &BoxMVIndex,
+    ) -> Result<Duration, Error> {
+        let tx = &self.txs[txs_idx as usize];
+        let start = Instant::now();
+        match tx.tx_type {
+            OperationType::InitLoad => {
+                for op in self.data_source.get_custoemr_vec() {
+                    hash_join_table.insert(
+                        &op.generate_join_key(),
+                        &op.generate_pkey(),
+                        &op.generate_value(),
+                    );
+                }
+            }
+            OperationType::MarkTs => {
+                let ts = tx.tx_ts;
+                hash_join_table.mark_ts(ts);
+            }
+            OperationType::Update => {
+                for op in &tx.ops {
+                    hash_join_table.update(&op.join_key, &op.pkey, &op.value, op.tx_ts);
+                }
+            }
+            OperationType::DeltaScan => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.scan_delta(op.read_ts, op.tx_ts, true);
+                }
+            }
+            OperationType::UpdateWR => {
+                panic!("should not exist");
+            }
+            OperationType::Scan => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.scan(op.read_ts, true);
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        print!(
+            "[Read Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
+            txs_idx,
+            tx.tx_id,
+            format!("{:?}", tx.tx_type),
+            elapsed
+        );
+        match tx.tx_type {
+            OperationType::InitLoad => {
+                println!(
+                    "InitialLoad count: {:?}",
+                    self.data_source.get_custoemr_vec().len()
+                );
+            }
+            OperationType::Update => {
+                println!("Update count: {:?}", tx.ops.len());
+            }
+            OperationType::MarkTs => {
+                println!("MarkTs at read_ts: {:?}", tx.ops[0].tx_ts);
+            }
+            OperationType::DeltaScan => {
+                println!(
+                    "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
+                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                );
+            }
+            OperationType::UpdateWR => {
+                panic!();
+            }
+            OperationType::Scan => {
+                println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
+            }
+        }
+        Ok(elapsed)
+    }
+
+    pub fn run_tx_write_repair(
+        &self,
+        txs_idx: TxId,
+        hash_join_table: &BoxMVIndex,
+    ) -> Result<Duration, Error> {
+        let tx = &self.txs[txs_idx as usize];
+        let start = Instant::now();
+        match tx.tx_type {
+            OperationType::InitLoad => {
+                for op in self.data_source.get_custoemr_vec() {
+                    hash_join_table.insert(
+                        &op.generate_join_key(),
+                        &op.generate_pkey(),
+                        &op.generate_value(),
+                    );
+                }
+            }
+            OperationType::MarkTs => {
+                let ts = tx.tx_ts;
+                hash_join_table.mark_ts(ts);
+            }
+            OperationType::Update => {
+                hash_join_table.begin_txs(OperationType::UpdateWR).unwrap();
+                for op in &tx.ops {
+                    hash_join_table.update_write_repair(
+                        &op.join_key,
+                        &op.pkey,
+                        &op.value,
+                        op.tx_ts,
+                    );
+                }
+                hash_join_table.end_txs(OperationType::UpdateWR).unwrap();
+            }
+            OperationType::DeltaScan => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.scan_delta(op.read_ts, op.tx_ts, false);
+                }
+            }
+            OperationType::UpdateWR => {
+                panic!("should not exist");
+            }
+            OperationType::Scan => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.scan(op.read_ts, false);
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        print!(
+            "[Write Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
+            txs_idx,
+            tx.tx_id,
+            format!("{:?}", tx.tx_type),
+            elapsed
+        );
+        match tx.tx_type {
+            OperationType::InitLoad => {
+                println!(
+                    "InitialLoad count: {:?}",
+                    self.data_source.get_custoemr_vec().len()
+                );
+            }
+            OperationType::Update => {
+                println!("Update count: {:?}", tx.ops.len());
+            }
+            OperationType::MarkTs => {
+                println!("MarkTs at read_ts: {:?}", tx.ops[0].tx_ts);
+            }
+            OperationType::DeltaScan => {
+                println!(
+                    "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
+                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                );
+            }
+            OperationType::UpdateWR => {
+                panic!();
+            }
+            OperationType::Scan => {
+                println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
         Ok(elapsed)
@@ -360,239 +629,17 @@ impl TxBench {
         }
     }
 
-    // pub fn run_tx_read_repair(
-    //     &self,
-    //     txs_idx: TxId,
-    //     hash_join_table: &mut BoxMvccIndexMemPool,
-    // ) -> Result<Duration> {
-    //     let tx = &self.txs[txs_idx as usize];
-    //     let start = Instant::now();
-    //     match tx.tx_type {
-    //         OperationType::Insert => {
-    //             for op in &tx.ops {
-    //                 hash_join_table
-    //                     .insert(
-    //                         op.join_key.clone(),
-    //                         op.pkey.clone(),
-    //                         op.tx_ts,
-    //                         op.tx_id,
-    //                         op.value.clone(),
-    //                     )
-    //                     .unwrap();
-    //             }
-    //             hash_join_table
-    //                 .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-    //                 .unwrap();
-    //         }
-    //         OperationType::Update => {
-    //             for op in &tx.ops {
-    //                 hash_join_table
-    //                     .update(
-    //                         op.join_key.clone(),
-    //                         op.pkey.clone(),
-    //                         op.tx_ts,
-    //                         op.tx_id,
-    //                         op.value.clone(),
-    //                     )
-    //                     .unwrap();
-    //             }
-    //             hash_join_table
-    //                 .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-    //                 .unwrap();
-    //         }
-    //         OperationType::Delete => {
-    //             for op in &tx.ops {
-    //                 hash_join_table
-    //                     .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
-    //                     .unwrap();
-    //             }
-    //         }
-    //         OperationType::Get => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table
-    //                     .get_read_repair(&op.join_key, &op.pkey, op.read_ts)
-    //                     .unwrap();
-    //             }
-    //         }
-    //         OperationType::ScanKey => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table
-    //                     .scan_key_vec_read_repair(&op.join_key, op.read_ts)
-    //                     .unwrap();
-    //             }
-    //         }
-    //         OperationType::Scan => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table.scan_read_repair(op.read_ts).unwrap();
-    //             }
-    //         }
-    //         OperationType::DeltaScan => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table
-    //                     .delta_scan_read_repair(op.read_ts, op.tx_ts)
-    //                     .unwrap();
-    //             }
-    //         }
-    //     }
-    //     let elapsed = start.elapsed();
-    //     print!(
-    //         "[Read Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
-    //         txs_idx,
-    //         tx.tx_id,
-    //         format!("{:?}", tx.tx_type),
-    //         elapsed
-    //     );
-    //     match tx.tx_type {
-    //         OperationType::Insert => {
-    //             println!(" Insert count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::Update => {
-    //             println!(" Update count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::Delete => {
-    //             println!(" Delete count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::Get => {
-    //             println!(" Get count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::ScanKey => {
-    //             println!(" read_ts: {:?}", tx.ops[0].read_ts);
-    //         }
-    //         OperationType::Scan => {
-    //             println!(" read_ts: {:?}", tx.ops[0].read_ts);
-    //         }
-    //         OperationType::DeltaScan => {
-    //             println!(
-    //                 " from read_ts: {:?} to tx_ts: {:?}",
-    //                 tx.ops[0].read_ts, tx.ops[0].tx_ts
-    //             );
-    //         }
-    //     }
-    //     Ok(elapsed)
-    // }
+    pub fn run_all_txs_read_repair(&self, hash_join_table: &BoxMVIndex) {
+        for txs_idx in 0..self.txs.len() {
+            let _ = self.run_tx_read_repair(txs_idx as TxId, hash_join_table);
+        }
+    }
 
-    // pub fn run_all_txs_read_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
-    //     for txs_idx in 0..self.txs.len() {
-    //         let _ = self.run_tx_read_repair(txs_idx as TxId, hash_join_table);
-    //     }
-    // }
-
-    // fn run_tx_write_repair(
-    //     &self,
-    //     txs_idx: TxId,
-    //     hash_join_table: &mut BoxMvccIndexMemPool,
-    // ) -> Result<Duration> {
-    //     let tx = &self.txs[txs_idx as usize];
-    //     let start = Instant::now();
-    //     match tx.tx_type {
-    //         OperationType::Insert => {
-    //             for op in &tx.ops {
-    //                 hash_join_table
-    //                     .insert(
-    //                         op.join_key.clone(),
-    //                         op.pkey.clone(),
-    //                         op.tx_ts,
-    //                         op.tx_id,
-    //                         op.value.clone(),
-    //                     )
-    //                     .unwrap();
-    //             }
-    //             hash_join_table
-    //                 .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-    //                 .unwrap();
-    //         }
-    //         OperationType::Update => {
-    //             hash_join_table.bulk_update_start().unwrap();
-    //             for op in &tx.ops {
-    //                 hash_join_table
-    //                     .update_write_repair(
-    //                         op.join_key.clone(),
-    //                         op.pkey.clone(),
-    //                         op.tx_ts,
-    //                         op.tx_id,
-    //                         op.value.clone(),
-    //                     )
-    //                     .unwrap();
-    //             }
-    //             hash_join_table.bulk_update_end().unwrap();
-    //             hash_join_table
-    //                 .split_at_ts(tx.ops.first().unwrap().tx_ts + 1)
-    //                 .unwrap();
-    //         }
-    //         OperationType::Delete => {
-    //             for op in &tx.ops {
-    //                 hash_join_table
-    //                     .delete(&op.join_key, &op.pkey, op.tx_ts, op.tx_id)
-    //                     .unwrap();
-    //             }
-    //         }
-    //         OperationType::Get => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table
-    //                     .get(&op.join_key, &op.pkey, op.read_ts)
-    //                     .unwrap();
-    //             }
-    //         }
-    //         OperationType::ScanKey => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table
-    //                     .scan_key_vec(&op.join_key, op.read_ts)
-    //                     .unwrap();
-    //             }
-    //         }
-    //         OperationType::Scan => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table.scan(op.read_ts).unwrap();
-    //             }
-    //         }
-    //         OperationType::DeltaScan => {
-    //             for op in &tx.ops {
-    //                 let _ = hash_join_table.delta_scan(op.read_ts, op.tx_ts).unwrap();
-    //             }
-    //         }
-    //     }
-    //     let elapsed = start.elapsed();
-    //     print!(
-    //         "[Write Repair] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
-    //         txs_idx,
-    //         tx.tx_id,
-    //         format!("{:?}", tx.tx_type),
-    //         elapsed
-    //     );
-    //     match tx.tx_type {
-    //         OperationType::Insert => {
-    //             println!(" Insert count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::Update => {
-    //             println!(" Update count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::Delete => {
-    //             println!(" Delete count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::Get => {
-    //             println!(" Get count: {:?}", tx.ops.len());
-    //         }
-    //         OperationType::ScanKey => {
-    //             println!(" read_ts: {:?}", tx.ops[0].read_ts);
-    //         }
-    //         OperationType::Scan => {
-    //             println!(" read_ts: {:?}", tx.ops[0].read_ts);
-    //         }
-    //         OperationType::DeltaScan => {
-    //             println!(
-    //                 " from read_ts: {:?} to tx_ts: {:?}",
-    //                 tx.ops[0].read_ts, tx.ops[0].tx_ts
-    //             );
-    //         }
-    //     }
-    //     Ok(elapsed)
-    // }
-
-    // pub fn run_all_txs_write_repair(&self, hash_join_table: &mut BoxMvccIndexMemPool) {
-    //     for txs_idx in 0..self.txs.len() {
-    //         let _ = self.run_tx_write_repair(txs_idx as TxId, hash_join_table);
-    //     }
-    // }
+    pub fn run_all_txs_write_repair(&self, hash_join_table: &BoxMVIndex) {
+        for txs_idx in 0..self.txs.len() {
+            let _ = self.run_tx_write_repair(txs_idx as TxId, hash_join_table);
+        }
+    }
 
     pub fn print_cli(&self) {
         let cli = &self.cli;
@@ -641,23 +688,29 @@ impl TxBench {
                 format!("{:?}", tx.tx_type)
             );
             match tx.tx_type {
-                OperationType::InitialLoad => {
+                OperationType::InitLoad => {
                     println!(
-                        " Insert count: {:?}",
+                        "Insert count: {:?}",
                         self.data_source.get_custoemr_vec().len()
                     );
                 }
                 OperationType::Update => {
-                    println!(" Update count: {:?}", tx.ops.len());
+                    println!("Update count: {:?}", tx.ops.len());
                 }
                 OperationType::MarkTs => {
-                    println!(" Mark Ts: {:?}", tx.ops[0].tx_ts);
+                    println!("Mark Ts: {:?}", tx.ops[0].tx_ts);
                 }
                 OperationType::DeltaScan => {
                     println!(
-                        " from read_ts: {:?} to tx_ts: {:?}",
+                        "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
                         tx.ops[0].read_ts, tx.ops[0].tx_ts
                     );
+                }
+                OperationType::UpdateWR => {
+                    panic!();
+                }
+                OperationType::Scan => {
+                    println!("Scan at ts: {:?}", tx.ops[0].read_ts);
                 }
             }
         }
@@ -673,9 +726,12 @@ impl TxBench {
             match tx.tx_type {
                 OperationType::DeltaScan => {
                     println!(
-                        " read_ts: {:>3} to tx_ts: {:>3}",
+                        "DeltaScan read_ts: {:>3} to tx_ts: {:>3}",
                         tx.ops[0].read_ts, tx.ops[0].tx_ts
                     );
+                }
+                OperationType::Scan => {
+                    println!("Scan at ts: {:?}", tx.ops[0].read_ts);
                 }
                 _ => {
                     panic!("no other txn");

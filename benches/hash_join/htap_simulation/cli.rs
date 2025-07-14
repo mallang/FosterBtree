@@ -1,11 +1,11 @@
 use clap::{Parser, ValueEnum};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum TableType {
+    Naive,
     Chain,
     Heap,
-    Partition,
-    Naive,
+    Par,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -13,7 +13,7 @@ pub struct Cli {
     #[arg(short = 'w', long = "warehouse-count", default_value = "10")]
     pub warehouse_count: usize,
 
-    #[arg(short = 's', long = "seed", default_value = "233333")]
+    #[arg(short = 's', long = "seed", default_value = "232323223")]
     pub seed: u64,
 
     #[arg(short = 't', long = "table-type", default_value = "naive")]

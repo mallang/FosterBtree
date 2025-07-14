@@ -395,16 +395,23 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
         let mut result = vec![];
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let latest_repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
         for bucket in &self.bucket_entries {
             if self.is_write_repair.load(Ordering::SeqCst) {
                 // write repair -> no need to use map to track best candidates
+                bucket.scan_unique_write_repair(ts, &mut result)?;
+            } else if latest_repair_ts >= ts.min(latest_update_ts) {
+                // read repair ts > scan_ts -> no need ...
                 bucket.scan_unique_write_repair(ts, &mut result)?;
             } else {
                 let mut best_candidates = HashMap::new();
                 bucket.scan_unique(ts, &mut best_candidates)?;
                 result.extend(best_candidates.into_values());
             }
+            // println!("{}", bucket.stat());
         }
+        println!("result len: {}", result.len());
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
         ))
@@ -529,6 +536,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         } else {
             false
         };
+        // println!("scan need repair? {}", is_need_repair);
+        
         if is_need_repair {
             let mut result = vec![];
             for bucket in &self.bucket_entries {

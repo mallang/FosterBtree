@@ -157,13 +157,13 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
         Ok(())
     }
 
-    pub fn scan_into_vec_recent(
+    pub fn scan_into_vec_recent_ignore_ts(
         &self,
-        ts: Timestamp,
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         for bucket in &self.bucket_entries {
-            bucket.scan_into_vec_recent(ts, results);
+            bucket.scan_into_vec_recent_ignore_ts(results).unwrap();
+            // println!("{}", bucket.stat().as_str());
         }
         Ok(())
     }
@@ -177,8 +177,12 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
     ///  - Average page usage (in %) per page,
     ///  - And average number of key–value pairs per page.
     pub fn stat(&self) -> String {
+        let mut res = String::new();
+        for bucket in &self.bucket_entries {
+            res.push_str(bucket.stat().as_str());
+        }
         // stat_str
-        "".into()
+        res
     }
 
     fn bulk_update(&self) -> Result<(), AccessMethodError> {
@@ -347,19 +351,19 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
                 .largest_txn_ts
                 .load(std::sync::atomic::Ordering::Acquire)
         {
-            // log_warn!("[chain scan] only scan recent!");
-            ChainedHashTable::scan_into_vec_recent(self, ts, &mut results)?;
+            ChainedHashTable::scan_into_vec_recent_ignore_ts(self, &mut results)?;
         } else {
             ChainedHashTable::scan_into_vec(self, ts, &mut results)?;
         }
-        let iter = results.into_iter().map(|entry| {
+
+
+        Ok(Box::new(results.into_iter().map(|entry| {
             (
-                entry.key().to_vec(),
-                entry.pkey().to_vec(),
-                entry.value().to_vec(),
+                entry.key,
+                entry.pkey,
+                entry.value,
             )
-        });
-        Ok(Box::new(iter))
+        })))
     }
 
     fn scan_key(

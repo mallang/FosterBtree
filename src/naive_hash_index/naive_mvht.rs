@@ -60,7 +60,6 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         }
     }
 
-    // new :
     pub fn add_insert_rec_new(&self, k: &[u8], pk: &[u8], v: &[u8]) {
         let mut vec_updates = self.vec_updates.borrow_mut();
         vec_updates.push(Record::new(k.to_vec(), pk.to_vec(), v.to_vec()));
@@ -68,7 +67,6 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         map_current_recs.insert(pk.to_vec(), vec_updates.len() - 1);
     }
 
-    // new :
     pub fn add_update_rec_new(&self, k: &[u8], pk: &[u8], v: &[u8]) {
         let mut vec_updates = self.vec_updates.borrow_mut();
         vec_updates.push(Record::new(k.to_vec(), pk.to_vec(), v.to_vec()));
@@ -76,7 +74,6 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         map_current_recs.insert(pk.to_vec(), vec_updates.len() - 1);
     }
 
-    // new : build the table with current records
     fn build_table_until_now(&self) -> Arc<NaiveHashTable<T>> {
         // let start = std::time::Instant::now();
         let table = Arc::new(NaiveHashTable::new_with_bucket_num(
@@ -168,6 +165,18 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
                 .borrow_mut()
                 .insert(*ts, total_page_num);
         }
+    }
+
+    pub fn scan(
+        &self,
+        ts: Timestamp,
+    ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send> {
+        let tables = self.naivetables.borrow();
+        let mut res = vec![];
+        if let Some(entry) = tables.get(&ts) {
+            res.extend(entry.scan().unwrap())
+        }
+        Box::new(res.into_iter())
     }
 
     pub fn print_stats(&self) {

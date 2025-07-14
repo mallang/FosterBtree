@@ -303,13 +303,12 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
 
     pub fn scan_into_vec(
         self: &Arc<Self>,
-        ts: Timestamp,
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         loop {
             // println!("scan a page");
-            current_page.chain_scan_into_vec(ts, results);
+            current_page.chain_scan_into_vec(results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
                 let next_page = read_page(
                     &*self.mem_pool,

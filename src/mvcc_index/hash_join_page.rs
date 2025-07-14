@@ -700,6 +700,7 @@ pub trait HashJoinPage {
     );
 
     fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>);
+    fn chain_scan_into_vec_ignore_ts(&self, results: &mut Vec<MvccEntry>);
     fn chain_scan_delta_into(
         &self,
         from: Timestamp,
@@ -1838,6 +1839,26 @@ impl HashJoinPage for Page {
                 rec.val().to_vec(),
                 st,
                 et,
+            );
+            results.push(entry);
+        }
+    }
+
+    fn chain_scan_into_vec_ignore_ts(&self, results: &mut Vec<MvccEntry>) {
+        let slot_count = self.slot_count();
+
+        for i in 0..slot_count {
+            let slot = self.unsafe_slot(i);
+
+            // 2) Read the entire record to confirm pkey equality.
+            let rec = self.record_ref_from_slot(&slot);
+            // 4) Finally, build an MvccEntry
+            let entry = MvccEntry::new(
+                rec.key().to_vec(),
+                rec.pkey().to_vec(),
+                rec.val().to_vec(),
+                0,
+                0
             );
             results.push(entry);
         }

@@ -19,13 +19,19 @@ use interface::BoxMVIndex;
 
 use crate::txs::TxBench;
 
-fn main() {
-    let cli = Cli::parse();
+#[derive(PartialEq)]
+enum RepairType {
+    ReadRepair,
+    WriteRepair,
+    NoRepair,
+}
 
+fn run_no_repair(bench: &TxBench, cli: &Cli) {
+    let num_buckets = 10;
+    println!();
+    println!("No Repair");
     let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
-    let num_buckets = 10;
-
     let table: BoxMVIndex = match cli.table_type {
         cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
             c_key,
@@ -37,7 +43,7 @@ fn main() {
             mem_pool,
             num_buckets,
         )) as BoxMVIndex,
-        cli::TableType::Partition => Box::new(TsPartitionedTable::new_with_bucket_num(
+        cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
             c_key,
             mem_pool,
             num_buckets,
@@ -51,10 +57,122 @@ fn main() {
         ) as BoxMVIndex,
     };
 
-    let mut bench = TxBench::new(cli);
+    bench.run_all_txs_no_repair(&table);
+}
+
+fn run_three_repairs(bench: &TxBench, cli: &Cli) {
+    let num_buckets = 10;
+    {
+        println!();
+        println!("No Repair");
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 0);
+        let table: BoxMVIndex = match cli.table_type {
+            cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Naive => Box::new(
+                fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
+                    c_key,
+                    mem_pool,
+                    num_buckets,
+                ),
+            ) as BoxMVIndex,
+        };
+
+        bench.run_all_txs_no_repair(&table);
+    }
+    
+
+    {
+        println!();
+        println!("Read Repair");
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 1);
+        let table: BoxMVIndex = match cli.table_type {
+            cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Naive => Box::new(
+                fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
+                    c_key,
+                    mem_pool,
+                    num_buckets,
+                ),
+            ) as BoxMVIndex,
+        };
+
+        bench.run_all_txs_read_repair(&table);
+    }
+
+    {
+        println!();
+        println!("Write Repair");
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 2);
+        let table: BoxMVIndex = match cli.table_type {
+            cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                num_buckets,
+            )) as BoxMVIndex,
+            cli::TableType::Naive => Box::new(
+                fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
+                    c_key,
+                    mem_pool,
+                    num_buckets,
+                ),
+            ) as BoxMVIndex,
+        };
+
+        bench.run_all_txs_write_repair(&table);
+    }
+}
+
+fn main() {
+    let cli = Cli::parse();
+    
+
+    let mut bench = TxBench::new(cli.clone());
     bench.print_cli();
     bench.gen_random_txs();
     bench.print_txs();
 
-    bench.run_all_txs_no_repair(&table);
+    run_no_repair(&bench, &cli);
+    run_three_repairs(&bench, &cli);
+
 }

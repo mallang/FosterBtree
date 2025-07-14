@@ -330,10 +330,20 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Self::Key, Self::PKey, Self::Value)> + Send>, Self::Error>
     {
         let mut result = vec![];
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
         for bucket in &self.bucket_entries {
             let partition_collection = bucket.read().unwrap();
             if self.is_write_repair.load(Ordering::SeqCst) {
                 // write repair -> no need to use map to track best candidates
+                for p in partition_collection.partitions().iter() {
+                    if ts >= p.get_range().0 {
+                        p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
+                    } else {
+                        // println!("skip partition: {:?}, ts: {}", p.get_range(), ts);
+                    }
+                }
+            } else if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
+                // read repair ts > scan_ts -> no need ...
                 for p in partition_collection.partitions().iter() {
                     if ts >= p.get_range().0 {
                         p.chain().scan_unique_write_repair(ts, &mut result).unwrap();

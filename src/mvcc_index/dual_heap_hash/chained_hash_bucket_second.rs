@@ -145,8 +145,8 @@ impl<T: MemPool + 'static> SecondBucket<T> {
         ts: &Timestamp,
         res: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) {
-        self.recent_chain.chain_scan_key(search_key, ts, res);
-        self.history_chain.chain_scan_key(search_key, ts, res);
+        self.recent_chain.chain_scan_key(search_key, ts, res).unwrap();
+        self.history_chain.chain_scan_key(search_key, ts, res).unwrap();
     }
 
     pub fn scan_into_vec(
@@ -159,12 +159,11 @@ impl<T: MemPool + 'static> SecondBucket<T> {
         Ok(())
     }
 
-    pub fn scan_into_vec_recent(
+    pub fn scan_into_vec_recent_ignore_ts(
         &self,
-        ts: Timestamp,
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
-        self.recent_chain.chain_scan_into_vec(ts, results)?;
+        self.recent_chain.chain_scan_into_vec_ignore_ts(results)?;
         Ok(())
     }
 

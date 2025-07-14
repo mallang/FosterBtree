@@ -876,7 +876,7 @@ impl<T: MemPool> DHashSubTable<T> {
     }
 
     fn rehash(&self, hash_size: u32) -> bool {
-        println!("[REHASH] rehash call to new size: {}", hash_size);
+        // println!("[REHASH] rehash call to new size: {}", hash_size);
         // ensure that re-hash only does once
         let _rehash_guard = self.rehash_mutex.lock().unwrap();
 

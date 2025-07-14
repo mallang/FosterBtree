@@ -95,14 +95,13 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
         (hasher.finish() as usize) % self.bucket_count
     }
 
-    fn scan(
+    pub fn scan(
         &self,
-        ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
     {
         let mut result = vec![];
         for bucket in &self.bucket_entries {
-            bucket.scan_into_vec(ts, &mut result)?;
+            bucket.scan_into_vec(&mut result)?;
         }
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
@@ -122,4 +121,3 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
         Ok(())
     }
 }
-

@@ -379,7 +379,7 @@ pub trait NaiveHashPage {
     ///         Ordering::Greater if slot’s pkey > search_key.
     fn slot_cmp_key(&self, slot_id: usize, search_key: &[u8]) -> std::cmp::Ordering;
 
-    fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>);
+    fn chain_scan_into_vec(&self, results: &mut Vec<MvccEntry>);
     fn scan_delta_as_from(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>);
     fn scan_delta_as_to(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>);
 }
@@ -656,7 +656,7 @@ impl NaiveHashPage for Page {
         slot_pkey.cmp(search_key)
     }
 
-    fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>) {
+    fn chain_scan_into_vec(&self, results: &mut Vec<MvccEntry>) {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {
