@@ -411,7 +411,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
             }
             // println!("{}", bucket.stat());
         }
-        println!("result len: {}", result.len());
+        // println!("result len: {}", result.len());
         Ok(Box::new(
             result.into_iter().map(|e| (e.key, e.pkey, e.value)),
         ))

@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-use super::{chained_hash_bucket_second::SecondBucket, Timestamp, TxId, TxInfo};
+use super::{chained_hash_bucket_second::DualChainBucket, Timestamp, TxId, TxInfo};
 
 pub const DEAFAULT_FIRST_BUCKET_NUM: usize = 128;
 
@@ -26,7 +26,7 @@ pub struct ChainedHashTable<T: MemPool + 'static> {
     meta_frame_id: AtomicU32,
 
     bucket_count: usize,
-    bucket_entries: Vec<Arc<SecondBucket<T>>>,
+    bucket_entries: Vec<Arc<DualChainBucket<T>>>,
     // tx_status: HashMap<TxId, TxInfo>, // Neet to written down to disk later...
 
     // used in recent scan
@@ -55,7 +55,7 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
 
         let mut bucket_entries = Vec::with_capacity(num_buckets);
         for i in 0..num_buckets {
-            let second_table = SecondBucket::new(c_key, mem_pool.clone());
+            let second_table = DualChainBucket::new(c_key, mem_pool.clone());
             // MvccHashJoinMetaPage::set_bucket_entry(&mut *meta_page, i, &entry);
             bucket_entries.push(Arc::new(second_table));
         }

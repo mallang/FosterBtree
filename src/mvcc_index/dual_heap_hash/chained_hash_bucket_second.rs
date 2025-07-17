@@ -25,7 +25,7 @@ pub struct ChainBucketBulkUpdate {
     pub old_entries: Vec<MvccEntry>,
 }
 
-pub struct SecondBucket<T: MemPool> {
+pub struct DualChainBucket<T: MemPool> {
     c_key: ContainerKey,
     mem_pool: Arc<T>,
 
@@ -35,7 +35,7 @@ pub struct SecondBucket<T: MemPool> {
     bulk_update: Mutex<ChainBucketBulkUpdate>,
 }
 
-impl<T: MemPool + 'static> SecondBucket<T> {
+impl<T: MemPool + 'static> DualChainBucket<T> {
     pub fn collect_page_num(&self) -> usize {
         self.recent_chain.collect_page_num() + self.history_chain.collect_page_num()
     }
