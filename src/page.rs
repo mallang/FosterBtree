@@ -40,7 +40,7 @@ pub const PAGE_SIZE: usize = 1048576;
 pub const PAGE_SIZE: usize = 16384;
 
 pub type PageId = u32;
-const BASE_PAGE_HEADER_SIZE: usize = 4 + LSN_SIZE;
+const BASE_PAGE_HEADER_SIZE: usize = (4 + LSN_SIZE + 7) & (!7);
 pub const AVAILABLE_PAGE_SIZE: usize = PAGE_SIZE - BASE_PAGE_HEADER_SIZE;
 
 #[cfg(feature = "heap_allocated_page")]

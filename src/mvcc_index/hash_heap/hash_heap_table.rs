@@ -490,6 +490,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
             let mut best_map = HashMap::new();
             chain_bucket.gc_collect_versions(&safe_ts, &mut best_map)?;
 
+            // println!("best map size {}", best_map.len());
             for map in best_map.into_values() {
                 read_repair_vec(&self.mem_pool, &map, self.c_key);
             }

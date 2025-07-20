@@ -16,7 +16,7 @@ pub struct Cli {
     #[arg(short = 's', long = "seed", default_value = "232323223")]
     pub seed: u64,
 
-    #[arg(short = 't', long = "table-type", default_value = "naive")]
+    #[arg(short = 't', long = "table-type", default_value = "chain")]
     pub table_type: TableType,
 
     #[arg(long = "manual-txs")]
@@ -28,7 +28,7 @@ pub struct Cli {
     #[arg(long = "analytical-ratio", default_value = "0.2")]
     pub analytical_ratio: f64,
 
-    #[arg(long = "op-ratio", default_value = "0.3")]
+    #[arg(long = "op-ratio", default_value = "0.01")]
     pub op_ratio: f64,
 
     #[arg(long = "delta-count", default_value = "3")]

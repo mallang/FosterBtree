@@ -125,7 +125,7 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
     }
 
     pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
-        self.history_chain.garbage_collect(ts)
+        self.history_chain.gc_truncate_entries_before_ts(ts)
     }
 
     pub fn stat(&self) -> String {

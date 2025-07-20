@@ -1,10 +1,8 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::{
+    collections::{BTreeMap, HashMap}, sync::{
         atomic::{self, AtomicU32, AtomicU64, Ordering},
         Arc,
-    },
-    time::Duration,
+    }, thread::current, time::Duration
 };
 
 use crate::{
@@ -730,63 +728,66 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     /// its last slot's end_ts is ≤ `ts`), then the entire page is removed.
     /// Otherwise, partial GC is applied on that page.
     pub fn gc_truncate_entries_before_ts(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
-        let mut current_page = self.first_page();
-        let mut prev_page: Option<FrameWriteGuard> = None;
-
+        let mut current_page = self.first_page_write();
+        // let mut prev_page: Option<FrameWriteGuard> = None;
         loop {
-            let gc_whole_page = if current_page.slot_count() == 0 {
-                true
-            } else {
-                current_page.max_end_ts() <= *ts
-            };
+            // let gc_whole_page = if current_page.slot_count() == 0 {
+            //     true
+            // } else {
+            //     current_page.max_end_ts() <= *ts
+            // };
 
-            if gc_whole_page {
-                // The entire page is eligible for GC.
-                // If we have a previous page, we need to update its next pointer.
-                if let Some(mut prev) = prev_page.take() {
-                    // Get the pointer to the next page after current_page.
-                    if let Some((next_pid, next_fid)) = current_page.next_page() {
-                        prev.set_next_page(next_pid, next_fid);
-                    } else {
-                        // No next page, so mark previous page as the tail.
-                        prev.set_next_page(PageId::MAX, u32::MAX);
-                    }
-                    // TODO: free current_page (Done by mem_pool)
-                } else {
-                    // No previous page means current_page is the first page.
-                    if let Some((next_pid, next_fid)) = current_page.next_page() {
-                        // Promote the next page as the new first page.
-                        self.set_first_page_id(next_pid);
-                        current_page = read_page(
-                            &*self.mem_pool,
-                            PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
-                        );
-                        // Continue without updating prev_page.
-                        continue;
-                    } else {
-                        // This is the only page and it is fully eligible. Reinitialize it.
-                        let mut writable_page = current_page
-                            .try_upgrade(true)
-                            .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
-                        writable_page.init();
-                        break;
-                    }
-                }
-            } else {
-                // Page is only partially eligible (or not eligible).
-                // Upgrade the page to a writable lock and run partial GC.
-                let mut writable_page = current_page
-                    .try_upgrade(true)
-                    .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
-                writable_page.heap_hash_garbage_collect(ts)?;
-                // Keep this page as the previous page (for updating pointers) in case the next page(s)
-                // are also fully eligible.
-                prev_page = Some(writable_page);
+            // if gc_whole_page {
+            //     // The entire page is eligible for GC.
+            //     // If we have a previous page, we need to update its next pointer.
+            //     if let Some(mut prev) = prev_page.take() {
+            //         // Get the pointer to the next page after current_page.
+            //         if let Some((next_pid, next_fid)) = current_page.next_page() {
+            //             prev.set_next_page(next_pid, next_fid);
+            //         } else {
+            //             // No next page, so mark previous page as the tail.
+            //             prev.set_next_page(PageId::MAX, u32::MAX);
+            //         }
+            //         // TODO: free current_page (Done by mem_pool)
+            //     } else {
+            //         // No previous page means current_page is the first page.
+            //         if let Some((next_pid, next_fid)) = current_page.next_page() {
+            //             // Promote the next page as the new first page.
+            //             self.set_first_page_id(next_pid);
+            //             current_page = read_page(
+            //                 &*self.mem_pool,
+            //                 PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+            //             );
+            //             // Continue without updating prev_page.
+            //             continue;
+            //         } else {
+            //             // This is the only page and it is fully eligible. Reinitialize it.
+            //             let mut writable_page = current_page
+            //                 .try_upgrade(true)
+            //                 .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
+            //             writable_page.init();
+            //             break;
+            //         }
+            //     }
+            // } else {
+            //     // Page is only partially eligible (or not eligible).
+            //     // Upgrade the page to a writable lock and run partial GC.
+            //     let mut writable_page = current_page
+            //         .try_upgrade(true)
+            //         .map_err(|_| AccessMethodError::PageWriteLatchFailed)?;
+            //     writable_page.heap_hash_garbage_collect(ts)?;
+            //     // Keep this page as the previous page (for updating pointers) in case the next page(s)
+            //     // are also fully eligible.
+            //     prev_page = Some(writable_page);
+            // }
+
+            if current_page.min_end_ts() <= *ts {
+                current_page.heap_hash_garbage_collect(ts)?;
             }
 
             // Move to the next page, if any.
-            if let Some((next_pid, next_fid)) = prev_page.as_ref().unwrap().next_page() {
-                current_page = read_page(
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                current_page = write_page(
                     &*self.mem_pool,
                     PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
                 );
@@ -1206,7 +1207,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
         (page_count, total_kv_count, usage_sum, max_usage, min_usage)
     }
-
+    // [His/Recent Chain]
     fn chain_try_traverse_to_endofchain_for_bulk_update(
         &self,
         page_key: PageFrameKey,

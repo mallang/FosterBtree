@@ -87,6 +87,19 @@ impl TxOperation {
             vec![],
         )
     }
+
+    pub fn new_gc(tx_id: TxId, tx_ts: Timestamp, read_ts: Timestamp) -> Self {
+        Self::new(
+            tx_id,
+            tx_ts,
+            OperationType::GbgCollect,
+            read_ts,
+            vec![],
+            vec![],
+            vec![],
+            vec![]
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -265,15 +278,14 @@ impl TxBench {
         self.txs.push(tx);
     }
 
-    pub fn gen_delta_scan_tx(&mut self) {
-        let all_ts = &self.read_ts_candidates;
+    pub fn gen_delta_scan_tx(&mut self, start_idx: usize, rng: &mut SmallRng) {
+        let all_ts = &self.read_ts_candidates[start_idx..];
 
         if all_ts.len() < 2 {
             panic!("Not enough read_ts candidates for delta scan, at least 2 required");
         }
 
         // randomly select 2 different timestamps
-        let rng = &mut self.rng;
         let mut selected_ts = all_ts.choose_multiple(rng, 2);
         let read_ts1 = selected_ts.next().unwrap();
         let read_ts2 = selected_ts.next().unwrap();
@@ -362,11 +374,39 @@ impl TxBench {
         self.gen_mark_ts_txs(self.cli.txn_count as u64 - 2);
         self.gen_scan_txs(self.cli.txn_count as u64 - 2);
         self.gen_scan_txs(self.cli.txn_count as u64 - 2);
-        for i in 0..self.cli.delta_count - 1 {
-            self.gen_delta_scan_tx();
-        }
         self.gen_full_delta_scan_tx();
+        
+        let mut rng = SmallRng::seed_from_u64(2333);
+        for i in 0..self.cli.delta_count - 1 {
+            
+            self.gen_delta_scan_tx(1, &mut rng);
+        }
 
+        // garbage collection
+        self.gen_gc_txs();
+        
+        let mut rng = SmallRng::seed_from_u64(2333);
+        for i in 0..self.cli.delta_count - 1 {
+            self.gen_delta_scan_tx(0, &mut rng);
+        }
+
+    }
+
+    pub fn gen_gc_txs(&mut self) {
+        let tss = &mut self.read_ts_candidates;
+        assert!(tss.len() >= 2);
+        assert_eq!(tss.iter().min(), tss.first());
+        let min_ts = tss.iter().min().unwrap().to_owned();
+        let (first, right) = tss.split_first().unwrap();
+        let new_tss = right.to_owned();
+        let new_min_ts = new_tss.iter().min().unwrap().to_owned();
+        self.read_ts_candidates = new_tss;
+
+        let (tx_id, tx_ts) = self.gen_new_tx();
+
+        let op = TxOperation::new_gc(tx_id, tx_ts, new_min_ts);
+        let tx = Tx::new(OperationType::GbgCollect, tx_id, tx_ts, vec![op]);
+        self.txs.push(tx.clone());
     }
 
     pub fn gen_manual_txs(&mut self) {
@@ -420,6 +460,12 @@ impl TxBench {
                     let _ = hash_join_table.scan(op.read_ts, false);
                 }
             }
+            OperationType::GbgCollect => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.garbage_collect(op.read_ts);
+                }
+            }
         }
         let elapsed = start.elapsed();
         print!(
@@ -453,6 +499,10 @@ impl TxBench {
             }
             OperationType::Scan => {
                 println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::GbgCollect => {
+                assert_eq!(tx.ops.len(), 1);
+                println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
         Ok(elapsed)
@@ -499,6 +549,12 @@ impl TxBench {
                     let _ = hash_join_table.scan(op.read_ts, true);
                 }
             }
+            OperationType::GbgCollect => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.garbage_collect(op.read_ts);
+                }
+            }
         }
         let elapsed = start.elapsed();
         print!(
@@ -532,6 +588,10 @@ impl TxBench {
             }
             OperationType::Scan => {
                 println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::GbgCollect => {
+                assert_eq!(tx.ops.len(), 1);
+                println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
         Ok(elapsed)
@@ -585,6 +645,12 @@ impl TxBench {
                     let _ = hash_join_table.scan(op.read_ts, false);
                 }
             }
+            OperationType::GbgCollect => {
+                assert_eq!(tx.ops.len(), 1);
+                for op in &tx.ops {
+                    let _ = hash_join_table.garbage_collect(op.read_ts);
+                }
+            }
         }
         let elapsed = start.elapsed();
         print!(
@@ -618,6 +684,10 @@ impl TxBench {
             }
             OperationType::Scan => {
                 println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
+            }
+            OperationType::GbgCollect => {
+                assert_eq!(tx.ops.len(), 1);
+                println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
         Ok(elapsed)
@@ -711,6 +781,10 @@ impl TxBench {
                 }
                 OperationType::Scan => {
                     println!("Scan at ts: {:?}", tx.ops[0].read_ts);
+                }
+                OperationType::GbgCollect => {
+                    assert_eq!(tx.ops.len(), 1);
+                    println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
                 }
             }
         }

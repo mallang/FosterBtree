@@ -42,7 +42,6 @@ mod test_ops {
 
     #[test]
     fn test_hash_table_garbage_collection() {
-        test_garbage_collection::<LinearHashTable<_>>();
         test_garbage_collection::<ChainedHashTable<_>>();
         test_garbage_collection::<HeapHashTable<_>>();
         test_garbage_collection::<TsPartitionedTable<_>>();

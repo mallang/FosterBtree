@@ -722,6 +722,7 @@ pub trait HashJoinPage {
     );
 
     fn max_end_ts(&self) -> Timestamp;
+    fn min_end_ts(&self) -> Timestamp;
 
     // bulk update get repaired versions
     fn heap_bulk_update_repair_collect(
@@ -998,24 +999,6 @@ impl HashJoinPage for Page {
         }
     }
 
-    fn heap_bulk_update_repair_collect(
-        &self,
-        write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
-    ) -> Result<(), AccessMethodError> {
-        for i in 0..self.slot_count() {
-            // Attempt a cheap pkey check first; if no match, skip it.
-            let slot = self.unsafe_slot(i);
-            let rec = self.record_ref_from_slot(slot);
-            if let Some(versions) = write_repair.get_mut(rec.pkey()) {
-                versions.push((
-                    slot.start_ts(),
-                    MvccEntryLoc::new(self.get_id(), i as u32),
-                    slot.end_ts() == u64::MAX,
-                ));
-            }
-        }
-        Ok(())
-    }
 
     fn update(&mut self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError> {
         let (found, slot_id) = self.search_slot(pkey);
@@ -1971,13 +1954,45 @@ impl HashJoinPage for Page {
         max_ts
     }
 
+    fn min_end_ts(&self) -> Timestamp {
+        let mut min_ts = Timestamp::MAX;
+        for slot_idx in 0..self.slot_count() {
+            let slot = self.unsafe_slot(slot_idx);
+            let et = slot.end_ts();
+            if et < min_ts {
+                min_ts = et;
+            }
+        }
+        min_ts
+    }
+
     fn write_bytes_slice(&mut self, mut offset: usize, bytes_vec: &[&[u8]]) {
         for bytes in bytes_vec {
             self[offset..offset + bytes.len()].copy_from_slice(bytes);
             offset += bytes.len();
         }
     }
-
+    // [Heap Chain]
+    fn heap_bulk_update_repair_collect(
+        &self,
+        write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+    ) -> Result<(), AccessMethodError> {
+        for i in 0..self.slot_count() {
+            // Attempt a cheap pkey check first; if no match, skip it.
+            let slot = self.unsafe_slot(i);
+            let rec = self.record_ref_from_slot(slot);
+            if let Some(versions) = write_repair.get_mut(rec.pkey()) {
+                versions.push((
+                    slot.start_ts(),
+                    MvccEntryLoc::new(self.get_id(), i as u32),
+                    slot.end_ts() == u64::MAX,
+                ));
+            }
+        }
+        Ok(())
+    }
+    
+    // [His/Recent Chain]
     fn chain_bulk_update_slots_recent(
         &mut self,
         bulk: &mut ChainBucketBulkUpdate,

@@ -19,6 +19,7 @@ pub enum OperationType {
     MarkTs,
     InitLoad,
     Scan,
+    GbgCollect,
 }
 
 pub trait MultiVersionJoinTable {
@@ -35,6 +36,7 @@ pub trait MultiVersionJoinTable {
     fn scan(&self, ts: Timestamp, is_read_repair: bool);
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError>;
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError>;
+    fn garbage_collect(&self, ts: Timestamp);
 }
 
 /*
@@ -75,9 +77,15 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
 
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
+        if optype == OperationType::UpdateWR || optype == OperationType::Update {
+            <Self as MvccIndex<T>>::bulk_update_start(&self);
+        }
         Ok(())
     }
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
+        if optype == OperationType::UpdateWR {
+            <Self as MvccIndex<T>>::bulk_update_end(&self);
+        }
         Ok(())
     }
 
@@ -87,6 +95,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
         } else {
             let _ = <Self as MvccIndex<_>>::scan(self, ts);
         }
+    }
+
+    fn garbage_collect(&self, ts: Timestamp) {
+        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
     }
 }
 
@@ -146,6 +158,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
         } else {
             <Self as MvccIndex<_>>::scan(&self, ts);
         }
+    }
+
+    fn garbage_collect(&self, ts: Timestamp) {
+        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
     }
 }
 
@@ -210,6 +226,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
             let _ = <Self as MvccIndex<_>>::scan(&self, ts);
         }
     }
+
+    fn garbage_collect(&self, ts: Timestamp) {
+        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+    }
 }
 
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
@@ -244,5 +264,8 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     }
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
         NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
+    }
+    fn garbage_collect(&self, ts: Timestamp) {
+        
     }
 }
