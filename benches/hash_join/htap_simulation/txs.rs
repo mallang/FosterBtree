@@ -374,6 +374,9 @@ impl TxBench {
         self.gen_mark_ts_txs(self.cli.txn_count as u64 - 2);
         self.gen_scan_txs(self.cli.txn_count as u64 - 2);
         self.gen_scan_txs(self.cli.txn_count as u64 - 2);
+        // self.gen_scan_txs(self.cli.txn_count as u64 - 2);
+        // self.gen_scan_txs(self.cli.txn_count as u64 - 2);
+        // self.gen_scan_txs(self.cli.txn_count as u64 - 2);
         self.gen_full_delta_scan_tx();
         
         let mut rng = SmallRng::seed_from_u64(2333);
@@ -530,9 +533,11 @@ impl TxBench {
                 hash_join_table.mark_ts(ts);
             }
             OperationType::Update => {
+                hash_join_table.begin_txs(OperationType::Update).unwrap();
                 for op in &tx.ops {
                     hash_join_table.update(&op.join_key, &op.pkey, &op.value, op.tx_ts);
                 }
+                hash_join_table.end_txs(OperationType::Update).unwrap();
             }
             OperationType::DeltaScan => {
                 assert_eq!(tx.ops.len(), 1);
