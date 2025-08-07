@@ -6,3 +6,4 @@ benches/hash_join/csv/
 venv/
 *archive
 output_*
+perf*

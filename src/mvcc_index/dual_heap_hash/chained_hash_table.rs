@@ -6,12 +6,10 @@ use crate::{
     prelude::AccessMethodError,
 };
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap, HashMap},
-    hash::{Hash, Hasher},
-    sync::{
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap}, hash::{Hash, Hasher}, result, sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64},
         Arc, Mutex,
-    },
+    }
 };
 
 use super::{chained_hash_bucket_second::DualChainBucket, Timestamp, TxId, TxInfo};
@@ -356,8 +354,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
             ChainedHashTable::scan_into_vec(self, ts, &mut results)?;
         }
 
+        // println!("chain scan count: {}", results.len());
 
-        Ok(Box::new(results.into_iter().map(|entry| {
+         Ok(Box::new(results.into_iter().map(|entry| {
             (
                 entry.key,
                 entry.pkey,

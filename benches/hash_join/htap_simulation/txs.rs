@@ -33,6 +33,18 @@ pub struct TxOperation {
     pub value: Vec<u8>,
     pub gc_ts: Vec<Timestamp>, // ts that we want to gc
 }
+
+
+fn clear_cpu_cache() {
+    let size = 256 * 1024 * 1024;
+    let mut buf = vec![0u8; size];
+    
+    for x in buf.iter_mut() {
+        *x = x.wrapping_add(1);
+    }
+}
+
+
 impl TxOperation {
     pub fn new(
         tx_id: TxId,
@@ -422,7 +434,7 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
-        let start = Instant::now();
+        let mut start = Instant::now();
         match tx.tx_type {
             OperationType::InitLoad => {
                 hash_join_table
@@ -460,7 +472,10 @@ impl TxBench {
             OperationType::Scan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
-                    let _ = hash_join_table.scan(op.read_ts, false);
+                    let iter = hash_join_table.scan(op.read_ts, false).unwrap();
+                    for entry in iter {
+                        assert_eq!(entry.2.len(), 688);
+                    }
                 }
             }
             OperationType::GbgCollect => {
@@ -517,7 +532,7 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
-        let start = Instant::now();
+        let mut start = Instant::now();
         match tx.tx_type {
             OperationType::InitLoad => {
                 for op in self.data_source.get_custoemr_vec() {
@@ -551,7 +566,10 @@ impl TxBench {
             OperationType::Scan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
-                    let _ = hash_join_table.scan(op.read_ts, true);
+                    let iter = hash_join_table.scan(op.read_ts, true).unwrap();
+                    for entry in iter {
+                        assert_eq!(entry.2.len(), 688);
+                    }
                 }
             }
             OperationType::GbgCollect => {
@@ -608,7 +626,7 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
-        let start = Instant::now();
+        let mut start = Instant::now();
         match tx.tx_type {
             OperationType::InitLoad => {
                 for op in self.data_source.get_custoemr_vec() {
@@ -647,7 +665,10 @@ impl TxBench {
             OperationType::Scan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
-                    let _ = hash_join_table.scan(op.read_ts, false);
+                    let iter = hash_join_table.scan(op.read_ts, false).unwrap();
+                    for entry in iter {
+                        assert_eq!(entry.2.len(), 688);
+                    }
                 }
             }
             OperationType::GbgCollect => {

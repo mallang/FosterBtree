@@ -170,13 +170,13 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     pub fn scan(
         &self,
         ts: Timestamp,
-    ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send> {
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError> {
         let tables = self.naivetables.borrow();
         let mut res = vec![];
         if let Some(entry) = tables.get(&ts) {
             res.extend(entry.scan().unwrap())
         }
-        Box::new(res.into_iter())
+        Ok(Box::new(res.into_iter()))
     }
 
     pub fn print_stats(&self) {
