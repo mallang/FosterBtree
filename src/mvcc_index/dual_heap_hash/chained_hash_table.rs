@@ -160,7 +160,7 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         for bucket in &self.bucket_entries {
-            bucket.scan_into_vec_recent_ignore_ts(results).unwrap();
+            bucket.scan_into_vec_recent_ignore_ts(results);
             // println!("{}", bucket.stat().as_str());
         }
         Ok(())
@@ -349,9 +349,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
                 .largest_txn_ts
                 .load(std::sync::atomic::Ordering::Acquire)
         {
-            ChainedHashTable::scan_into_vec_recent_ignore_ts(self, &mut results)?;
+            ChainedHashTable::scan_into_vec_recent_ignore_ts(self, &mut results);
         } else {
-            ChainedHashTable::scan_into_vec(self, ts, &mut results)?;
+            ChainedHashTable::scan_into_vec(self, ts, &mut results);
         }
 
         // println!("chain scan count: {}", results.len());
