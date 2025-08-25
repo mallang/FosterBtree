@@ -8,10 +8,47 @@ use core::slice;
 use std::{
     collections::{BTreeMap, HashMap},
     result::Result::Ok,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{atomic::{AtomicPtr, AtomicU64, Ordering}, Mutex}, time::{self, Instant}, 
 };
 pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
 pub static HISTORY_SLOT_CMP_CNT: AtomicU64 = AtomicU64::new(0);
+pub static SLOT_CNT: AtomicU64 = AtomicU64::new(0);
+pub static SKIP_SLOT_CNT: AtomicU64 = AtomicU64::new(0);
+pub static HIT_SLOT_CNT: AtomicU64 = AtomicU64::new(0);
+pub static PAGE_CNT: AtomicU64 = AtomicU64::new(0);
+lazy_static! {
+    static ref TIME: Mutex<time::Instant> = Mutex::new(time::Instant::now());
+}
+
+pub fn reset_statistics() {
+        #[cfg(feature = "count_statistics")]
+    {
+        SLOT_CNT.store(0, std::sync::atomic::Ordering::Relaxed);
+        SKIP_SLOT_CNT.store(0, std::sync::atomic::Ordering::Relaxed);
+        HIT_SLOT_CNT.store(0, std::sync::atomic::Ordering::Relaxed);
+        PAGE_CNT.store(0, std::sync::atomic::Ordering::Relaxed);
+        *(TIME.lock().unwrap()) = Instant::now();
+    }
+}
+
+pub fn print_statistics(str: impl AsRef<str>) {
+    #[cfg(feature = "count_statistics")]
+    {
+        use std::sync::atomic::Ordering;
+        log_warn!("[{}] slot_cnt: {}, \n\t skip_slot_cnt: {} \n\t hit_slot_cnt: {} \n\t page_cnt: {}",
+            str.as_ref(),
+            SLOT_CNT.load(Ordering::Relaxed),
+            SKIP_SLOT_CNT.load(Ordering::Relaxed),
+            HIT_SLOT_CNT.load(Ordering::Relaxed),
+            PAGE_CNT.load(Ordering::Relaxed),
+        );
+        log_warn!("[{}] Elapsed Time: {:?}",
+            str.as_ref(),
+            (*TIME.lock().unwrap()).elapsed(),
+        );
+    }
+
+}
 
 pub mod header {
     #[macro_export]
@@ -174,6 +211,7 @@ pub mod header {
         }
     }
 }
+use chrono::Duration;
 use header::*;
 
 pub mod slot {
@@ -337,6 +375,7 @@ pub mod slot {
         }
     }
 }
+use lazy_static::lazy_static;
 use slot::*;
 
 pub mod record {
@@ -1804,14 +1843,20 @@ impl HashJoinPage for Page {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {
+            #[cfg(feature = "count_statistics")]
+            SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let slot = self.unsafe_slot(i);
 
             // 1) Check if this version is visible at time `ts`.
             let st = slot.start_ts();
             let et = slot.end_ts();
             if ts < st || et <= ts {
+                #[cfg(feature = "count_statistics")]
+                    SKIP_SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
+            #[cfg(feature = "count_statistics")]
+            HIT_SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             // 2) Read the entire record to confirm pkey equality.
             let rec = self.record_ref_from_slot(&slot);
@@ -1831,6 +1876,13 @@ impl HashJoinPage for Page {
         let slot_count = self.slot_count();
 
         for i in 0..slot_count {
+            #[cfg(feature = "count_statistics")]
+            {
+                SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                HIT_SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
+
             let slot = self.unsafe_slot(i);
 
             // 2) Read the entire record to confirm pkey equality.

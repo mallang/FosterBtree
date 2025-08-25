@@ -65,7 +65,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
         .unwrap();
     }
 
-    fn mark_ts(&self, ts: u64) {}
+    fn mark_ts(&self, ts: u64) {
+        let _ = <Self as MvccIndex<_>>::scan(self, ts)
+            .unwrap();
+    }
 
     fn scan_delta(
         &self,
@@ -126,7 +129,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
         .unwrap();
     }
 
-    fn mark_ts(&self, ts: u64) {}
+    fn mark_ts(&self, ts: u64) {
+        let _ = <Self as MvccIndex<_>>::scan(self, ts)
+            .unwrap();
+    }
 
     fn scan_delta(
         &self,

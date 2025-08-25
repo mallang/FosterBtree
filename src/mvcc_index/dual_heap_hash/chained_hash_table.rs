@@ -1,12 +1,13 @@
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{hash_join_page::ChainedHashMetaPage, Delta, MvccEntry, MvccIndex},
+    mvcc_index::{hash_join_page::{print_statistics, reset_statistics, ChainedHashMetaPage}, Delta, MvccEntry, MvccIndex},
     page::{Page, PageId},
     prelude::AccessMethodError,
 };
+use core::fmt;
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap, HashMap}, hash::{Hash, Hasher}, result, sync::{
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap}, fmt::format, hash::{Hash, Hasher}, result, sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64},
         Arc, Mutex,
     }
@@ -155,12 +156,17 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
         Ok(())
     }
 
+    // [CHAIN] scan recent
     pub fn scan_into_vec_recent_ignore_ts(
         &self,
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
+        let mut i = 0;
         for bucket in &self.bucket_entries {
+            reset_statistics();
             bucket.scan_into_vec_recent_ignore_ts(results);
+            print_statistics(format!("bucket{}", i));
+            i += 1;
             // println!("{}", bucket.stat().as_str());
         }
         Ok(())

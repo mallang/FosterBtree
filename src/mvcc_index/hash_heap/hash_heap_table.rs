@@ -4,8 +4,7 @@ use crate::{
     mvcc_index::{
         hash_common::{
             read_repair_btree, read_repair_vec, BulkUpdate, KVWithTs, MvccEntryLoc, RowDelta,
-        },
-        Delta, MvccEntry, MvccIndex, TxId,
+        }, hash_join_page::{print_statistics, reset_statistics}, Delta, MvccEntry, MvccIndex, TxId
     },
     page::{Page, PageId},
     prelude::{AccessMethodError, Timestamp},
@@ -397,13 +396,20 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let mut result = vec![];
         let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
         let latest_repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let mut i = 0;
         for bucket in &self.bucket_entries {
             if self.is_write_repair.load(Ordering::SeqCst) {
                 // write repair -> no need to use map to track best candidates
+                reset_statistics();
                 bucket.scan_unique_write_repair(ts, &mut result)?;
+                print_statistics(format!("bucket{}", i));
+                i += 1;
             } else if latest_repair_ts >= ts.min(latest_update_ts) {
                 // read repair ts > scan_ts -> no need ...
+                reset_statistics();
                 bucket.scan_unique_write_repair(ts, &mut result)?;
+                print_statistics(format!("bucket{}", i));
+                i += 1;
             } else {
                 let mut best_candidates = HashMap::new();
                 bucket.scan_unique(ts, &mut best_candidates)?;

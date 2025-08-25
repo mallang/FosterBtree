@@ -11,7 +11,7 @@ use crate::{
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
         hash_common::{fix_frame_id, fix_frame_id2},
-        hash_join_page::{record::RecordRef, HashJoinPage},
+        hash_join_page::{record::RecordRef, HashJoinPage, PAGE_CNT},
         MvccEntry,
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
@@ -899,6 +899,8 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         loop {
+            #[cfg(feature = "count_statistics")]
+            PAGE_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             current_page.chain_scan_into_vec_ignore_ts(res);
 
             if let Some((next_pid, next_fid)) = current_page.next_page() {
@@ -947,6 +949,8 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     ) -> Result<(), AccessMethodError> {
         let mut current_page = self.first_page();
         loop {
+            #[cfg(feature = "count_statistics")]
+            PAGE_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             current_page.chain_scan_into_vec(ts, results);
             if let Some((next_pid, next_fid)) = current_page.next_page() {
                 let next_page = read_page(
