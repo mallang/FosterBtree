@@ -434,7 +434,8 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
-        let mut start = Instant::now();
+        let start = Instant::now();
+        let mut is_need_scan_warpup = false;
         match tx.tx_type {
             OperationType::InitLoad => {
                 hash_join_table
@@ -452,6 +453,7 @@ impl TxBench {
             OperationType::MarkTs => {
                 let ts = tx.tx_ts;
                 hash_join_table.mark_ts(ts);
+                is_need_scan_warpup = true;
             }
             OperationType::Update => {
                 hash_join_table.begin_txs(OperationType::Update).unwrap();
@@ -523,6 +525,9 @@ impl TxBench {
                 println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
+        if is_need_scan_warpup {
+            hash_join_table.after_mark_ts(tx.tx_ts);
+        }
         Ok(elapsed)
     }
 
@@ -532,7 +537,9 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
-        let mut start = Instant::now();
+        let start = Instant::now();
+        let mut is_need_scan_warpup = false;
+
         match tx.tx_type {
             OperationType::InitLoad => {
                 for op in self.data_source.get_custoemr_vec() {
@@ -546,6 +553,7 @@ impl TxBench {
             OperationType::MarkTs => {
                 let ts = tx.tx_ts;
                 hash_join_table.mark_ts(ts);
+                is_need_scan_warpup = true;
             }
             OperationType::Update => {
                 hash_join_table.begin_txs(OperationType::Update).unwrap();
@@ -617,6 +625,9 @@ impl TxBench {
                 println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
+        if is_need_scan_warpup {
+            hash_join_table.after_mark_ts(tx.tx_ts);
+        }
         Ok(elapsed)
     }
 
@@ -626,7 +637,8 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
-        let mut start = Instant::now();
+        let start = Instant::now();
+        let mut is_need_scan_warmup = false;
         match tx.tx_type {
             OperationType::InitLoad => {
                 for op in self.data_source.get_custoemr_vec() {
@@ -640,6 +652,7 @@ impl TxBench {
             OperationType::MarkTs => {
                 let ts = tx.tx_ts;
                 hash_join_table.mark_ts(ts);
+                is_need_scan_warmup = true;
             }
             OperationType::Update => {
                 hash_join_table.begin_txs(OperationType::UpdateWR).unwrap();
@@ -715,6 +728,10 @@ impl TxBench {
                 assert_eq!(tx.ops.len(), 1);
                 println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
+        }
+
+        if is_need_scan_warmup {
+            hash_join_table.after_mark_ts(tx.tx_ts);
         }
         Ok(elapsed)
     }

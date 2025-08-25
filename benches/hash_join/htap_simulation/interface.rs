@@ -37,6 +37,8 @@ pub trait MultiVersionJoinTable {
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError>;
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError>;
     fn garbage_collect(&self, ts: Timestamp);
+
+    fn after_mark_ts(&self, ts: Timestamp);
 }
 
 /*
@@ -65,9 +67,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
         .unwrap();
     }
 
-    fn mark_ts(&self, ts: u64) {
-        let _ = <Self as MvccIndex<_>>::scan(self, ts)
-            .unwrap();
+    fn mark_ts(&self, ts: u64) {}
+    fn after_mark_ts(&self, ts: u64) {
+        // for cache warm-up
+        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
     }
 
     fn scan_delta(
@@ -81,13 +84,13 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
 
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR || optype == OperationType::Update {
-            <Self as MvccIndex<T>>::bulk_update_start(&self);
+            let _ = <Self as MvccIndex<T>>::bulk_update_start(&self);
         }
         Ok(())
     }
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR {
-            <Self as MvccIndex<T>>::bulk_update_end(&self);
+           let _ =  <Self as MvccIndex<T>>::bulk_update_end(&self);
         }
         Ok(())
     }
@@ -102,7 +105,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
 
     fn garbage_collect(&self, ts: Timestamp) {
-        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+       let _ =  <Self as MvccIndex<_>>::garbage_collect(&self, ts);
     }
 }
 
@@ -129,9 +132,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
         .unwrap();
     }
 
-    fn mark_ts(&self, ts: u64) {
-        let _ = <Self as MvccIndex<_>>::scan(self, ts)
-            .unwrap();
+    fn mark_ts(&self, ts: u64) {}
+    fn after_mark_ts(&self, ts: u64) {
+        // for cache warm-up
+        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
     }
 
     fn scan_delta(
@@ -148,13 +152,13 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     }
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR {
-            <Self as MvccIndex<_>>::bulk_update_start(&self);
+            let _ = <Self as MvccIndex<_>>::bulk_update_start(&self);
         }
         Ok(())
     }
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR {
-            <Self as MvccIndex<_>>::bulk_update_end(&self);
+            let _ = <Self as MvccIndex<_>>::bulk_update_end(&self);
         }
         Ok(())
     }
@@ -169,7 +173,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     }
 
     fn garbage_collect(&self, ts: Timestamp) {
-        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+        let _ = <Self as MvccIndex<_>>::garbage_collect(&self, ts);
     }
 }
 
@@ -188,7 +192,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
     }
 
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
-        <Self as MvccIndex<_>>::update_write_repair(
+        let _ = <Self as MvccIndex<_>>::update_write_repair(
             self,
             key.to_vec(),
             pkey.to_vec(),
@@ -200,6 +204,11 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
 
     fn mark_ts(&self, ts: u64) {
         <Self as MvccIndex<_>>::split_at_ts(self, ts).unwrap();
+    }
+
+    fn after_mark_ts(&self, ts: u64) {
+        // for cache warm-up
+        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
     }
 
     fn scan_delta(
@@ -242,6 +251,9 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
 }
 
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
+    fn after_mark_ts(&self, ts: Timestamp) {
+        
+    }
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         NaiveMvHashTable::add_insert_rec_new(&self, key, pkey, value);
     }
