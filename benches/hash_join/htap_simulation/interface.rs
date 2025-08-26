@@ -43,6 +43,8 @@ pub trait MultiVersionJoinTable {
     fn garbage_collect(&self, ts: Timestamp);
 
     fn after_mark_ts(&self, ts: Timestamp);
+
+    fn collect_space_stat(&self) -> StatCollector;
 }
 
 /*
@@ -115,6 +117,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
 
     fn garbage_collect(&self, ts: Timestamp) {
        let _ =  <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+    }
+
+    fn collect_space_stat(&self) -> StatCollector {
+        <Self as MvccIndex<_>>::collect_space_stat(&self)
     }
 }
 
@@ -191,6 +197,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
 
     fn garbage_collect(&self, ts: Timestamp) {
         let _ = <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+    }
+
+    fn collect_space_stat(&self) -> StatCollector {
+        <Self as MvccIndex<_>>::collect_space_stat(&self)
     }
 }
 
