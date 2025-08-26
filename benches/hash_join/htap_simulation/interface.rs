@@ -1,7 +1,7 @@
 use fbtree::{
     bp::MemPool,
     mvcc_index::{
-        dual_heap_hash::chained_hash_table::ChainedHashTable,
+        dual_heap_hash::chained_hash_table::ChainedHashTable, hash_common::StatCollector,
         hash_heap::hash_heap_table::HeapHashTable,
         ts_partitioned::ts_partitioned_table::TsPartitionedTable, Delta, MvccIndex,
     },
@@ -33,10 +33,15 @@ pub trait MultiVersionJoinTable {
         to_ts: Timestamp,
         is_read_repair: bool,
     ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>>;
-    fn scan(&self, ts: Timestamp, is_read_repair: bool) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>;
+    fn scan(
+        &self,
+        ts: Timestamp,
+        is_read_repair: bool,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>;
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError>;
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError>;
     fn garbage_collect(&self, ts: Timestamp);
+    fn collect_space_stat(&self) -> StatCollector;
 }
 
 /*
@@ -66,8 +71,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
 
     fn mark_ts(&self, ts: u64) {
-        let _ = <Self as MvccIndex<_>>::scan(self, ts)
-            .unwrap();
+        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
     }
 
     fn scan_delta(
@@ -81,18 +85,23 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
 
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR || optype == OperationType::Update {
-            <Self as MvccIndex<T>>::bulk_update_start(&self);
+            <Self as MvccIndex<T>>::bulk_update_start(&self).unwrap();
         }
         Ok(())
     }
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
-        if optype == OperationType::UpdateWR {
-            <Self as MvccIndex<T>>::bulk_update_end(&self);
+        if optype == OperationType::UpdateWR || optype == OperationType::Update {
+            <Self as MvccIndex<T>>::bulk_update_end(&self).unwrap();
         }
         Ok(())
     }
 
-    fn scan(&self, ts: Timestamp, is_read_repair: bool) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError> {
+    fn scan(
+        &self,
+        ts: Timestamp,
+        is_read_repair: bool,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
+    {
         let iter = if is_read_repair {
             <Self as MvccIndex<_>>::scan_read_repair(self, ts)
         } else {
@@ -102,7 +111,11 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
 
     fn garbage_collect(&self, ts: Timestamp) {
-        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+        <Self as MvccIndex<_>>::garbage_collect(&self, ts).unwrap();
+    }
+
+    fn collect_space_stat(&self) -> StatCollector {
+        <Self as MvccIndex<_>>::collect_space_stat(&self)
     }
 }
 
@@ -130,8 +143,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     }
 
     fn mark_ts(&self, ts: u64) {
-        let _ = <Self as MvccIndex<_>>::scan(self, ts)
-            .unwrap();
+        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
     }
 
     fn scan_delta(
@@ -148,19 +160,27 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     }
     fn begin_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR {
-            <Self as MvccIndex<_>>::bulk_update_start(&self);
+            <Self as MvccIndex<_>>::bulk_update_start(&self)?;
         }
         Ok(())
     }
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR {
-            <Self as MvccIndex<_>>::bulk_update_end(&self);
+            <Self as MvccIndex<_>>::bulk_update_end(&self)?;
         }
         Ok(())
     }
 
-    fn scan(&self, ts: Timestamp, is_read_repair: bool) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError> {
-        let iter: Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError> = if is_read_repair {
+    fn scan(
+        &self,
+        ts: Timestamp,
+        is_read_repair: bool,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
+    {
+        let iter: Result<
+            Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>,
+            AccessMethodError,
+        > = if is_read_repair {
             <Self as MvccIndex<_>>::scan_read_repair(&self, ts)
         } else {
             <Self as MvccIndex<_>>::scan(&self, ts)
@@ -169,7 +189,11 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     }
 
     fn garbage_collect(&self, ts: Timestamp) {
-        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+        <Self as MvccIndex<_>>::garbage_collect(&self, ts).unwrap();
+    }
+
+    fn collect_space_stat(&self) -> StatCollector {
+        <Self as MvccIndex<_>>::collect_space_stat(&self)
     }
 }
 
@@ -195,7 +219,8 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
             ts,
             0,
             value.to_vec(),
-        );
+        )
+        .unwrap();
     }
 
     fn mark_ts(&self, ts: u64) {
@@ -227,7 +252,12 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
         Ok(())
     }
 
-    fn scan(&self, ts: Timestamp, is_read_repair: bool) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError> {
+    fn scan(
+        &self,
+        ts: Timestamp,
+        is_read_repair: bool,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
+    {
         let iter = if is_read_repair {
             <Self as MvccIndex<_>>::scan_read_repair(&self, ts)
         } else {
@@ -237,10 +267,15 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
     }
 
     fn garbage_collect(&self, ts: Timestamp) {
-        <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+        <Self as MvccIndex<_>>::garbage_collect(&self, ts).unwrap();
+    }
+
+    fn collect_space_stat(&self) -> StatCollector {
+        <Self as MvccIndex<_>>::collect_space_stat(&self)
     }
 }
 
+// NAIVE
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         NaiveMvHashTable::add_insert_rec_new(&self, key, pkey, value);
@@ -268,13 +303,20 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         Ok(())
     }
-    fn scan(&self, ts: Timestamp, is_read_repair: bool) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError> {
+    fn scan(
+        &self,
+        ts: Timestamp,
+        is_read_repair: bool,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
+    {
         NaiveMvHashTable::scan(&self, ts)
     }
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
         NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
     }
-    fn garbage_collect(&self, ts: Timestamp) {
-        
+    fn garbage_collect(&self, ts: Timestamp) {}
+
+    fn collect_space_stat(&self) -> StatCollector {
+        NaiveMvHashTable::collect_space_stat_into_collector(&self)
     }
 }

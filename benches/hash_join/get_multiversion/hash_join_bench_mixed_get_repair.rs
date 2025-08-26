@@ -1,7 +1,6 @@
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
-use fbtree::{mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable, prelude::*};
-use std::collections::{HashMap, HashSet};
+use fbtree::mvcc_index::MvccIndex;
+use fbtree::prelude::*;
 use std::env;
 use std::error::Error;
 use std::time::Instant;
@@ -56,7 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "-t" => {
                 if i + 1 < args.len() {
-                    if let Ok(type_name) = args[i + 1].parse::<String>() {
+                    if let Ok(type_name) = &args[i + 1].parse::<String>() {
                         match type_name.as_str() {
                             "ts_partitioned" => {}
                             _ => {

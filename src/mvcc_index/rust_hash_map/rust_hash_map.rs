@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     bp::MemPool,
-    mvcc_index::{MvccEntry, MvccIndex},
+    mvcc_index::{hash_common::StatCollector, MvccEntry, MvccIndex},
     prelude::Timestamp,
 };
 
@@ -19,8 +19,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
     type Value = Vec<u8>;
     type Error = crate::mvcc_index::AccessMethodError;
 
-    fn collect_page_num(&self) -> usize {
-        0
+    fn collect_space_stat(&self) -> StatCollector {
+        StatCollector::new()
     }
 
     fn create(

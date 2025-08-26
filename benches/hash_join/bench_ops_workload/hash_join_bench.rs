@@ -1,5 +1,4 @@
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
-use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
@@ -99,9 +98,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "rust" => {
                             hash_table_t = HashTableType::RustHashMap;
                         }
-                        "linear" => {
-                            hash_table_t = HashTableType::LinearHashTable;
-                        }
                         _ => {
                             eprintln!("Warning: Invalid hash table type, ignoring...");
                         }
@@ -173,14 +169,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         HashTableType::RustHashMap => {
             Box::new(MvccRustHashMap::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
-        HashTableType::LinearHashTable => {
-            Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
-        }
         HashTableType::TsPartitionChained => {
             Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
-        }
-        HashTableType::TsPartitionChained => {
-            Box::new(TsPartitionedTable::create(c_key, mem_pool)?) as BoxMvccIndexMemPool
         }
     };
 
@@ -370,8 +360,8 @@ fn read_expected_data_file(file_path: &str) -> io::Result<HashMap<(Vec<u8>, Vec<
         }
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() >= 5 {
-            let start_ts = parts[0];
-            let end_ts = parts[1];
+            let _start_ts = parts[0];
+            let _end_ts = parts[1];
             let key = parts[2].as_bytes().to_vec();
             let pkey = parts[3].as_bytes().to_vec();
             let value = parts[4].as_bytes().to_vec();

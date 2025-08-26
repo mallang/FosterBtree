@@ -11,7 +11,7 @@ use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_debug, log_info, log_warn,
     mvcc_index::{
-        hash_common::{fix_frame_id2, write_page, KVWithTs, RowDelta},
+        hash_common::{fix_frame_id2, write_page, KVWithTs, RowDelta, StatCollector},
         hash_join_heap_chain::HeapHashChain,
         hash_join_page::HashJoinPage,
         Delta, MvccEntry, TxId,
@@ -145,8 +145,12 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         ts: &Timestamp,
         res: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) {
-        self.recent_chain.chain_scan_key(search_key, ts, res);
-        self.history_chain.chain_scan_key(search_key, ts, res);
+        self.recent_chain
+            .chain_scan_key(search_key, ts, res)
+            .unwrap();
+        self.history_chain
+            .chain_scan_key(search_key, ts, res)
+            .unwrap();
     }
 
     pub fn scan_into_vec(
@@ -163,7 +167,9 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         &self,
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
-        self.recent_chain.chain_scan_into_vec_ignore_ts(results);
+        self.recent_chain
+            .chain_scan_into_vec_ignore_ts(results)
+            .unwrap();
         Ok(())
     }
 
@@ -212,6 +218,12 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
     pub fn scan_all(&self, results: &mut Vec<MvccEntry>) -> Result<(), AccessMethodError> {
         results.extend(self.recent_chain.scan_all()?);
         results.extend(self.history_chain.scan_all()?);
+        Ok(())
+    }
+
+    pub fn collect_space_stat(&self, stat: &mut StatCollector) -> Result<(), AccessMethodError> {
+        self.recent_chain.collect_space_statistics(stat);
+        self.history_chain.collect_space_statistics(stat);
         Ok(())
     }
 }

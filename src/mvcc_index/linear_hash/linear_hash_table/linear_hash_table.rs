@@ -11,7 +11,7 @@ use crate::{
     bp::{ContainerKey, MemPool},
     log_warn,
     mvcc_index::{
-        hash_common::{KVWithTs, DEFAULT_BUCKET_NUM},
+        hash_common::{KVWithTs, StatCollector, DEFAULT_BUCKET_NUM},
         hash_join_page::record::RecordRef,
         Delta, MvccEntry, MvccIndex,
     },
@@ -130,8 +130,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for LinearHashTable<T> {
     type Value = Vec<u8>;
     type Error = AccessMethodError;
 
-    fn collect_page_num(&self) -> usize {
-        0
+    fn collect_space_stat(&self) -> StatCollector {
+        StatCollector::new()
     }
 
     fn create(c_key: ContainerKey, mem_pool: Arc<T>) -> Result<Self, Self::Error>

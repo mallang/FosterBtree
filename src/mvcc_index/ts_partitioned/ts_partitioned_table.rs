@@ -2,7 +2,7 @@ use crate::{
     bp::{ContainerKey, MemPool},
     log_warn,
     mvcc_index::{
-        hash_common::{read_repair_vec, BulkUpdate, DEFAULT_BUCKET_NUM},
+        hash_common::{read_repair_vec, BulkUpdate, StatCollector, DEFAULT_BUCKET_NUM},
         Delta, MvccEntry, MvccIndex, TxId,
     },
     prelude::{AccessMethodError, Timestamp},
@@ -513,18 +513,20 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Ok(())
     }
 
-    fn collect_page_num(&self) -> usize {
-        self.bucket_entries
-            .iter()
-            .map(|bucket| {
-                bucket
-                    .read()
-                    .unwrap()
-                    .partitions()
-                    .iter()
-                    .map(|p| p.chain().collect_page_num())
-                    .sum::<usize>()
-            })
-            .sum()
+    fn collect_space_stat(&self) -> StatCollector {
+        let mut stat = StatCollector::new();
+        for bucket in &self.bucket_entries {
+            bucket.read().unwrap().collect_space_stat(&mut stat);
+        }
+
+        let max_ts = self.latest_update_ts.load(Ordering::Relaxed);
+        let valid_space = self
+            .scan(max_ts)
+            .unwrap()
+            .map(|entry| entry.0.len() + entry.1.len() + entry.2.len())
+            .sum::<usize>();
+        stat.inc_valid_space(valid_space);
+
+        stat
     }
 }

@@ -1,14 +1,19 @@
 use crate::{
     access_method::AccessMethodError,
     log_warn,
-    mvcc_index::{MvccEntry, TxId},
+    mvcc_index::{hash_common::StatCollector, MvccEntry, TxId},
+    page::PAGE_SIZE,
     prelude::{Page, PageId, Timestamp, AVAILABLE_PAGE_SIZE},
 };
 use core::slice;
 use std::{
     collections::{BTreeMap, HashMap},
     result::Result::Ok,
-    sync::{atomic::{AtomicPtr, AtomicU64, Ordering}, Mutex}, time::{self, Instant}, 
+    sync::{
+        atomic::{AtomicPtr, AtomicU64, Ordering},
+        Mutex,
+    },
+    time::{self, Instant},
 };
 pub const BUCKET_NUM_SIZE: usize = std::mem::size_of::<u64>(); // Size of bucket_num (u64)
 pub static HISTORY_SLOT_CMP_CNT: AtomicU64 = AtomicU64::new(0);
@@ -21,7 +26,7 @@ lazy_static! {
 }
 
 pub fn reset_statistics() {
-        #[cfg(feature = "count_statistics")]
+    #[cfg(feature = "count_statistics")]
     {
         SLOT_CNT.store(0, std::sync::atomic::Ordering::Relaxed);
         SKIP_SLOT_CNT.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -35,19 +40,20 @@ pub fn print_statistics(str: impl AsRef<str>) {
     #[cfg(feature = "count_statistics")]
     {
         use std::sync::atomic::Ordering;
-        log_warn!("[{}] slot_cnt: {}, \n\t skip_slot_cnt: {} \n\t hit_slot_cnt: {} \n\t page_cnt: {}",
+        log_warn!(
+            "[{}] slot_cnt: {}, \n\t skip_slot_cnt: {} \n\t hit_slot_cnt: {} \n\t page_cnt: {}",
             str.as_ref(),
             SLOT_CNT.load(Ordering::Relaxed),
             SKIP_SLOT_CNT.load(Ordering::Relaxed),
             HIT_SLOT_CNT.load(Ordering::Relaxed),
             PAGE_CNT.load(Ordering::Relaxed),
         );
-        log_warn!("[{}] Elapsed Time: {:?}",
+        log_warn!(
+            "[{}] Elapsed Time: {:?}",
             str.as_ref(),
             (*TIME.lock().unwrap()).elapsed(),
         );
     }
-
 }
 
 pub mod header {
@@ -73,16 +79,14 @@ pub mod header {
         page_min_start_ts: Timestamp,
         page_max_end_ts: Timestamp,
         page_recent_slot_cnt: u32,
-        // for linear hash
-        is_full: u8,
     });
 
     use crate::{
-        page::{PageId, AVAILABLE_PAGE_SIZE},
+        page::{PageId, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
         prelude::Timestamp,
     };
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
-
+    pub const PAGE_BASE_HEADER_SIZE: usize = PAGE_SIZE - AVAILABLE_PAGE_SIZE;
     impl Header {
         pub fn new() -> Self {
             Header {
@@ -95,8 +99,6 @@ pub mod header {
                 page_min_start_ts: Timestamp::MAX,
                 page_max_end_ts: Timestamp::MIN,
                 page_recent_slot_cnt: 0,
-
-                is_full: 0,
             }
         }
 
@@ -119,14 +121,6 @@ pub mod header {
             } else {
                 Some(self.next_page_id)
             }
-        }
-
-        pub fn is_full(&self) -> bool {
-            self.is_full != 0
-        }
-
-        pub fn set_full(&mut self) {
-            self.is_full = 1;
         }
 
         pub fn set_next_page_id(&mut self, next_page_id: PageId) {
@@ -469,7 +463,6 @@ use record::*;
 use super::{
     dual_heap_hash::chained_hash_bucket_second::ChainBucketBulkUpdate,
     hash_common::{KVWithTs, MvccEntryLoc, RowDelta},
-    linear_hash::linear_hash_table::linear_hash_table::LinearBulkUpdate,
 };
 
 pub trait HashJoinPage {
@@ -555,11 +548,6 @@ pub trait HashJoinPage {
     fn chain_bulk_update_slots_recent(
         &mut self,
         bulk: &mut ChainBucketBulkUpdate,
-        new_start_ts: Timestamp,
-    );
-    fn linear_bulk_update_slots_recent(
-        &mut self,
-        bulk: &mut LinearBulkUpdate,
         new_start_ts: Timestamp,
     );
     fn binary_search(&self, sort_key: &[u8]) -> (bool, usize); // (found, slot_id)
@@ -768,6 +756,8 @@ pub trait HashJoinPage {
         &self,
         write_repair: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
     ) -> Result<(), AccessMethodError>;
+
+    fn collect_space_statistics(&self, stat: &mut StatCollector);
 }
 
 impl HashJoinPage for Page {
@@ -1037,7 +1027,6 @@ impl HashJoinPage for Page {
             Err(AccessMethodError::KeyNotFound)
         }
     }
-
 
     fn update(&mut self, pkey: &[u8], entry: &MvccEntry) -> Result<MvccEntry, AccessMethodError> {
         let (found, slot_id) = self.search_slot(pkey);
@@ -1852,7 +1841,7 @@ impl HashJoinPage for Page {
             let et = slot.end_ts();
             if ts < st || et <= ts {
                 #[cfg(feature = "count_statistics")]
-                    SKIP_SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                SKIP_SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             #[cfg(feature = "count_statistics")]
@@ -1882,7 +1871,6 @@ impl HashJoinPage for Page {
                 HIT_SLOT_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
 
-
             let slot = self.unsafe_slot(i);
 
             // 2) Read the entire record to confirm pkey equality.
@@ -1893,7 +1881,7 @@ impl HashJoinPage for Page {
                 rec.pkey().to_vec(),
                 rec.val().to_vec(),
                 0,
-                0
+                0,
             );
             results.push(entry);
         }
@@ -2043,7 +2031,7 @@ impl HashJoinPage for Page {
         }
         Ok(())
     }
-    
+
     // [His/Recent Chain]
     fn chain_bulk_update_slots_recent(
         &mut self,
@@ -2080,40 +2068,17 @@ impl HashJoinPage for Page {
             }
         }
     }
-    fn linear_bulk_update_slots_recent(
-        &mut self,
-        bulk: &mut LinearBulkUpdate,
-        new_start_ts: Timestamp,
-    ) {
-        let updated_entries: &mut HashMap<Vec<u8>, Vec<u8>> = &mut bulk.update_entries;
+
+    fn collect_space_statistics(&self, stat: &mut StatCollector) {
+        stat.inc_total_space(PAGE_SIZE);
+        stat.inc_header_space(PAGE_HEADER_SIZE + PAGE_BASE_HEADER_SIZE);
+        let mut all_versions_space = 0usize;
         for i in 0..self.slot_count() {
             let slot = self.unsafe_slot(i);
-            let old_rec = self.record_ref_from_slot(slot);
-            let pkey = old_rec.pkey();
-            let old_v = old_rec.val();
-            if let Some(new_value) = updated_entries.get(pkey) {
-                let old_v: Vec<u8> = old_v.to_owned();
-                let old_k = old_rec.key().to_owned();
-                let old_pk = old_rec.pkey().to_owned();
-                let old_start_ts = slot.start_ts();
-
-                assert!(new_value.len() == old_v.len());
-                self.write_bytes(
-                    slot.offset() + slot.key_size() + slot.pkey_size(),
-                    new_value,
-                );
-                bulk.old_entries.push(MvccEntry::new(
-                    old_k,
-                    old_pk,
-                    old_v,
-                    old_start_ts,
-                    new_start_ts,
-                ));
-                let slot_mut = self.unsafe_slot_mut(i);
-                slot_mut.set_start_ts(new_start_ts);
-                slot_mut.set_end_ts(Timestamp::MAX);
-            }
+            let rec = self.record_ref_from_slot(slot);
+            all_versions_space += rec.key().len() + rec.pkey().len() + rec.val().len();
         }
+        stat.inc_all_versions_space(all_versions_space);
     }
 }
 

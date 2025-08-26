@@ -33,4 +33,7 @@ pub struct Cli {
 
     #[arg(long = "delta-count", default_value = "3")]
     pub delta_count: usize,
+
+    #[arg(long = "space-stat")]
+    pub space_stat: Option<String>,
 }

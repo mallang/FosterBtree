@@ -1,8 +1,11 @@
 use std::{
-    collections::{BTreeMap, HashMap}, sync::{
+    collections::{BTreeMap, HashMap},
+    sync::{
         atomic::{self, AtomicU32, AtomicU64, Ordering},
         Arc,
-    }, thread::current, time::Duration
+    },
+    thread::current,
+    time::Duration,
 };
 
 use crate::{
@@ -10,7 +13,7 @@ use crate::{
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
-        hash_common::{fix_frame_id, fix_frame_id2},
+        hash_common::{fix_frame_id, fix_frame_id2, StatCollector},
         hash_join_page::{record::RecordRef, HashJoinPage, PAGE_CNT},
         MvccEntry,
     },
@@ -35,6 +38,22 @@ pub struct HeapHashChain<T: MemPool> {
 }
 
 impl<T: MemPool + 'static> HeapHashChain<T> {
+    pub fn collect_space_statistics(&self, stat: &mut StatCollector) {
+        let mut current_page = self.first_page();
+        loop {
+            current_page.collect_space_statistics(stat);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn collect_page_num(&self) -> usize {
         let mut page_num = 0;
         let mut current_page = self.first_page();

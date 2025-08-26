@@ -94,7 +94,6 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
 
         bench.run_all_txs_no_repair(&table);
     }
-    
 
     {
         println!();
@@ -163,16 +162,55 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
     }
 }
 
+fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
+    {
+        println!();
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 1);
+        let table: BoxMVIndex = match cli.table_type {
+            cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            )) as BoxMVIndex,
+            cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            )) as BoxMVIndex,
+            cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            )) as BoxMVIndex,
+            cli::TableType::Naive => Box::new(
+                fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
+                    c_key,
+                    mem_pool,
+                    NUM_BUCKETS,
+                ),
+            ) as BoxMVIndex,
+        };
+
+        bench.run_all_txs_no_repair(&table);
+        let stat = table.collect_space_stat();
+        println!("{:?}", stat);
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
-    
 
     let mut bench = TxBench::new(cli.clone());
     bench.print_cli();
     bench.gen_random_txs();
     bench.print_txs();
 
-    run_no_repair(&bench, &cli);
-    run_three_repairs(&bench, &cli);
-
+    if cli.space_stat.is_some() {
+        // space stat
+        run_and_collect_stat(&bench, &cli);
+    } else {
+        run_no_repair(&bench, &cli);
+        run_three_repairs(&bench, &cli);
+    }
 }

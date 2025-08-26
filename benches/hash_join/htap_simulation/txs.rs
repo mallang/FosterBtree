@@ -34,16 +34,14 @@ pub struct TxOperation {
     pub gc_ts: Vec<Timestamp>, // ts that we want to gc
 }
 
-
 fn clear_cpu_cache() {
     let size = 256 * 1024 * 1024;
     let mut buf = vec![0u8; size];
-    
+
     for x in buf.iter_mut() {
         *x = x.wrapping_add(1);
     }
 }
-
 
 impl TxOperation {
     pub fn new(
@@ -109,7 +107,7 @@ impl TxOperation {
             vec![],
             vec![],
             vec![],
-            vec![]
+            vec![],
         )
     }
 }
@@ -340,7 +338,7 @@ impl TxBench {
         if self.cli.manual_txs.is_none() {
             self.gen_random_txs();
         } else {
-            self.gen_manual_txs();
+            unimplemented!()
         }
     }
 
@@ -390,21 +388,22 @@ impl TxBench {
         // self.gen_scan_txs(self.cli.txn_count as u64 - 2);
         // self.gen_scan_txs(self.cli.txn_count as u64 - 2);
         self.gen_full_delta_scan_tx();
-        
+
         let mut rng = SmallRng::seed_from_u64(2333);
         for i in 0..self.cli.delta_count - 1 {
-            
             self.gen_delta_scan_tx(1, &mut rng);
         }
 
         // garbage collection
-        self.gen_gc_txs();
-        
+        if self.cli.space_stat.is_none() {
+            // only gc when no collecting space stats
+            self.gen_gc_txs();
+        }
+
         let mut rng = SmallRng::seed_from_u64(2333);
         for i in 0..self.cli.delta_count - 1 {
             self.gen_delta_scan_tx(0, &mut rng);
         }
-
     }
 
     pub fn gen_gc_txs(&mut self) {
@@ -437,9 +436,7 @@ impl TxBench {
         let mut start = Instant::now();
         match tx.tx_type {
             OperationType::InitLoad => {
-                hash_join_table
-                    .begin_txs(OperationType::InitLoad)
-                    .unwrap();
+                hash_join_table.begin_txs(OperationType::InitLoad).unwrap();
                 for op in self.data_source.get_custoemr_vec() {
                     hash_join_table.insert(
                         &op.generate_join_key(),

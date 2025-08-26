@@ -7,7 +7,7 @@ use std::{
 use crate::{
     bp::{ContainerKey, MemPool},
     mvcc_index::{
-        hash_common::KVWithTs,
+        hash_common::{KVWithTs, StatCollector},
         hash_join_page::record::{Record, RecordRef},
         Delta,
     },
@@ -170,7 +170,8 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     pub fn scan(
         &self,
         ts: Timestamp,
-    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError> {
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
+    {
         let tables = self.naivetables.borrow();
         let mut res = vec![];
         if let Some(entry) = tables.get(&ts) {
@@ -202,5 +203,26 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         }
 
         println!("Bucket Count: {}", self.bucket_count);
+    }
+
+    pub fn collect_space_stat_into_collector(&self) -> StatCollector {
+        let mut stat = StatCollector::new();
+        let tables = self.naivetables.borrow();
+        for entry in tables.iter() {
+            let (_ts, table) = entry;
+            table.collect_space_stat(&mut stat);
+        }
+
+        let max_ts = tables.keys().max().unwrap();
+        let most_recent_table = tables.get(max_ts).unwrap();
+        let valid_space = most_recent_table
+            .scan()
+            .unwrap()
+            .map(|entry| entry.0.len() + entry.1.len() + entry.2.len())
+            .sum::<usize>();
+
+        stat.inc_valid_space(valid_space);
+
+        stat
     }
 }

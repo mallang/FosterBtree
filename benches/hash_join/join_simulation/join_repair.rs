@@ -3,7 +3,6 @@ use clap::{Parser, ValueEnum};
 use fbtree::bp::{get_in_mem_pool, ContainerKey};
 use fbtree::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
-use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccIndex, TxId};
@@ -1217,7 +1216,6 @@ enum TableType {
     Chain,
     Heap,
     Rust,
-    Linear,
     Partition,
 }
 
@@ -1357,7 +1355,6 @@ fn main() -> Result<()> {
         TableType::Chain => HashTableType::RecentHistoryChained,
         TableType::Heap => HashTableType::HeapTable,
         TableType::Rust => HashTableType::RustHashMap,
-        TableType::Linear => HashTableType::LinearHashTable,
         TableType::Partition => HashTableType::TsPartitionChained,
     };
     let bucket_num = bench.cli.bucket_num.unwrap();
@@ -1382,17 +1379,11 @@ fn main() -> Result<()> {
                 mem_pool.clone(),
                 bucket_num,
             )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
-            )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
             ) as BoxMvccIndexMemPool,
         };
         bench.run_all_txs_no_repair(&mut table_no_repair);
-        println!("pages num: {:?}", table_no_repair.collect_page_num());
     }
 
     println!();
@@ -1415,11 +1406,6 @@ fn main() -> Result<()> {
                 c_key,
                 mem_pool.clone(),
                 bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
             )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
@@ -1449,11 +1435,6 @@ fn main() -> Result<()> {
                 mem_pool.clone(),
                 bucket_num,
             )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
-            )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,
             ) as BoxMvccIndexMemPool,
@@ -1481,11 +1462,6 @@ fn main() -> Result<()> {
                 c_key,
                 mem_pool.clone(),
                 bucket_num,
-            )?) as BoxMvccIndexMemPool,
-            HashTableType::LinearHashTable => Box::new(LinearHashTable::create_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num * (PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET / 100),
             )?) as BoxMvccIndexMemPool,
             HashTableType::TsPartitionChained => Box::new(
                 TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?,

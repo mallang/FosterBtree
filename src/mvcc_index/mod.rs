@@ -15,6 +15,7 @@ pub type TxId = u64; // Transaction ID
 
 use crate::{
     bp::{ContainerKey, InMemPool, MemPool},
+    mvcc_index::hash_common::StatCollector,
     prelude::{AccessMethodError, Timestamp},
 };
 use serde::{Deserialize, Serialize};
@@ -297,7 +298,7 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     // only has effect for ts_partitioned table (ts >= current max ts + 1)
     fn split_at_ts(&self, ts: Timestamp) -> Result<(), Self::Error>;
 
-    fn collect_page_num(&self) -> usize;
+    fn collect_space_stat(&self) -> StatCollector;
 }
 
 /// Represents a change (delta) in the value of a key-primary key tuple.
@@ -333,6 +334,5 @@ pub enum HashTableType {
     RecentHistoryChained,
     HeapTable,
     RustHashMap,
-    LinearHashTable,
     TsPartitionChained,
 }

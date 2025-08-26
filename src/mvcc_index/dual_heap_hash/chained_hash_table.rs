@@ -1,16 +1,24 @@
 use crate::{
     bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_warn,
-    mvcc_index::{hash_join_page::{print_statistics, reset_statistics, ChainedHashMetaPage}, Delta, MvccEntry, MvccIndex},
+    mvcc_index::{
+        hash_common::StatCollector,
+        hash_join_page::{print_statistics, reset_statistics, ChainedHashMetaPage},
+        Delta, MvccEntry, MvccIndex,
+    },
     page::{Page, PageId},
     prelude::AccessMethodError,
 };
 use core::fmt;
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap, HashMap}, fmt::format, hash::{Hash, Hasher}, result, sync::{
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap},
+    fmt::format,
+    hash::{Hash, Hasher},
+    result,
+    sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64},
         Arc, Mutex,
-    }
+    },
 };
 
 use super::{chained_hash_bucket_second::DualChainBucket, Timestamp, TxId, TxInfo};
@@ -362,13 +370,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
 
         // println!("chain scan count: {}", results.len());
 
-         Ok(Box::new(results.into_iter().map(|entry| {
-            (
-                entry.key,
-                entry.pkey,
-                entry.value,
-            )
-        })))
+        Ok(Box::new(
+            results
+                .into_iter()
+                .map(|entry| (entry.key, entry.pkey, entry.value)),
+        ))
     }
 
     fn scan_key(
@@ -465,12 +471,23 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
-    fn collect_page_num(&self) -> usize {
-        let mut total_page_num = 0;
+    fn collect_space_stat(&self) -> StatCollector {
+        let mut stat = StatCollector::new();
         for bucket in &self.bucket_entries {
-            total_page_num += bucket.collect_page_num();
+            bucket.collect_space_stat(&mut stat).unwrap();
         }
-        total_page_num
+
+        let max_ts = self
+            .largest_txn_ts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let valid_space = self
+            .scan(max_ts)
+            .unwrap()
+            .map(|entry| entry.0.len() + entry.1.len() + entry.2.len())
+            .sum::<usize>();
+        stat.inc_valid_space(valid_space);
+
+        stat
     }
 }
 

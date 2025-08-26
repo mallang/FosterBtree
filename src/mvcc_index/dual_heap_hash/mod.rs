@@ -1,6 +1,5 @@
 pub mod chained_hash_bucket_second;
 
-
 pub mod chained_hash_table;
 
 use serde::{Deserialize, Serialize};

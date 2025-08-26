@@ -12,7 +12,9 @@ use crate::{
     bp::prelude::*,
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
-        hash_common::{fix_frame_id, fix_frame_id2, read_page, write_page, RowDelta},
+        hash_common::{
+            fix_frame_id, fix_frame_id2, read_page, write_page, RowDelta, StatCollector,
+        },
         hash_join_page::record::{Record, RecordRef},
         MvccEntry,
     },
@@ -53,6 +55,23 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
         page_num
     }
+
+    pub fn collect_space_stat(&self, stat: &mut StatCollector) {
+        let mut current_page = self.first_page();
+        loop {
+            current_page.collect_space_stat(stat);
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
+                current_page = next_page;
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn scan_deltas(
         from: &Arc<Self>,
         to: &Arc<Self>,

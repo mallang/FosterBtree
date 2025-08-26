@@ -5,7 +5,6 @@ mod test_ops {
     use crate::log_warn;
     use crate::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
     use crate::mvcc_index::hash_heap::hash_heap_table::{self, HeapHashTable};
-    use crate::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
     use crate::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
     use crate::mvcc_index::{dual_heap_hash, Delta, MvccIndex};
     use crate::prelude::{AccessMethodError, Timestamp};
@@ -13,7 +12,6 @@ mod test_ops {
 
     #[test]
     fn test_hash_table_scan_key() {
-        test_scan_key_ops::<LinearHashTable<_>>();
         test_scan_key_ops::<ChainedHashTable<_>>();
         test_scan_key_ops::<HeapHashTable<_>>();
         test_scan_key_ops::<TsPartitionedTable<_>>();
@@ -21,7 +19,6 @@ mod test_ops {
 
     #[test]
     fn test_hash_table_basic_ops() {
-        test_basic_index_ops::<LinearHashTable<_>>();
         test_basic_index_ops::<ChainedHashTable<_>>();
         test_basic_index_ops::<TsPartitionedTable<_>>();
         test_basic_index_ops::<HeapHashTable<_>>();
@@ -29,7 +26,6 @@ mod test_ops {
 
     #[test]
     fn test_delta_scan() {
-        test_delta_scan_op0::<LinearHashTable<_>>();
         test_delta_scan_op0::<ChainedHashTable<_>>();
         test_delta_scan_op0::<HeapHashTable<_>>();
         test_delta_scan_op0::<TsPartitionedTable<_>>();
@@ -49,7 +45,6 @@ mod test_ops {
 
     #[test]
     fn test_read_repair() {
-        test_read_repair_ops::<LinearHashTable<_>>();
         test_read_repair_ops::<ChainedHashTable<_>>();
         test_read_repair_ops::<TsPartitionedTable<_>>();
         test_read_repair_ops::<HeapHashTable<_>>();
@@ -783,76 +778,6 @@ mod test_ops {
         assert_eq!(get_result.unwrap().unwrap(), &[1]);
     }
 
-    #[ignore = "not implemented delete yet"]
-    #[test]
-    fn test_insert_and_delete_and_scan() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
-
-        // 0..1000 inserts
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let value = format!("value{}", i).into_bytes();
-            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
-        }
-
-        // 0..1000 deletes
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            hash_join_table.delete(&key, &pkey, 2, 1).unwrap();
-        }
-
-        let scan_iter = hash_join_table.scan_all().unwrap();
-        let mut cnt = 0;
-        for pair in scan_iter {
-            cnt += 1;
-            let (key, pkey, value) = (pair.key, pair.pkey, pair.value);
-            assert_eq!(&key[3..], &pkey[4..]);
-            assert_eq!(&pkey[4..], &value[5..]);
-        }
-        assert_eq!(cnt, 1000);
-    }
-
-    #[test]
-    fn test_insert_and_update_and_scan() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
-
-        // 0..1000 inserts
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let value = format!("value{}", i).into_bytes();
-            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
-        }
-
-        // 0..1000 updates
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let new_value = format!("new_value{}", i).into_bytes();
-            hash_join_table.update(key, pkey, 2, 1, new_value).unwrap();
-        }
-
-        let scan_iter = hash_join_table.scan_all().unwrap();
-        let mut cnt = 0;
-        for pair in scan_iter {
-            cnt += 1;
-            let (key, pkey, value) = (pair.key, pair.pkey, pair.value);
-            assert_eq!(&key[3..], &pkey[4..]);
-            if value.starts_with(b"value") {
-                assert_eq!(&pkey[4..], &value[5..]);
-            } else {
-                assert_eq!(&pkey[4..], &value[9..]);
-            }
-        }
-        assert_eq!(cnt, 2000);
-    }
-
     fn test_insert_and_scan<I>()
     where
         I: MvccIndex<InMemPool, Key = Vec<u8>, PKey = Vec<u8>, Value = Vec<u8>>,
@@ -1045,7 +970,6 @@ mod test_ops {
 
     #[test]
     fn test_many_inserts_and_gets() {
-        concurrent_inserts_and_update::<LinearHashTable<_>>();
         concurrent_inserts_and_update::<HeapHashTable<_>>();
         concurrent_inserts_and_update::<TsPartitionedTable<_>>();
         concurrent_inserts_and_update::<ChainedHashTable<_>>();
@@ -1114,175 +1038,6 @@ mod test_ops {
         }
     }
 
-    #[ignore = "no concurrency and delete support"]
-    #[test]
-    fn concurrent_inserts_and_delete() {
-        use std::thread;
-
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
-
-        let hash_join_table_clone = hash_join_table.clone();
-
-        // 0..1000 inserts
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let value = format!("value{}", i).into_bytes();
-            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
-        }
-
-        // 1..1000..2 deletes
-        let handle = thread::spawn(move || {
-            // Insert entries in a separate thread
-            for i in (1..1000).into_iter().step_by(2) {
-                let key = format!("key{}", i).into_bytes();
-                let pkey = format!("pkey{}", i).into_bytes();
-                hash_join_table_clone
-                    .delete(&key[..], &pkey[..], 2, 1)
-                    .unwrap();
-            }
-        });
-
-        // Read entries while deletes are happening
-        for i in (0..1000).into_iter().step_by(10) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            // It's possible that the key hasn't been inserted yet
-            let _ = hash_join_table.get(&key, &pkey, 2);
-        }
-
-        // 0..1000..2 deletes
-        for i in (0..1000).into_iter().step_by(2) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            hash_join_table.delete(&key, &pkey, 2 as u64, 1).unwrap();
-        }
-
-        handle.join().unwrap();
-
-        let hash_join_table_clone = hash_join_table.clone();
-
-        let handle = thread::spawn(move || {
-            // Verify all entries after deletes are complete
-            for i in 0..1000 {
-                let key = format!("key{}", i).into_bytes();
-                let pkey = format!("pkey{}", i).into_bytes();
-                let get_result = hash_join_table_clone.get(&key, &pkey, 2);
-                assert_eq!(get_result.unwrap(), None);
-            }
-        });
-        // Verify all entries after deletes are complete
-        for i in 0..1000 {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let get_result = hash_join_table.get(&key, &pkey, 2);
-            assert_eq!(get_result.unwrap(), None);
-        }
-
-        handle.join().unwrap();
-
-        for i in 0..1000 {
-            let key: Vec<u8> = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let expected_value = format!("value{}", i).into_bytes();
-            let get_result = hash_join_table.get(&key, &pkey, 1);
-            assert_eq!(get_result.unwrap().unwrap(), expected_value);
-        }
-    }
-
-    #[ignore = "not implemented delete yet"]
-    #[test]
-    fn test_garbage_collect() {
-        let mem_pool = get_in_mem_pool();
-        let c_key = ContainerKey::new(0, 0);
-        let hash_join_table = Arc::new(LinearHashTable::new_with_bucket_num(c_key, mem_pool, 16));
-
-        let hash_join_table_clone = hash_join_table.clone();
-
-        // 0..1000 inserts at ts 1
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let value = format!("value{}", i).into_bytes();
-            hash_join_table.insert(key, pkey, 1, 1, value).unwrap();
-        }
-
-        // 0..1000 deletes at ts 2
-        for i in (0..1000).into_iter().step_by(1) {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            hash_join_table_clone
-                .delete(&key[..], &pkey[..], 2, 1)
-                .unwrap();
-        }
-
-        // Verify all entries after deletes are complete
-        for i in 0..1000 {
-            let key = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let get_result = hash_join_table_clone.get(&key, &pkey, 2);
-            assert_eq!(get_result.unwrap(), None);
-        }
-
-        for i in 0..1000 {
-            let key: Vec<u8> = format!("key{}", i).into_bytes();
-            let pkey = format!("pkey{}", i).into_bytes();
-            let expected_value = format!("value{}", i).into_bytes();
-            let get_result = hash_join_table.get(&key, &pkey, 1);
-            assert_eq!(get_result.unwrap().unwrap(), expected_value);
-        }
-
-        let mut scan_all_iter = hash_join_table.scan_all().unwrap();
-        let mut item_count = 0;
-        while let Some(item) = scan_all_iter.next() {
-            item_count += 1;
-            log_warn!(
-                "item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}",
-                str::from_utf8(&item.key),
-                str::from_utf8(&item.pkey),
-                str::from_utf8(&item.value),
-                item.start_ts,
-                item.end_ts
-            );
-        }
-        assert_eq!(item_count, 2000);
-        hash_join_table.garbage_collect(1).unwrap();
-
-        let mut scan_all_iter = hash_join_table.scan_all().unwrap();
-        let mut item_count = 0;
-        while let Some(item) = scan_all_iter.next() {
-            item_count += 1;
-            // log_warn!(
-            //     "item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}",
-            //     str::from_utf8(&item.key),
-            //     str::from_utf8(&item.pkey),
-            //     str::from_utf8(&item.value),
-            //     item.start_ts,
-            //     item.end_ts
-            // );
-        }
-        assert_eq!(item_count, 1000);
-
-        hash_join_table.garbage_collect(2).unwrap();
-
-        let mut scan_all_iter = hash_join_table.scan_all().unwrap();
-        let mut item_count = 0;
-        while let Some(item) = scan_all_iter.next() {
-            item_count += 1;
-            log_warn!(
-                "item key: {:?}, item pkey: {:?}, item val: {:?}, item start ts: {}, end ts: {}",
-                str::from_utf8(&item.key),
-                str::from_utf8(&item.pkey),
-                str::from_utf8(&item.value),
-                item.start_ts,
-                item.end_ts
-            );
-        }
-        assert_eq!(item_count, 0);
-    }
-
     fn read_most_recent_same_ts<I>()
     where
         I: MvccIndex<
@@ -1335,7 +1090,6 @@ mod test_ops {
 
     #[test]
     fn test_read_most_recent_same_ts() {
-        read_most_recent_same_ts::<LinearHashTable<_>>();
         read_most_recent_same_ts::<HeapHashTable<_>>();
         read_most_recent_same_ts::<TsPartitionedTable<_>>();
         read_most_recent_same_ts::<ChainedHashTable<_>>();
@@ -1397,6 +1151,5 @@ mod test_ops {
     #[test]
     fn test_bulk_update() {
         bulk_update::<ChainedHashTable<_>>();
-        bulk_update::<LinearHashTable<_>>();
     }
 }

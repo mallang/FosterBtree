@@ -12,6 +12,7 @@ use crate::{
     mvcc_index::{
         hash_common::{
             read_repair_btree, read_repair_vec, write_page, KVWithTs, MvccEntryLoc, RowDelta,
+            StatCollector,
         },
         hash_join_heap_chain::HeapHashChain,
         hash_join_page::HashJoinPage,
@@ -348,5 +349,11 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         }
 
         Ok(())
+    }
+
+    pub fn collect_space_stat(&self, stat: &mut StatCollector) {
+        for part in &self.partitions {
+            part.chain.collect_space_statistics(stat);
+        }
     }
 }

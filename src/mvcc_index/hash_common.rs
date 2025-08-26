@@ -26,6 +26,38 @@ pub fn get_hashed_bucket_index(key: &[u8], total_size: u32) -> usize {
     (farmhash::hash32_with_seed(key, SUBTABLE_HASHER_SEED) % total_size) as usize
 }
 
+#[derive(Debug)]
+pub struct StatCollector {
+    total_space: usize,
+    all_versions_space: usize,
+    valid_space: usize,
+    header_space: usize,
+}
+
+impl StatCollector {
+    pub fn new() -> Self {
+        Self {
+            total_space: 0,
+            all_versions_space: 0,
+            valid_space: 0,
+            header_space: 0,
+        }
+    }
+    pub fn inc_total_space(&mut self, delta: usize) {
+        self.total_space += delta;
+    }
+
+    pub fn inc_all_versions_space(&mut self, delta: usize) {
+        self.all_versions_space += delta;
+    }
+    pub fn inc_header_space(&mut self, delta: usize) {
+        self.header_space += delta;
+    }
+    pub fn inc_valid_space(&mut self, delta: usize) {
+        self.valid_space += delta;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MvccEntryLoc(PageId, u32);
 

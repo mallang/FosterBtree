@@ -2,12 +2,13 @@ mod header {
     use crate::define_header_with_common;
     define_header_with_common!(Header {});
 
+    use crate::page::PAGE_SIZE;
     use crate::{
         page::{PageId, AVAILABLE_PAGE_SIZE},
         prelude::Timestamp,
     };
     pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
-
+    pub const PAGE_BASE_HEADER_SIZE: usize = PAGE_SIZE - AVAILABLE_PAGE_SIZE;
     impl Header {
         pub fn new() -> Self {
             Header {
@@ -213,11 +214,11 @@ use slot::*;
 
 use crate::{
     mvcc_index::{
-        hash_common::RowDelta,
+        hash_common::{RowDelta, StatCollector},
         hash_join_page::record::{Record, RecordRef},
         MvccEntry,
     },
-    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+    page::{Page, PageId, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
     prelude::{AccessMethodError, Timestamp},
 };
 
@@ -270,6 +271,7 @@ pub trait NaiveHashPage {
     fn next_page(&self) -> Option<(PageId, u32)> {
         self.unsafe_header().next_page()
     }
+    fn collect_space_stat(&self, stat: &mut StatCollector);
     fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32) {
         let header = self.unsafe_header_mut();
         header.set_next_page(next_page_id, frame_id);
@@ -605,6 +607,18 @@ impl NaiveHashPage for Page {
         let key_size = slot.key_size();
         let pkey_size = slot.pkey_size();
         &bytes[key_size..key_size + pkey_size]
+    }
+
+    fn collect_space_stat(&self, stat: &mut StatCollector) {
+        stat.inc_total_space(PAGE_SIZE);
+        stat.inc_header_space(PAGE_HEADER_SIZE + PAGE_BASE_HEADER_SIZE);
+        let mut valid_record_space = 0usize;
+        for i in 0..self.slot_count() {
+            let slot = self.unsafe_slot(i);
+            let rec = self.record_ref_from_slot(slot);
+            valid_record_space += rec.key().len() + rec.pkey().len() + rec.val().len();
+        }
+        stat.inc_all_versions_space(valid_record_space);
     }
 
     /// Compare the slot’s pkey at slot_id with `search_key`.

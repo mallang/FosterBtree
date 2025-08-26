@@ -4,7 +4,10 @@ use crate::{
     mvcc_index::{
         hash_common::{
             read_repair_btree, read_repair_vec, BulkUpdate, KVWithTs, MvccEntryLoc, RowDelta,
-        }, hash_join_page::{print_statistics, reset_statistics}, Delta, MvccEntry, MvccIndex, TxId
+            StatCollector,
+        },
+        hash_join_page::{print_statistics, reset_statistics},
+        Delta, MvccEntry, MvccIndex, TxId,
     },
     page::{Page, PageId},
     prelude::{AccessMethodError, Timestamp},
@@ -544,7 +547,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
             false
         };
         // println!("scan need repair? {}", is_need_repair);
-        
+
         if is_need_repair {
             let mut result = vec![];
             for bucket in &self.bucket_entries {
@@ -589,12 +592,23 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         Ok(())
     }
 
-    fn collect_page_num(&self) -> usize {
-        let mut page_num = 0;
+    fn collect_space_stat(&self) -> StatCollector {
+        let mut stat = StatCollector::new();
         for bucket in &self.bucket_entries {
-            page_num += bucket.collect_page_num();
+            bucket.collect_space_statistics(&mut stat);
         }
-        page_num
+
+        let max_ts = self
+            .latest_update_ts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let valid_space = self
+            .scan(max_ts)
+            .unwrap()
+            .map(|entry| entry.0.len() + entry.1.len() + entry.2.len())
+            .sum::<usize>();
+        stat.inc_valid_space(valid_space);
+
+        stat
     }
 }
 

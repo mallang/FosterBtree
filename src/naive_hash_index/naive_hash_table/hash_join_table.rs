@@ -1,7 +1,7 @@
 use crate::{
     bp::{ContainerKey, MemPool},
     mvcc_index::{
-        hash_common::{read_repair_btree, read_repair_vec},
+        hash_common::{read_repair_btree, read_repair_vec, StatCollector},
         hash_join_page::record::RecordRef,
         Delta, MvccEntry, MvccIndex, TxId,
     },
@@ -48,6 +48,12 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
             page_num += chain.collect_page_num();
         }
         page_num
+    }
+
+    pub fn collect_space_stat(&self, stat: &mut StatCollector) {
+        for bucket in &self.bucket_entries {
+            bucket.collect_space_stat(stat);
+        }
     }
 
     /// Creates a new hash join table with a specified number of buckets.

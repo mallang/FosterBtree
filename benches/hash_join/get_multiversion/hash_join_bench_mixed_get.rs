@@ -1,8 +1,7 @@
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
-use fbtree::mvcc_index::linear_hash::linear_hash_table::linear_hash_table::LinearHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccEntry, MvccIndex};
+use fbtree::mvcc_index::{BoxMvccIndexMemPool, HashTableType, MvccIndex};
 use fbtree::{mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable, prelude::*};
 use std::env;
 use std::error::Error;
@@ -15,8 +14,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Variables to store arguments
     let mut data_file: Option<String> = None;
     let mut ops_file: Option<String> = None;
-    let mut recent_data_file: Option<String> = None;
-    let mut history_data_file: Option<String> = None;
     // let mut scan_ops_file: Option<String> = None;
     let mut limit_ops: Option<usize> = None;
     let mut hash_table_t: HashTableType = HashTableType::HeapTable;
@@ -60,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "-t" => {
                 if i + 1 < args.len() {
-                    if let Ok(type_name) = args[i + 1].parse::<String>() {
+                    if let Ok(type_name) = &args[i + 1].parse::<String>() {
                         match type_name.as_str() {
                             "chain" => {
                                 hash_table_t = HashTableType::RecentHistoryChained;
@@ -70,9 +67,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             "rust" => {
                                 hash_table_t = HashTableType::RustHashMap;
-                            }
-                            "linear" => {
-                                hash_table_t = HashTableType::LinearHashTable;
                             }
                             _ => {
                                 eprintln!("Warning: Invalid hash table type, ignoring...");
@@ -148,9 +142,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         HashTableType::RustHashMap => {
             Box::new(MvccRustHashMap::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
-        }
-        HashTableType::LinearHashTable => {
-            Box::new(LinearHashTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
         }
         HashTableType::TsPartitionChained => {
             Box::new(TsPartitionedTable::create(c_key, mem_pool.clone())?) as BoxMvccIndexMemPool
