@@ -194,7 +194,7 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
 
         bench.run_all_txs_no_repair(&table);
         let stat = table.collect_space_stat();
-        println!("{:?}", stat);
+        println!("[Space Statistics] {:?}", stat);
     }
 }
 

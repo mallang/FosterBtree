@@ -95,7 +95,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
         Ok(())
     }
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
-        if optype == OperationType::UpdateWR {
+        if optype == OperationType::UpdateWR || optype == OperationType::Update {
            let _ =  <Self as MvccIndex<T>>::bulk_update_end(&self);
         }
         Ok(())
