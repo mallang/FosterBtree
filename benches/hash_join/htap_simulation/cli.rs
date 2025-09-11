@@ -25,14 +25,14 @@ pub struct Cli {
     #[arg(long = "txn-count", default_value = "10")]
     pub txn_count: usize,
 
-    #[arg(long = "analytical-ratio", default_value = "0.2")]
+    #[arg(long = "analytical-ratio", default_value = "0.4")]
     pub analytical_ratio: f64,
 
     #[arg(long = "op-ratio", default_value = "0.01")]
     pub op_ratio: f64,
 
-    #[arg(long = "delta-count", default_value = "3")]
-    pub delta_count: usize,
+    #[arg(long = "scan-count", default_value = "3")]
+    pub scan_count: usize,
 
     #[arg(long = "space-stat")]
     pub space_stat: Option<String>,

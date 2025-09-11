@@ -20,11 +20,13 @@ pub enum OperationType {
     InitLoad,
     Scan,
     GbgCollect,
+    Probe,
 }
 
 pub trait MultiVersionJoinTable {
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]);
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp);
+    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>>;
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp);
     fn mark_ts(&self, ts: u64);
     fn scan_delta(
@@ -54,6 +56,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         <Self as MvccIndex<_>>::insert(self, key.to_vec(), pkey.to_vec(), 0, 0, value.to_vec())
             .unwrap();
+    }
+
+    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
+        <Self as MvccIndex<_>>::get(self, key, pkey, ts).unwrap()
     }
 
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
@@ -96,7 +102,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError> {
         if optype == OperationType::UpdateWR || optype == OperationType::Update {
-           let _ =  <Self as MvccIndex<T>>::bulk_update_end(&self);
+            let _ = <Self as MvccIndex<T>>::bulk_update_end(&self);
         }
         Ok(())
     }
@@ -116,7 +122,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
 
     fn garbage_collect(&self, ts: Timestamp) {
-       let _ =  <Self as MvccIndex<_>>::garbage_collect(&self, ts);
+        let _ = <Self as MvccIndex<_>>::garbage_collect(&self, ts);
     }
 
     fn collect_space_stat(&self) -> StatCollector {
@@ -128,6 +134,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         <Self as MvccIndex<_>>::insert(self, key.to_vec(), pkey.to_vec(), 0, 0, value.to_vec())
             .unwrap();
+    }
+
+    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
+        <Self as MvccIndex<_>>::get(self, key, pkey, ts).unwrap()
     }
 
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
@@ -213,6 +223,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
             .unwrap();
     }
 
+    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
+        <Self as MvccIndex<_>>::get(self, key, pkey, ts).unwrap()
+    }
+
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
         <Self as MvccIndex<_>>::update(self, key.to_vec(), pkey.to_vec(), ts, 0, value.to_vec())
             .unwrap();
@@ -289,11 +303,13 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
 
 // NAIVE
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
-    fn after_mark_ts(&self, ts: Timestamp) {
-        
-    }
+    fn after_mark_ts(&self, ts: Timestamp) {}
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         NaiveMvHashTable::add_insert_rec_new(&self, key, pkey, value);
+    }
+
+    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
+        NaiveMvHashTable::get_key(self, key, pkey, ts)
     }
 
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {

@@ -225,4 +225,13 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
 
         stat
     }
+
+    pub fn get_key(&self, k: &[u8], pk: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
+        let tables = self.naivetables.borrow();
+        if let Some(table) = tables.get(&ts) {
+            table.get(k, pk).unwrap()
+        } else {
+            None
+        }
+    }
 }

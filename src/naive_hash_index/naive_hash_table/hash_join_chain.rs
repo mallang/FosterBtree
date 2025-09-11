@@ -237,12 +237,12 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
     }
 
-    pub fn get_no_repair(&self, pkey: &[u8]) -> Result<MvccEntry, AccessMethodError> {
+    pub fn get_no_repair(&self, pkey: &[u8]) -> Result<Option<Vec<u8>>, AccessMethodError> {
         let mut current_page = self.first_page();
 
         loop {
             if let Some(entry) = current_page.heap_get(pkey).ok() {
-                return Ok(entry);
+                return Ok(Some(entry.value().to_vec()));
             }
 
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {

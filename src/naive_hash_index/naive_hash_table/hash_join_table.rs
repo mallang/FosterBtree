@@ -88,11 +88,11 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
     }
 
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
-    pub fn get(&self, key: &[u8], pkey: &[u8]) -> Result<MvccEntry, AccessMethodError> {
+    pub fn get(&self, key: &[u8], pkey: &[u8]) -> Result<Option<Vec<u8>>, AccessMethodError> {
         let index = self.get_bucket_index(key);
         let heap_chain = &self.bucket_entries[index];
 
-        heap_chain.get_no_repair(pkey)
+        Ok(heap_chain.get_no_repair(pkey).unwrap_or(None))
     }
 
     fn get_bucket_index(&self, key: &[u8]) -> usize {
