@@ -179,3 +179,24 @@ def prepare_plot_data(df):
         dict_labels.append(label_dict)
 
     return color_map, repair_hatches, repair_types, table_types, unique_idx, x_labels, dict_labels
+def draw_stack_bar(df, title1, classification):
+    pivot_df = df.pivot_table(
+        index=["table_type", "repair_type"],
+        columns="tx_type",
+        values="duration_ms",
+        aggfunc="sum",
+        fill_value=0
+    )
+
+    # stacked bar chart
+    ax = pivot_df.plot(
+        kind="bar",
+        stacked=True,
+        figsize=(10, 6)
+    )
+
+    plt.ylabel("Duration (ms)")
+    plt.title(f"Stacked Duration ({title1} - {classification})")
+    plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
+    plt.tight_layout()
+    plt.show()
