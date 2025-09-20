@@ -421,7 +421,7 @@ impl TxBench {
                     self.gen_update_tx(update_count);
                 }
                 OperationType::Probe => {
-                    let probe_count = (self.cli.op_ratio
+                    let probe_count = ((self.cli.op_ratio).min(0.007)
                         * self.data_source.get_custoemr_vec().len() as f64)
                         as usize;
                     let probe_ts = self

@@ -179,6 +179,36 @@ def prepare_plot_data(df):
         dict_labels.append(label_dict)
 
     return color_map, repair_hatches, repair_types, table_types, unique_idx, x_labels, dict_labels
+# def draw_stack_bar(df, title1, classification):
+#     pivot_df = df.pivot_table(
+#         index=["table_type", "repair_type"],
+#         columns="tx_type",
+#         values="duration_ms",
+#         aggfunc="sum",
+#         fill_value=0
+#     )
+
+#     # 先把所有列提取出来
+#     cols = pivot_df.columns.tolist()
+
+#     # 把 DelSc 移动到最后一列（最后一列在 bar chart 就是最上面）
+#     if "DelSc" in cols:
+#         cols.remove("DelSc")
+#         cols.append("DelSc")
+#         pivot_df = pivot_df[cols]
+
+#     # stacked bar chart
+#     ax = pivot_df.plot(
+#         kind="bar",
+#         stacked=True,
+#         figsize=(10, 6)
+#     )
+
+#     plt.ylabel("Duration (ms)")
+#     plt.title(f"Stacked Duration ({title1} - {classification})")
+#     plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
+#     plt.tight_layout()
+#     plt.show()
 def draw_stack_bar(df, title1, classification):
     pivot_df = df.pivot_table(
         index=["table_type", "repair_type"],
@@ -188,7 +218,17 @@ def draw_stack_bar(df, title1, classification):
         fill_value=0
     )
 
-    # stacked bar chart
+    # 调整 DelSc 顺序
+    cols = pivot_df.columns.tolist()
+    if "DelSc" in cols:
+        cols.remove("DelSc")
+        cols.append("DelSc")
+        pivot_df = pivot_df[cols]
+
+    # 把 MultiIndex 转换成字符串：第一行 table_type，第二行 repair_type
+    pivot_df.index = [f"{t}\n{r}" for t, r in pivot_df.index]
+
+    # 画 stacked bar
     ax = pivot_df.plot(
         kind="bar",
         stacked=True,
@@ -197,6 +237,10 @@ def draw_stack_bar(df, title1, classification):
 
     plt.ylabel("Duration (ms)")
     plt.title(f"Stacked Duration ({title1} - {classification})")
+
+    # 横着写 X 轴标签
+    plt.xticks(rotation=0)
+
     plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
     plt.tight_layout()
     plt.show()
