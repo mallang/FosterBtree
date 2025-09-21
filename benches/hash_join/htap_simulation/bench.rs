@@ -165,6 +165,39 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
 fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
     {
         println!();
+        println!("No Repair");
+        let mem_pool = get_in_mem_pool();
+        let c_key = ContainerKey::new(0, 1);
+        let table: BoxMVIndex = match cli.table_type {
+            cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            )) as BoxMVIndex,
+            cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            )) as BoxMVIndex,
+            cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            )) as BoxMVIndex,
+            cli::TableType::Naive => Box::new(
+                fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
+                    c_key,
+                    mem_pool,
+                    NUM_BUCKETS,
+                ),
+            ) as BoxMVIndex,
+        };
+
+        bench.run_all_txs_no_repair(&table);
+    }
+    {
+        println!();
+        println!("No Repair");
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 1);
         let table: BoxMVIndex = match cli.table_type {

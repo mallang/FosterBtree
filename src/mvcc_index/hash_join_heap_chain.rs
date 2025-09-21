@@ -328,10 +328,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
 
         loop {
             if let Some(entry) = current_page.heap_get_no_repair(pkey, ts).ok() {
-                let et = entry.end_ts();
-                if et != u64::MAX {
-                    return Ok(entry);
-                }
+                // let et = entry.end_ts();
+                // if et != u64::MAX {
+                //     return Ok(entry);
+                // }
                 match &best_candidate {
                     None => best_candidate = Some(entry),
                     Some(existing) => {
