@@ -8,3 +8,4 @@ venv/
 output_*
 perf*
 paper_settings.md
+.vscode

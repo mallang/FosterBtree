@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["256k_page"]
+default = ["256k_page", "remove_end_ts_in_no_repair"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -45,6 +45,8 @@ async_write = ["io-uring", "libc"]
 # Async IO with prefetching
 new_async_write = ["io-uring", "libc"]
 
+# Test End Timestamp
+remove_end_ts_in_no_repair = []
 
 [dependencies]
 tempfile = "3.8"

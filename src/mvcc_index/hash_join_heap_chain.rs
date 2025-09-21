@@ -327,7 +327,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         let mut current_page = self.first_page();
 
         loop {
-            if let Some(entry) = current_page.heap_get(pkey, ts).ok() {
+            if let Some(entry) = current_page.heap_get_no_repair(pkey, ts).ok() {
                 let et = entry.end_ts();
                 if et != u64::MAX {
                     return Ok(entry);
@@ -366,7 +366,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         let mut current_page = self.first_page();
 
         loop {
-            if let Some(entry) = current_page.heap_get(pkey, ts).ok() {
+            if let Some(entry) = current_page.chain_get(pkey, ts).ok() {
                 return Ok(entry);
             }
 
@@ -948,14 +948,23 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         ts: Timestamp,
         best_candidates: &mut HashMap<Vec<u8>, MvccEntry>,
     ) -> Result<(), AccessMethodError> {
-        // Get the full scanner (which iterates over all entries that pass the ts filter)
-        let mut scanner = HeapChainScanner::new(self, ts);
-        // Iterate over all entries from the chain.
-        while !scanner.is_end() {
-            if let Some(entry) = scanner.next() {
-                let pkey = entry.pkey().to_vec();
-                best_candidates.insert(pkey, entry);
+        let mut current_page = self.first_page();
+        loop {
+            current_page.heap_scan_unique_no_repair_into_best_candidates(ts, best_candidates);
+
+            if let Some((next_pid, next_fid)) = current_page.next_page() {
+                let next_page = read_page(
+                    &*self.mem_pool,
+                    PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                );
+                if next_page.frame_id() != next_fid {
+                    let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
+                }
+                current_page = next_page;
+                continue;
             }
+            // no next page in current chain
+            break;
         }
         // Return the best candidate for each key. If order matters you might want to sort them.
         Ok(())

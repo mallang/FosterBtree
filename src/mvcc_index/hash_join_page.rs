@@ -236,7 +236,13 @@ pub mod slot {
             }
         };
     }
+    
+    #[cfg(feature = "remove_end_ts_in_no_repair")]
+    define_slot_with_common!(Slot {
+        start_ts: Timestamp,
+    });
 
+    #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
     define_slot_with_common!(Slot {
         start_ts: Timestamp,
         end_ts: Timestamp,
@@ -257,10 +263,14 @@ pub mod slot {
                 )
                 .field("tx_id", &self.tx_id)
                 .field("start_ts", &self.start_ts)
-                .field("end_ts", &self.end_ts)
+                
                 .field("val_size", &self.val_size)
-                .field("offset", &self.offset)
-                .finish()
+                .field("offset", &self.offset);
+                
+            #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
+            f.debug_struct("Slot").field("end_ts", &self.end_ts);
+
+            f.debug_struct("Slot").finish()
         }
     }
 
@@ -306,6 +316,7 @@ pub mod slot {
                 pkey_prefix,
                 tx_id,
                 start_ts,
+                #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
                 end_ts,
                 val_size,
                 offset: offset as u32,
@@ -337,11 +348,17 @@ pub mod slot {
         }
 
         pub fn end_ts(&self) -> Timestamp {
-            self.end_ts
+            #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
+            {return self.end_ts;}
+            #[cfg(feature = "remove_end_ts_in_no_repair")]
+            {return 0;}
         }
 
         pub fn set_end_ts(&mut self, end_ts: Timestamp) {
-            self.end_ts = end_ts;
+            #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
+            {self.end_ts = end_ts;}
+            #[cfg(feature = "remove_end_ts_in_no_repair")]
+            {return;}
         }
 
         pub fn set_start_ts(&mut self, start_ts: Timestamp) {
@@ -507,7 +524,8 @@ pub trait HashJoinPage {
     ) -> Result<(), AccessMethodError>;
 
     fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
-    fn heap_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
+    fn heap_get_no_repair(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
+    fn chain_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn heap_get_read_repair(
         &self,
         pkey: &[u8],
@@ -728,6 +746,7 @@ pub trait HashJoinPage {
 
     fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>);
     fn chain_scan_into_vec_ignore_ts(&self, results: &mut Vec<MvccEntry>);
+    fn heap_scan_unique_no_repair_into_best_candidates(&self, ts: Timestamp, best_candidates: &mut HashMap<Vec<u8>, MvccEntry>);
     fn chain_scan_delta_into(
         &self,
         from: Timestamp,
@@ -943,7 +962,42 @@ impl HashJoinPage for Page {
         ))
     }
 
-    fn heap_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
+    fn heap_get_no_repair(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
+        let mut best_candidate: Option<(usize, Timestamp)> = None;
+
+        for i in 0..self.slot_count() {
+            let slot = self.unsafe_slot(i);
+            let start = slot.start_ts();
+            if start > *ts {
+                // This slot is too new; skip it.
+                continue;
+            }
+
+            // Attempt a cheap pkey check first; if no match, skip it.
+            if let Some(_) = self.slot_pkey_matches(slot, pkey) {
+                // The slot's pkey is correct. Now let's see if it's valid for this timestamp.
+                // we update the best candidate.
+                match best_candidate {
+                    Some((_, best_start)) if start > best_start => {
+                        best_candidate = Some((i, start));
+                    }
+                    None => {
+                        best_candidate = Some((i, start));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // If we found a candidate, return its MVCC entry.
+        if let Some((idx, _)) = best_candidate {
+            self.get_entry_at_slot_id(idx)
+        } else {
+            Err(AccessMethodError::KeyNotFound)
+        }
+    }
+
+    fn chain_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let mut best_candidate: Option<(usize, Timestamp)> = None;
 
         for i in 0..self.slot_count() {
@@ -1858,6 +1912,31 @@ impl HashJoinPage for Page {
                 et,
             );
             results.push(entry);
+        }
+    }
+
+    fn heap_scan_unique_no_repair_into_best_candidates(&self, ts: Timestamp, best_candidates: &mut HashMap<Vec<u8>, MvccEntry>) {
+        let slot_count = self.slot_count();
+        for i in 0..slot_count {
+            let slot = self.unsafe_slot(i);
+
+            if ts < slot.start_ts()
+            {
+                continue;
+            }
+
+            // 2) Read the entire record to confirm pkey equality.
+            let rec = self.record_ref_from_slot(&slot);
+            // 4) Finally, build an MvccEntry
+            let entry = MvccEntry::new(
+                rec.key().to_vec(),
+                rec.pkey().to_vec(),
+                rec.val().to_vec(),
+                0,
+                0,
+            );
+            let pkey = entry.pkey().to_vec();
+            best_candidates.insert(pkey, entry);
         }
     }
 
