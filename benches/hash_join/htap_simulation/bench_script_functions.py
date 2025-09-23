@@ -179,36 +179,7 @@ def prepare_plot_data(df):
         dict_labels.append(label_dict)
 
     return color_map, repair_hatches, repair_types, table_types, unique_idx, x_labels, dict_labels
-# def draw_stack_bar(df, title1, classification):
-#     pivot_df = df.pivot_table(
-#         index=["table_type", "repair_type"],
-#         columns="tx_type",
-#         values="duration_ms",
-#         aggfunc="sum",
-#         fill_value=0
-#     )
 
-#     # 先把所有列提取出来
-#     cols = pivot_df.columns.tolist()
-
-#     # 把 DelSc 移动到最后一列（最后一列在 bar chart 就是最上面）
-#     if "DelSc" in cols:
-#         cols.remove("DelSc")
-#         cols.append("DelSc")
-#         pivot_df = pivot_df[cols]
-
-#     # stacked bar chart
-#     ax = pivot_df.plot(
-#         kind="bar",
-#         stacked=True,
-#         figsize=(10, 6)
-#     )
-
-#     plt.ylabel("Duration (ms)")
-#     plt.title(f"Stacked Duration ({title1} - {classification})")
-#     plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
-#     plt.tight_layout()
-#     plt.show()
 def draw_stack_bar(df, title1, classification):
     pivot_df = df.pivot_table(
         index=["table_type", "repair_type"],
@@ -244,3 +215,88 @@ def draw_stack_bar(df, title1, classification):
     plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
     plt.tight_layout()
     plt.show()
+
+
+def parse_result_space(log_text, table_type):
+    data = []
+    repair_type = None
+    no_repair_run_count = 0
+
+    for line in log_text.splitlines():
+        line = line.strip()
+
+        if line.startswith("No Repair"):
+            repair_type = "No Repair"
+            no_repair_run_count += 1
+            continue
+        elif line.startswith("Read Repair"):
+            repair_type = "Read Repair"
+            continue
+        elif line.startswith("Write Repair"):
+            repair_type = "Write Repair"
+            continue
+        
+        pattern = re.compile(
+            r"total_space:\s*(\d+),\s*all_versions_space:\s*(\d+),\s*valid_space:\s*(\d+)"
+        )
+
+        match = pattern.search(line)
+        if match and repair_type:
+            total_space = int(match.group(1))
+            all_versions_space = int(match.group(2))
+            valid_space = int(match.group(3))
+            print("total_space:", total_space)
+            print("all_versions_space:", all_versions_space)
+            print("valid_space:", valid_space)
+            
+            data.append({
+                'table_type': table_type,
+                'repair_type': repair_type,
+                'total_space': total_space,
+                'all_versions_space': all_versions_space,
+                'valid_space': valid_space,
+            })
+    return pd.DataFrame(data)
+
+
+def run_and_collect_space(bin_path, table_types, base_args, repeat):
+    all_dfs = []
+    for table_type in table_types:
+        print(f"Running for table_type={table_type} with {repeat} repeats...")
+        dfs = []
+        for trail in range(repeat):
+            print(f"   - Trail {trail + 1}/{repeat}")
+
+            args = [str(bin_path)] + base_args + ["--table-type", table_type]
+            print(args)
+
+            result = subprocess.run(
+                args, 
+                stdout=subprocess.PIPE,
+                stderr = subprocess.PIPE,
+                text=True,
+            )
+
+            print(result.stdout)
+            df = parse_result_space(result.stdout, table_type)
+            dfs.append(df)
+        if dfs:
+            # Concatenate all repeated runs
+            df_all = pd.concat(dfs, ignore_index=True)
+            # Group by (idx, tx_id, tx_type, repair_type, table_type) and average duration_ms
+            df_avg = (
+                df_all
+                .groupby(['table_type', 'repair_type'], as_index=False)
+                .agg({
+                    'total_space': 'first',
+                    'all_versions_space': 'first',
+                    'valid_space': 'first'
+                })
+            )
+
+            all_dfs.append(df_avg)
+    if all_dfs:
+        final_df = pd.concat(all_dfs, ignore_index=True)
+        return final_df
+    else:
+        return pd.DataFrame()
