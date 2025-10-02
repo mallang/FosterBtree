@@ -402,7 +402,27 @@ impl TxBench {
         // load markts txn
         self.gen_mark_ts_txs(1);
 
+        let mut beginning_update_count = 7;
+        let mut beginning_ts = 1;
+
         for i in 2..self.cli.txn_count - 2 {
+            // make sure there are some updates at the beginning
+            if beginning_update_count > 0 {
+                beginning_ts += 1;
+                if beginning_update_count % 3 == 0 {
+                    self.gen_mark_ts_txs(beginning_ts);
+                } else {
+                    let update_count = (self.cli.update_ratio
+                        * self.data_source.get_custoemr_vec().len() as f64)
+                        as usize;
+                    self.gen_update_tx(update_count);
+                }
+                beginning_update_count -= 1;
+                continue;
+            }
+
+
+
             let tx_type = if self.rng.gen_bool(self.cli.analytical_ratio) {
                 if self.rng.gen_bool(0.2) {
                     OperationType::MarkTs
@@ -415,13 +435,13 @@ impl TxBench {
 
             match tx_type {
                 OperationType::Update => {
-                    let update_count = (self.cli.op_ratio
+                    let update_count = (self.cli.update_ratio
                         * self.data_source.get_custoemr_vec().len() as f64)
                         as usize;
                     self.gen_update_tx(update_count);
                 }
                 OperationType::Probe => {
-                    let probe_count = ((self.cli.op_ratio).min(0.007)
+                    let probe_count = (self.cli.probe_ratio
                         * self.data_source.get_custoemr_vec().len() as f64)
                         as usize;
                     let probe_ts = self
@@ -451,7 +471,7 @@ impl TxBench {
         self.gen_full_delta_scan_tx();
 
         let mut rng = SmallRng::seed_from_u64(2333);
-        for i in 0..self.cli.scan_count - 1 {
+        for i in 0..self.cli.delta_count.unwrap() - 1 {
             self.gen_delta_scan_tx(1, &mut rng);
         }
 
@@ -462,7 +482,7 @@ impl TxBench {
         }
 
         let mut rng = SmallRng::seed_from_u64(2333);
-        for i in 0..self.cli.scan_count - 1 {
+        for i in 0..self.cli.delta_count.unwrap() - 1 {
             self.gen_delta_scan_tx(0, &mut rng);
         }
     }
@@ -871,7 +891,7 @@ impl TxBench {
         // println!("Pkey size: {}", cli.pkey_size);
         // println!("Value size: {}", cli.value_size);
         // println!();
-        println!("Update ratio: {}", cli.op_ratio);
+        println!("Update ratio: {}", cli.update_ratio);
         println!("Analytical ratio: {}", cli.analytical_ratio);
         println!(
             "Number of transactions (max Timestamp value): {}",

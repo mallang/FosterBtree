@@ -28,11 +28,17 @@ pub struct Cli {
     #[arg(long = "analytical-ratio", default_value = "0.4")]
     pub analytical_ratio: f64,
 
-    #[arg(long = "op-ratio", default_value = "0.01")]
-    pub op_ratio: f64,
+    #[arg(long = "update-ratio", default_value = "0.01")]
+    pub update_ratio: f64,
+
+    #[arg(long = "probe-ratio", default_value = "0.01")]
+    pub probe_ratio: f64,
 
     #[arg(long = "scan-count", default_value = "3")]
     pub scan_count: usize,
+
+    #[arg(long = "delta-count")]
+    pub delta_count: Option<usize>,
 
     #[arg(long = "space-stat")]
     pub space_stat: Option<String>,

@@ -232,7 +232,13 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // if delta_count is empty, set it to scan_count
+    if cli.delta_count.is_none() {
+        cli.delta_count = Some(cli.scan_count);
+    }
+
 
     let mut bench = TxBench::new(cli.clone());
     bench.print_cli();
