@@ -443,4 +443,8 @@ impl DataSource {
             value: new_c.generate_value().to_vec(),
         }
     }
+
+    pub fn generate_join_key(&mut self) -> [u8; 16] {
+        self.random_c_last()
+    }
 }

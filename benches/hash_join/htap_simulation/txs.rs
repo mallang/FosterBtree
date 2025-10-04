@@ -1,8 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
     default,
+    iter::Scan,
+    sync::atomic::{AtomicPtr, AtomicUsize},
     time::Instant,
 };
+
+pub static GC_RATIO: AtomicUsize = AtomicUsize::new(4);
 
 use anyhow::Error;
 use fbtree::{mvcc_index::TxId, prelude::Timestamp};
@@ -31,7 +35,8 @@ pub struct TxOperation {
     pub pkey: Vec<u8>,
     pub join_key: Vec<u8>,
     pub value: Vec<u8>,
-    pub gc_ts: Vec<Timestamp>, // ts that we want to gc
+    pub gc_ts: Vec<Timestamp>,                 // ts that we want to gc
+    pub delta_scan_ts: (Timestamp, Timestamp), // (from, to)
 }
 
 fn clear_cpu_cache() {
@@ -63,6 +68,7 @@ impl TxOperation {
             join_key,
             value,
             gc_ts,
+            delta_scan_ts: (0, 0),
         }
     }
 
@@ -88,9 +94,7 @@ impl TxOperation {
     pub fn new_probe(
         tx_id: TxId,
         tx_ts: Timestamp,
-        pkey: Vec<u8>,
         join_key: Vec<u8>,
-        value: Vec<u8>,
         probe_ts: Timestamp,
     ) -> Self {
         Self::new(
@@ -98,24 +102,25 @@ impl TxOperation {
             tx_ts,
             OperationType::Probe,
             probe_ts,
-            pkey,
+            vec![],
             join_key,
-            value,
+            vec![],
             vec![],
         )
     }
 
-    pub fn new_delta_scan(tx_id: TxId, tx_ts: Timestamp, read_ts: Timestamp) -> Self {
-        Self::new(
+    pub fn new_delta_scan(tx_id: TxId, tx_ts: Timestamp, from: Timestamp, to: Timestamp) -> Self {
+        Self {
             tx_id,
             tx_ts,
-            OperationType::DeltaScan,
-            read_ts,
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-        )
+            op: OperationType::DeltaScan,
+            read_ts: 0,
+            pkey: vec![],
+            join_key: vec![],
+            value: vec![],
+            gc_ts: vec![],
+            delta_scan_ts: (from, to),
+        }
     }
 
     pub fn new_gc(tx_id: TxId, tx_ts: Timestamp, read_ts: Timestamp) -> Self {
@@ -242,27 +247,15 @@ impl TxBench {
     pub fn gen_probe_tx(&mut self, probe_count: usize, probe_ts: Timestamp) {
         let (tx_id, tx_ts) = self.gen_new_tx();
         let mut ops = Vec::new();
-        let mut pkey_set = HashSet::new();
         for _ in 0..probe_count {
             // remove duplicate
-            let mut op = self.data_source.generate_transactional_op();
-            loop {
-                if pkey_set.contains(&op.pkey) {
-                    op = self.data_source.generate_transactional_op();
-                    continue;
-                } else {
-                    pkey_set.insert(op.pkey.clone());
-                    break;
-                }
-            }
+            let join_key = self.data_source.generate_join_key();
 
             // insert op
             ops.push(TxOperation::new_probe(
                 tx_id,
                 tx_ts,
-                op.pkey,
-                op.join_key,
-                op.value,
+                join_key.to_vec(),
                 probe_ts,
             ));
         }
@@ -291,7 +284,7 @@ impl TxBench {
         self.txs.push(tx);
     }
 
-    pub fn gen_scan_txs_random(&mut self) {
+    pub fn gen_scan_txs_history(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
         let scan_ts = self
             .read_ts_candidates
@@ -316,9 +309,30 @@ impl TxBench {
         self.txs.push(tx);
     }
 
-    pub fn gen_mark_ts_txs(&mut self, mark_ts: Timestamp) {
+    pub fn gen_scan_txs_latest(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
-        assert_eq!(tx_ts, mark_ts, "tx_ts must be equal to mark_ts");
+        let scan_ts = self.read_ts_candidates.last().unwrap();
+        let mut ops = Vec::new();
+
+        let op = TxOperation::new(
+            tx_id,
+            tx_ts,
+            OperationType::Scan,
+            *scan_ts,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        ops.push(op);
+        let tx = Tx::new(OperationType::Scan, tx_id, tx_ts, ops);
+        self.txs.push(tx);
+    }
+
+    pub fn gen_mark_ts_txs(&mut self) {
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        // assert_eq!(tx_ts, mark_ts, "tx_ts must be equal to mark_ts");
         // add to candidates
         self.read_ts_candidates.push(tx_ts);
         let mut ops = Vec::new();
@@ -327,7 +341,7 @@ impl TxBench {
             tx_id,
             tx_ts,
             OperationType::MarkTs,
-            mark_ts,
+            tx_ts,
             vec![], // pkey is not used for marking ts
             vec![], // join_key is not used for marking ts
             vec![],
@@ -339,15 +353,17 @@ impl TxBench {
         self.txs.push(tx);
     }
 
-    pub fn gen_delta_scan_tx(&mut self, start_idx: usize, rng: &mut SmallRng) {
+    pub fn gen_delta_scan_tx(&mut self, start_idx: usize) -> bool {
         let all_ts = &self.read_ts_candidates[start_idx..];
 
         if all_ts.len() < 2 {
-            panic!("Not enough read_ts candidates for delta scan, at least 2 required");
+            return false;
         }
 
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        let all_ts = &self.read_ts_candidates[start_idx..];
         // randomly select 2 different timestamps
-        let mut selected_ts = all_ts.choose_multiple(rng, 2);
+        let mut selected_ts = all_ts.choose_multiple(&mut self.rng, 2);
         let read_ts1 = selected_ts.next().unwrap();
         let read_ts2 = selected_ts.next().unwrap();
         assert!(
@@ -357,39 +373,66 @@ impl TxBench {
         let from_ts = read_ts1.min(read_ts2);
         let to_ts = read_ts1.max(read_ts2);
 
-        let op = TxOperation::new_delta_scan(0, *to_ts, *from_ts);
-        let tx = Tx::new(OperationType::DeltaScan, 0, 0, vec![op]);
+        let op = TxOperation::new_delta_scan(tx_id, tx_ts, *from_ts, *to_ts);
+        let tx = Tx::new(OperationType::DeltaScan, tx_id, tx_ts, vec![op]);
         self.txs.push(tx.clone());
         self.read_txs.push(tx);
+        return true;
     }
 
-    pub fn gen_full_delta_scan_tx(&mut self) {
-        let all_ts = &self.read_ts_candidates;
+    // pub fn gen_full_delta_scan_tx(&mut self) {
+    //     let all_ts = &self.read_ts_candidates;
 
-        if all_ts.len() < 2 {
-            panic!("Not enough read_ts candidates for delta scan, at least 2 required");
-        }
+    //     if all_ts.len() < 2 {
+    //         panic!("Not enough read_ts candidates for delta scan, at least 2 required");
+    //     }
 
-        let read_ts1 = all_ts.iter().min().unwrap();
-        let read_ts2 = all_ts.iter().max().unwrap();
-        assert!(
-            read_ts1 != read_ts2,
-            "Selected timestamps must be different"
-        );
-        let from_ts = read_ts1.min(read_ts2);
-        let to_ts = read_ts1.max(read_ts2);
+    //     let read_ts1 = all_ts.iter().min().unwrap();
+    //     let read_ts2 = all_ts.iter().max().unwrap();
+    //     assert!(
+    //         read_ts1 != read_ts2,
+    //         "Selected timestamps must be different"
+    //     );
+    //     let from_ts = read_ts1.min(read_ts2);
+    //     let to_ts = read_ts1.max(read_ts2);
 
-        let op = TxOperation::new_delta_scan(0, *to_ts, *from_ts);
-        let tx = Tx::new(OperationType::DeltaScan, 0, 0, vec![op]);
-        self.txs.push(tx.clone());
-        self.read_txs.push(tx);
-    }
+    //     let op = TxOperation::new_delta_scan(0, *to_ts, *from_ts);
+    //     let tx = Tx::new(OperationType::DeltaScan, 0, 0, vec![op]);
+    //     self.txs.push(tx.clone());
+    //     self.read_txs.push(tx);
+    // }
 
     pub fn gen_txs(&mut self) {
         if self.cli.manual_txs.is_none() {
             self.gen_random_txs();
         } else {
             unimplemented!()
+        }
+    }
+
+    fn choose_transaction(
+        update_ratio: f64,
+        probe_ratio: f64,
+        scan_ratio: f64,
+        delta_ratio: f64,
+        rng: &mut SmallRng,
+    ) -> OperationType {
+        let x: f64 = rng.gen_range(0.0..1.0); // uniform [0,1)
+        let threshold = GC_RATIO.load(std::sync::atomic::Ordering::Relaxed) as f64 / 100.0;
+        if x < threshold {
+            GC_RATIO.store(1, std::sync::atomic::Ordering::Relaxed);
+            return OperationType::GbgCollect;
+        }
+        let x: f64 = rng.gen_range(0.0..1.0); // uniform [0,1)
+
+        if x < update_ratio {
+            OperationType::Update
+        } else if x < update_ratio + probe_ratio {
+            OperationType::Probe
+        } else if x < update_ratio + probe_ratio + scan_ratio {
+            OperationType::Scan
+        } else {
+            OperationType::DeltaScan
         }
     }
 
@@ -400,38 +443,19 @@ impl TxBench {
         self.gen_initial_insert_from_cli();
 
         // load markts txn
-        self.gen_mark_ts_txs(1);
+        self.gen_mark_ts_txs();
 
-        let mut beginning_update_count = 7;
-        let mut beginning_ts = 1;
+        // let mut beginning_update_count = 7;
+        // let mut beginning_ts = 1;
 
-        for i in 2..self.cli.txn_count - 2 {
-            // make sure there are some updates at the beginning
-            if beginning_update_count > 0 {
-                beginning_ts += 1;
-                if beginning_update_count % 3 == 0 {
-                    self.gen_mark_ts_txs(beginning_ts);
-                } else {
-                    let update_count = (self.cli.update_ratio
-                        * self.data_source.get_custoemr_vec().len() as f64)
-                        as usize;
-                    self.gen_update_tx(update_count);
-                }
-                beginning_update_count -= 1;
-                continue;
-            }
-
-
-
-            let tx_type = if self.rng.gen_bool(self.cli.analytical_ratio) {
-                if self.rng.gen_bool(0.2) {
-                    OperationType::MarkTs
-                } else {
-                    OperationType::Probe
-                }
-            } else {
-                OperationType::Update
-            };
+        for mut i in 0..self.cli.txn_count {
+            let tx_type = Self::choose_transaction(
+                self.cli.txn_update_ratio.unwrap(),
+                self.cli.txn_probe_ratio.unwrap(),
+                self.cli.txn_scan_ratio.unwrap(),
+                self.cli.txn_delta_ratio.unwrap(),
+                &mut self.rng,
+            );
 
             match tx_type {
                 OperationType::Update => {
@@ -451,57 +475,47 @@ impl TxBench {
                         .to_owned();
                     self.gen_probe_tx(probe_count, probe_ts);
                 }
-                OperationType::MarkTs => {
-                    self.gen_mark_ts_txs(i as Timestamp);
+                OperationType::DeltaScan => {
+                    if !self.gen_delta_scan_tx(0) {
+                        i -= 1;
+                        continue;
+                    }
                 }
                 OperationType::Scan => {
-                    self.gen_scan_txs_random();
+                    if self.rng.gen_bool(self.cli.scan_reuse_ratio) {
+                        // history
+                        self.gen_scan_txs_history();
+                    } else {
+                        self.gen_mark_ts_txs();
+                        self.gen_scan_txs_latest();
+                    }
+                }
+                OperationType::GbgCollect => {
+                    self.gen_gc_txs();
                 }
                 _default => {
                     panic!();
                 }
             }
         }
-
-        self.gen_mark_ts_txs(self.cli.txn_count as u64 - 2);
-        for i in 0..self.cli.scan_count {
-            self.gen_scan_txs(self.cli.txn_count as u64 - 2);
-        }
-
-        self.gen_full_delta_scan_tx();
-
-        let mut rng = SmallRng::seed_from_u64(2333);
-        for i in 0..self.cli.delta_count.unwrap() - 1 {
-            self.gen_delta_scan_tx(1, &mut rng);
-        }
-
-        // garbage collection
-        if self.cli.space_stat.is_none() {
-            // only gc when no collecting space stats
-            self.gen_gc_txs();
-        }
-
-        let mut rng = SmallRng::seed_from_u64(2333);
-        for i in 0..self.cli.delta_count.unwrap() - 1 {
-            self.gen_delta_scan_tx(0, &mut rng);
-        }
     }
 
     pub fn gen_gc_txs(&mut self) {
         let tss = &mut self.read_ts_candidates;
-        assert!(tss.len() >= 2);
+        if tss.len() < 3 {
+            return;
+        }
         assert_eq!(tss.iter().min(), tss.first());
+        let (tx_id, tx_ts) = self.gen_new_tx();
+        let tss = &mut self.read_ts_candidates;
         let min_ts = tss.iter().min().unwrap().to_owned();
-        let (first, right) = tss.split_first().unwrap();
+        let (_first, right) = tss.split_first().unwrap();
         let new_tss = right.to_owned();
-        let new_min_ts = new_tss.iter().min().unwrap().to_owned();
         self.read_ts_candidates = new_tss;
 
-        let (tx_id, tx_ts) = self.gen_new_tx();
-
-        let op = TxOperation::new_gc(tx_id, tx_ts, new_min_ts);
+        let op = TxOperation::new_gc(tx_id, tx_ts, min_ts);
         let tx = Tx::new(OperationType::GbgCollect, tx_id, tx_ts, vec![op]);
-        self.txs.push(tx.clone());
+        self.txs.push(tx);
     }
 
     pub fn gen_manual_txs(&mut self) {
@@ -535,7 +549,7 @@ impl TxBench {
             }
             OperationType::Probe => {
                 for op in &tx.ops {
-                    let _ = hash_join_table.get(&op.join_key, &op.pkey, op.read_ts);
+                    let _ = hash_join_table.probe(&op.join_key, op.read_ts);
                 }
             }
             OperationType::Update => {
@@ -548,7 +562,8 @@ impl TxBench {
             OperationType::DeltaScan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
-                    let _ = hash_join_table.scan_delta(op.read_ts, op.tx_ts, false);
+                    let _ =
+                        hash_join_table.scan_delta(op.delta_scan_ts.0, op.delta_scan_ts.1, false);
                 }
             }
             OperationType::UpdateWR => {
@@ -601,7 +616,7 @@ impl TxBench {
             OperationType::DeltaScan => {
                 println!(
                     "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
-                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                    tx.ops[0].delta_scan_ts.0, tx.ops[0].delta_scan_ts.1
                 );
             }
             OperationType::UpdateWR => {
@@ -642,7 +657,7 @@ impl TxBench {
             }
             OperationType::Probe => {
                 for op in &tx.ops {
-                    let _ = hash_join_table.get(&op.join_key, &op.pkey, op.read_ts);
+                    let _ = hash_join_table.probe(&op.join_key, op.read_ts);
                 }
             }
             OperationType::MarkTs => {
@@ -660,7 +675,8 @@ impl TxBench {
             OperationType::DeltaScan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
-                    let _ = hash_join_table.scan_delta(op.read_ts, op.tx_ts, true);
+                    let _ =
+                        hash_join_table.scan_delta(op.delta_scan_ts.0, op.delta_scan_ts.1, true);
                 }
             }
             OperationType::UpdateWR => {
@@ -713,7 +729,7 @@ impl TxBench {
             OperationType::DeltaScan => {
                 println!(
                     "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
-                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                    tx.ops[0].delta_scan_ts.0, tx.ops[0].delta_scan_ts.1
                 );
             }
             OperationType::UpdateWR => {
@@ -744,7 +760,7 @@ impl TxBench {
         match tx.tx_type {
             OperationType::Probe => {
                 for op in &tx.ops {
-                    let _ = hash_join_table.get(&op.join_key, &op.pkey, op.read_ts);
+                    let _ = hash_join_table.probe(&op.join_key, op.read_ts);
                 }
             }
             OperationType::InitLoad => {
@@ -776,7 +792,8 @@ impl TxBench {
             OperationType::DeltaScan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
-                    let _ = hash_join_table.scan_delta(op.read_ts, op.tx_ts, false);
+                    let _ =
+                        hash_join_table.scan_delta(op.delta_scan_ts.0, op.delta_scan_ts.1, false);
                 }
             }
             OperationType::UpdateWR => {
@@ -829,7 +846,7 @@ impl TxBench {
             OperationType::DeltaScan => {
                 println!(
                     "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
-                    tx.ops[0].read_ts, tx.ops[0].tx_ts
+                    tx.ops[0].delta_scan_ts.0, tx.ops[0].delta_scan_ts.1
                 );
             }
             OperationType::UpdateWR => {
@@ -892,7 +909,8 @@ impl TxBench {
         // println!("Value size: {}", cli.value_size);
         // println!();
         println!("Update ratio: {}", cli.update_ratio);
-        println!("Analytical ratio: {}", cli.analytical_ratio);
+        println!("probe ratio: {}", cli.probe_ratio);
+        println!("Analytical ratio: {:?}", cli.analytical_ratio);
         println!(
             "Number of transactions (max Timestamp value): {}",
             cli.txn_count
@@ -900,6 +918,12 @@ impl TxBench {
         println!("Number of each scan transactions: {}", cli.scan_count);
         println!();
         println!("-----------------------------------------------------------------------");
+        println!("Transactions Update ratio: {:?}", cli.txn_update_ratio);
+        println!("Transactions Probe ratio: {:?}", cli.txn_probe_ratio);
+        println!("Transactions Scan ratio: {:?}", cli.txn_scan_ratio);
+        println!("Transactions Delta Scan ratio: {:?}", cli.txn_delta_ratio);
+        println!("-----------------------------------------------------------------------");
+        println!();
         println!();
     }
 
@@ -937,7 +961,7 @@ impl TxBench {
                 OperationType::DeltaScan => {
                     println!(
                         "DeltaScan from read_ts: {:?} to tx_ts: {:?}",
-                        tx.ops[0].read_ts, tx.ops[0].tx_ts
+                        tx.ops[0].delta_scan_ts.0, tx.ops[0].delta_scan_ts.1
                     );
                 }
                 OperationType::UpdateWR => {
@@ -965,7 +989,7 @@ impl TxBench {
                 OperationType::DeltaScan => {
                     println!(
                         "DeltaScan read_ts: {:>3} to tx_ts: {:>3}",
-                        tx.ops[0].read_ts, tx.ops[0].tx_ts
+                        tx.ops[0].delta_scan_ts.0, tx.ops[0].delta_scan_ts.1
                     );
                 }
                 OperationType::Scan => {

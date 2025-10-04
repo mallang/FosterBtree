@@ -420,7 +420,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
 
     fn scan_key(
         &self,
-        key: &Self::Key,
+        key: &[u8],
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         let idx = self.get_bucket_index(key);
@@ -433,7 +433,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
 
     fn scan_key_vec(
         &self,
-        key: &Self::Key,
+        key: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         Ok(self

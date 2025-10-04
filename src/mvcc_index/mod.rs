@@ -245,7 +245,7 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     /// Returns an iterator over primary key and value pairs.
     fn scan_key(
         &self,
-        key: &Self::Key,
+        key: &[u8],
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error>;
 
@@ -253,7 +253,7 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
     /// Returns a vec over primary key and value pairs.
     fn scan_key_vec(
         &self,
-        key: &Self::Key,
+        key: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error>;
 

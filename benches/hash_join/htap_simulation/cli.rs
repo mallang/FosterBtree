@@ -25,8 +25,8 @@ pub struct Cli {
     #[arg(long = "txn-count", default_value = "10")]
     pub txn_count: usize,
 
-    #[arg(long = "analytical-ratio", default_value = "0.4")]
-    pub analytical_ratio: f64,
+    #[arg(long = "analytical-ratio")]
+    pub analytical_ratio: Option<f64>,
 
     #[arg(long = "update-ratio", default_value = "0.01")]
     pub update_ratio: f64,
@@ -42,4 +42,19 @@ pub struct Cli {
 
     #[arg(long = "space-stat")]
     pub space_stat: Option<String>,
+
+    #[arg(long = "txn-scan-ratio")]
+    pub txn_scan_ratio: Option<f64>,
+
+    #[arg(long = "txn-probe-ratio")]
+    pub txn_probe_ratio: Option<f64>,
+
+    #[arg(long = "txn-update-ratio")]
+    pub txn_update_ratio: Option<f64>,
+
+    #[arg(long = "txn-delta-ratio")]
+    pub txn_delta_ratio: Option<f64>,
+
+    #[arg(long = "scan-reuse-ratio", default_value = "0.8")]
+    pub scan_reuse_ratio: f64,
 }

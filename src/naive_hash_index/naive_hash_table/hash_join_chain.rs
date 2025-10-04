@@ -349,42 +349,28 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     pub fn chain_scan_key(
         &self,
         search_key: &[u8],
-        ts: &Timestamp,
         res: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<(), AccessMethodError> {
-        // {
-        //     let mut current_page = self.first_page();
-        //     loop {
-        //         let header = current_page.unsafe_header();
+        {
+            let mut current_page = self.first_page();
+            loop {
+                current_page.chain_scan_key(search_key, res)?;
 
-        //         if ts < &header.page_min_start_ts() {
-        //             // do nothing
-        //         } else if header.recent_slot_cnt() == 0 && ts >= &header.page_max_end_ts() {
-        //             // do nothing
-        //         } else {
-        //             current_page.chain_scan_key(
-        //                 search_key,
-        //                 ts,
-        //                 res,
-        //             )?;
-        //         }
-
-        //         if let Some((next_pid, next_fid)) = current_page.next_page() {
-        //             let next_page = read_page(
-        //                 &*self.mem_pool,
-        //                 PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
-        //             );
-        //             if next_page.frame_id() != next_fid {
-        //                 let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
-        //             }
-        //             current_page = next_page;
-        //             continue;
-        //         }
-        //         // no next page in current chain
-        //         break;
-        //     }
-        // }
-        todo!()
-        // return Ok(());
+                if let Some((next_pid, next_fid)) = current_page.next_page() {
+                    let next_page = read_page(
+                        &*self.mem_pool,
+                        PageFrameKey::new_with_frame_id(self.c_key, next_pid, next_fid),
+                    );
+                    if next_page.frame_id() != next_fid {
+                        let _ = fix_frame_id(current_page, next_pid, next_page.frame_id());
+                    }
+                    current_page = next_page;
+                    continue;
+                }
+                // no next page in current chain
+                break;
+            }
+        }
+        return Ok(());
     }
 }

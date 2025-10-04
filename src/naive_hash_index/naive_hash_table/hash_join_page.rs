@@ -384,6 +384,11 @@ pub trait NaiveHashPage {
     fn chain_scan_into_vec(&self, results: &mut Vec<MvccEntry>);
     fn scan_delta_as_from(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>);
     fn scan_delta_as_to(&self, delta_map: &mut HashMap<Vec<u8>, RowDelta>);
+    fn chain_scan_key(
+        &self,
+        join_key: &[u8],
+        results: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), AccessMethodError>;
 }
 
 impl NaiveHashPage for Page {
@@ -735,5 +740,34 @@ impl NaiveHashPage for Page {
                 delta_map.insert(rec.pkey().to_vec(), row_delta);
             }
         }
+    }
+
+    fn chain_scan_key(
+        &self,
+        search_key: &[u8],
+        results: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), AccessMethodError> {
+        for slot_idx in 0..self.slot_count() {
+            let slot = self.unsafe_slot(slot_idx);
+
+            let slot_key_len = slot.key_size();
+            if slot_key_len != search_key.len() {
+                continue;
+            }
+            let prefix_len = std::cmp::min(SLOT_KEY_PREFIX_SIZE, slot_key_len);
+            let slot_prefix = &slot.key_prefix()[..prefix_len];
+            let input_prefix = &search_key[..prefix_len];
+            if slot_prefix != input_prefix {
+                continue;
+            }
+
+            // 2) If prefix matches, load the record
+            let rec = self.record_ref_from_slot(&slot);
+            if rec.key() == search_key {
+                let pkey = rec.pkey();
+                results.push((pkey.to_vec(), rec.val().to_vec()));
+            }
+        }
+        Ok(())
     }
 }

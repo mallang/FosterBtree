@@ -236,7 +236,7 @@ pub mod slot {
             }
         };
     }
-    
+
     #[cfg(feature = "remove_end_ts_in_no_repair")]
     define_slot_with_common!(Slot {
         start_ts: Timestamp,
@@ -263,10 +263,9 @@ pub mod slot {
                 )
                 .field("tx_id", &self.tx_id)
                 .field("start_ts", &self.start_ts)
-                
                 .field("val_size", &self.val_size)
                 .field("offset", &self.offset);
-                
+
             #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
             f.debug_struct("Slot").field("end_ts", &self.end_ts);
 
@@ -349,16 +348,24 @@ pub mod slot {
 
         pub fn end_ts(&self) -> Timestamp {
             #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
-            {return self.end_ts;}
+            {
+                return self.end_ts;
+            }
             #[cfg(feature = "remove_end_ts_in_no_repair")]
-            {return 0;}
+            {
+                return 0;
+            }
         }
 
         pub fn set_end_ts(&mut self, end_ts: Timestamp) {
             #[cfg(not(feature = "remove_end_ts_in_no_repair"))]
-            {self.end_ts = end_ts;}
+            {
+                self.end_ts = end_ts;
+            }
             #[cfg(feature = "remove_end_ts_in_no_repair")]
-            {return;}
+            {
+                return;
+            }
         }
 
         pub fn set_start_ts(&mut self, start_ts: Timestamp) {
@@ -524,7 +531,11 @@ pub trait HashJoinPage {
     ) -> Result<(), AccessMethodError>;
 
     fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
-    fn heap_get_no_repair(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
+    fn heap_get_no_repair(
+        &self,
+        pkey: &[u8],
+        ts: &Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError>;
     fn chain_get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError>;
     fn heap_get_read_repair(
         &self,
@@ -746,7 +757,11 @@ pub trait HashJoinPage {
 
     fn chain_scan_into_vec(&self, ts: Timestamp, results: &mut Vec<MvccEntry>);
     fn chain_scan_into_vec_ignore_ts(&self, results: &mut Vec<MvccEntry>);
-    fn heap_scan_unique_no_repair_into_best_candidates(&self, ts: Timestamp, best_candidates: &mut HashMap<Vec<u8>, MvccEntry>);
+    fn heap_scan_unique_no_repair_into_best_candidates(
+        &self,
+        ts: Timestamp,
+        best_candidates: &mut HashMap<Vec<u8>, MvccEntry>,
+    );
     fn chain_scan_delta_into(
         &self,
         from: Timestamp,
@@ -962,7 +977,11 @@ impl HashJoinPage for Page {
         ))
     }
 
-    fn heap_get_no_repair(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
+    fn heap_get_no_repair(
+        &self,
+        pkey: &[u8],
+        ts: &Timestamp,
+    ) -> Result<MvccEntry, AccessMethodError> {
         let mut best_candidate: Option<(usize, Timestamp)> = None;
 
         for i in 0..self.slot_count() {
@@ -1915,13 +1934,16 @@ impl HashJoinPage for Page {
         }
     }
 
-    fn heap_scan_unique_no_repair_into_best_candidates(&self, ts: Timestamp, best_candidates: &mut HashMap<Vec<u8>, MvccEntry>) {
+    fn heap_scan_unique_no_repair_into_best_candidates(
+        &self,
+        ts: Timestamp,
+        best_candidates: &mut HashMap<Vec<u8>, MvccEntry>,
+    ) {
         let slot_count = self.slot_count();
         for i in 0..slot_count {
             let slot = self.unsafe_slot(i);
 
-            if ts < slot.start_ts()
-            {
+            if ts < slot.start_ts() {
                 continue;
             }
 

@@ -234,4 +234,19 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
             None
         }
     }
+
+    pub fn scan_key_vec(
+        &self,
+        key: &[u8],
+        ts: Timestamp,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let tables = self.naivetables.borrow();
+        let mut result = vec![];
+        if let Some(table) = tables.get(&ts) {
+            table.scan_key_vec(key, &mut result).unwrap();
+            Ok(result)
+        } else {
+            Ok(vec![])
+        }
+    }
 }

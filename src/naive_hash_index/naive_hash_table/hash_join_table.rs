@@ -95,6 +95,18 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
         Ok(heap_chain.get_no_repair(pkey).unwrap_or(None))
     }
 
+    pub fn scan_key_vec(
+        &self,
+        key: &[u8],
+        results: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), AccessMethodError> {
+        let index = self.get_bucket_index(key);
+        let heap_chain = &self.bucket_entries[index];
+
+        heap_chain.chain_scan_key(key, results)?;
+        Ok(())
+    }
+
     fn get_bucket_index(&self, key: &[u8]) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);

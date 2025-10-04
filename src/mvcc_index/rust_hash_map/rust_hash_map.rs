@@ -245,7 +245,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
 
     fn scan_key(
         &self,
-        key: &Self::Key,
+        key: &[u8],
         ts: crate::prelude::Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         let table = self.table.read().unwrap();
@@ -263,7 +263,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for MvccRustHashMap {
     }
     fn scan_key_vec(
         &self,
-        key: &Self::Key,
+        key: &[u8],
         ts: crate::prelude::Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         let table = self.table.read().unwrap();

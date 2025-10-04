@@ -27,6 +27,7 @@ pub trait MultiVersionJoinTable {
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]);
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp);
     fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>>;
+    fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)>;
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp);
     fn mark_ts(&self, ts: u64);
     fn scan_delta(
@@ -56,6 +57,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         <Self as MvccIndex<_>>::insert(self, key.to_vec(), pkey.to_vec(), 0, 0, value.to_vec())
             .unwrap();
+    }
+
+    fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+        <Self as MvccIndex<_>>::scan_key_vec(&self, join_key, ts).unwrap()
     }
 
     fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
@@ -130,10 +135,14 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
 }
 
+// HEAP
 impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         <Self as MvccIndex<_>>::insert(self, key.to_vec(), pkey.to_vec(), 0, 0, value.to_vec())
             .unwrap();
+    }
+    fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+        <Self as MvccIndex<_>>::scan_key_vec(&self, join_key, ts).unwrap()
     }
 
     fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
@@ -218,6 +227,9 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
         TS PARTITION
 */
 impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
+    fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+        <Self as MvccIndex<_>>::scan_key_vec(&self, join_key, ts).unwrap()
+    }
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         <Self as MvccIndex<_>>::insert(self, key.to_vec(), pkey.to_vec(), 0, 0, value.to_vec())
             .unwrap();
@@ -306,6 +318,11 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn after_mark_ts(&self, ts: Timestamp) {}
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         NaiveMvHashTable::add_insert_rec_new(&self, key, pkey, value);
+    }
+
+    fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let a = NaiveMvHashTable::scan_key_vec(&self, join_key, ts).unwrap();
+        a
     }
 
     fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {

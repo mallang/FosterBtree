@@ -239,6 +239,32 @@ fn main() {
         cli.delta_count = Some(cli.scan_count);
     }
 
+    if cli.analytical_ratio.is_some() {
+        assert!(cli.txn_update_ratio.is_none());
+        assert!(cli.txn_probe_ratio.is_none());
+        assert!(cli.txn_scan_ratio.is_none());
+        assert!(cli.txn_delta_ratio.is_none());
+        let analytical_ratio = cli.analytical_ratio.unwrap();
+        cli.txn_update_ratio = Some(1.0 - analytical_ratio);
+        cli.txn_probe_ratio = Some(analytical_ratio * 0.4);
+        cli.txn_scan_ratio = Some(analytical_ratio * 0.4);
+        cli.txn_delta_ratio = Some(analytical_ratio * 0.2);
+    } else if cli.txn_scan_ratio.is_some() {
+        assert!(cli.txn_probe_ratio.is_some());
+        assert!(cli.txn_update_ratio.is_some());
+        assert!(cli.txn_delta_ratio.is_some());
+        let total = cli.txn_scan_ratio.unwrap()
+            + cli.txn_probe_ratio.unwrap()
+            + cli.txn_update_ratio.unwrap()
+            + cli.txn_delta_ratio.unwrap();
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "The sum of txn ratios must be 1.0, but got {}",
+            total
+        );
+    } else {
+        panic!("Either analytical-ratio or all of txn-update-ratio, txn-probe-ratio, txn-scan-ratio, txn-delta-ratio must be set");
+    }
 
     let mut bench = TxBench::new(cli.clone());
     bench.print_cli();

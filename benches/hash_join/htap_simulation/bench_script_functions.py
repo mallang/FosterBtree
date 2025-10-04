@@ -3,7 +3,6 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import re
-
 def parse_result(log_text, table_type):
     data = []
     repair_type = None
@@ -180,6 +179,79 @@ def prepare_plot_data(df):
 
     return color_map, repair_hatches, repair_types, table_types, unique_idx, x_labels, dict_labels
 
+# def draw_stack_bar(df, title1, classification):
+#     pivot_df = df.pivot_table(
+#         index=["table_type", "repair_type"],
+#         columns="tx_type",
+#         values="duration_ms",
+#         aggfunc="sum",
+#         fill_value=0
+#     )
+
+#     display(pivot_df)
+
+#     cols = pivot_df.columns.tolist()
+#     if "InitLoad" in cols:
+#         cols.remove("InitLoad")
+#         cols.append("InitLoad")
+#         pivot_df = pivot_df[cols]
+
+#     cols = pivot_df.columns.tolist()
+#     if "Update" in cols:
+#         cols.remove("Update")
+#         cols.append("Update")
+#         pivot_df = pivot_df[cols]
+
+#     cols = pivot_df.columns.tolist()
+#     if "GbgCollect" in cols:
+#         cols.remove("GbgCollect")
+#         cols.append("GbgCollect")
+#         pivot_df = pivot_df[cols]
+
+#     cols = pivot_df.columns.tolist()
+#     if "MarkTs" in cols:
+#         cols.remove("MarkTs")
+#         cols.append("MarkTs")
+#         pivot_df = pivot_df[cols]
+
+#     cols = pivot_df.columns.tolist()
+#     if "Probe" in cols:
+#         cols.remove("Probe")
+#         cols.append("Probe")
+#         pivot_df = pivot_df[cols]
+
+#     cols = pivot_df.columns.tolist()
+#     if "Scan" in cols:
+#         cols.remove("Scan")
+#         cols.append("Scan")
+#         pivot_df = pivot_df[cols]
+
+#     # 调整 DelSc 顺序
+#     cols = pivot_df.columns.tolist()
+#     if "DelSc" in cols:
+#         cols.remove("DelSc")
+#         cols.append("DelSc")
+#         pivot_df = pivot_df[cols]
+
+#     # 把 MultiIndex 转换成字符串：第一行 table_type，第二行 repair_type
+#     pivot_df.index = [f"{t}\n{r}" for t, r in pivot_df.index]
+
+#     # 画 stacked bar
+#     ax = pivot_df.plot(
+#         kind="bar",
+#         stacked=True,
+#         figsize=(10, 6)
+#     )
+
+#     plt.ylabel("Duration (ms)")
+#     plt.title(f"Stacked Duration ({title1} - {classification})")
+
+#     # 横着写 X 轴标签
+#     plt.xticks(rotation=0)
+
+#     plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
+#     plt.tight_layout()
+#     plt.show()
 def draw_stack_bar(df, title1, classification):
     pivot_df = df.pivot_table(
         index=["table_type", "repair_type"],
@@ -189,14 +261,15 @@ def draw_stack_bar(df, title1, classification):
         fill_value=0
     )
 
-    # 调整 DelSc 顺序
-    cols = pivot_df.columns.tolist()
-    if "DelSc" in cols:
-        cols.remove("DelSc")
-        cols.append("DelSc")
-        pivot_df = pivot_df[cols]
+    # === 调整顺序的逻辑，你已经写好了 ===
+    for col in ["InitLoad", "Update", "GbgCollect", "MarkTs", "Probe", "Scan", "DelSc"]:
+        cols = pivot_df.columns.tolist()
+        if col in cols:
+            cols.remove(col)
+            cols.append(col)
+            pivot_df = pivot_df[cols]
 
-    # 把 MultiIndex 转换成字符串：第一行 table_type，第二行 repair_type
+    # MultiIndex index 转换成字符串
     pivot_df.index = [f"{t}\n{r}" for t, r in pivot_df.index]
 
     # 画 stacked bar
@@ -208,11 +281,21 @@ def draw_stack_bar(df, title1, classification):
 
     plt.ylabel("Duration (ms)")
     plt.title(f"Stacked Duration ({title1} - {classification})")
-
-    # 横着写 X 轴标签
     plt.xticks(rotation=0)
 
-    plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
+    # === 保证 legend 跟 pivot_df.columns 一致 ===
+    handles, labels = ax.get_legend_handles_labels()
+    # order = pivot_df.columns.tolist()
+    order = pivot_df.columns.tolist()[::-1]
+    label_to_handle = dict(zip(labels, handles))
+    ax.legend(
+        [label_to_handle[l] for l in order],
+        order,
+        title="tx_type",
+        bbox_to_anchor=(1.05, 1),
+        loc="upper left"
+    )
+
     plt.tight_layout()
     plt.show()
 
@@ -300,3 +383,14 @@ def run_and_collect_space(bin_path, table_types, base_args, repeat):
         return final_df
     else:
         return pd.DataFrame()
+
+
+def display_all_txns(df):
+    filtered = df[(df["table_type"] == "heap") & (df["repair_type"] == "No Repair")]
+
+    # Group by tx_type and sum duration_ms
+    agg = filtered.groupby("tx_type").size().reset_index(name="count")
+
+    agg["percentage"] = agg["count"] / agg["count"].sum() * 100
+
+    display(agg)
