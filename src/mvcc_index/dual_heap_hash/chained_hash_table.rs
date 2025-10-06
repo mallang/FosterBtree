@@ -382,11 +382,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         key: &[u8],
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
-        let mut results = Vec::new();
-        for bucket in &self.bucket_entries {
-            bucket.scan_key_into(key, &ts, &mut results);
-        }
-        Ok(Box::new(results.into_iter()))
+        todo!()
     }
 
     fn scan_read_repair(
@@ -403,9 +399,11 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         let mut results = Vec::new();
-        for bucket in &self.bucket_entries {
-            bucket.scan_key_into(key, &ts, &mut results);
-        }
+        let index = self.get_bucket_index(key);
+        let second_table = &self.bucket_entries[index];
+    
+        second_table.scan_key_into(key, &ts, &mut results);
+
         Ok(results)
     }
 

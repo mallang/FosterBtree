@@ -6,7 +6,6 @@ use std::{
     time::Instant,
 };
 
-pub static GC_RATIO: AtomicUsize = AtomicUsize::new(4);
 
 use anyhow::Error;
 use fbtree::{mvcc_index::TxId, prelude::Timestamp};
@@ -357,6 +356,7 @@ impl TxBench {
         let all_ts = &self.read_ts_candidates[start_idx..];
 
         if all_ts.len() < 2 {
+            println!("gen failed!!!");
             return false;
         }
 
@@ -415,15 +415,11 @@ impl TxBench {
         probe_ratio: f64,
         scan_ratio: f64,
         delta_ratio: f64,
+        gc_ratio: f64,
         rng: &mut SmallRng,
     ) -> OperationType {
         let x: f64 = rng.gen_range(0.0..1.0); // uniform [0,1)
-        let threshold = GC_RATIO.load(std::sync::atomic::Ordering::Relaxed) as f64 / 100.0;
-        if x < threshold {
-            GC_RATIO.store(1, std::sync::atomic::Ordering::Relaxed);
-            return OperationType::GbgCollect;
-        }
-        let x: f64 = rng.gen_range(0.0..1.0); // uniform [0,1)
+        assert!((update_ratio + probe_ratio + scan_ratio + delta_ratio + gc_ratio - 1.0f64).abs() < 1e-6);
 
         if x < update_ratio {
             OperationType::Update
@@ -431,9 +427,41 @@ impl TxBench {
             OperationType::Probe
         } else if x < update_ratio + probe_ratio + scan_ratio {
             OperationType::Scan
-        } else {
+        } else if x < update_ratio + probe_ratio + scan_ratio + delta_ratio{
             OperationType::DeltaScan
+        } else {
+            OperationType::GbgCollect
         }
+    }
+
+    fn generate_tx_sequence(
+        txn_count: usize,
+        update_ratio: f64,
+        probe_ratio: f64,
+        scan_ratio: f64,
+        delta_ratio: f64,
+        gc_ratio: f64,
+        rng: &mut SmallRng,
+    ) -> Vec<OperationType> {
+        assert!((update_ratio + probe_ratio + scan_ratio + delta_ratio + gc_ratio - 1.0).abs() < 1e-6);
+
+        let mut ops = Vec::with_capacity(txn_count);
+
+        let update_n = (txn_count as f64 * update_ratio).round() as usize;
+        let probe_n = (txn_count as f64 * probe_ratio).round() as usize;
+        let delta_n = (txn_count as f64 * delta_ratio).round() as usize;
+        let gc_n = (txn_count as f64 * gc_ratio).round() as usize;
+        let scan_n = txn_count - update_n - probe_n - gc_n - delta_n;
+
+        ops.extend(std::iter::repeat(OperationType::Update).take(update_n));
+        ops.extend(std::iter::repeat(OperationType::Probe).take(probe_n));
+        ops.extend(std::iter::repeat(OperationType::Scan).take(scan_n));
+        ops.extend(std::iter::repeat(OperationType::DeltaScan).take(delta_n));
+        ops.extend(std::iter::repeat(OperationType::GbgCollect).take(gc_n));
+
+        ops.shuffle(rng);
+
+        ops
     }
 
     pub fn gen_random_txs(&mut self) {
@@ -444,18 +472,34 @@ impl TxBench {
 
         // load markts txn
         self.gen_mark_ts_txs();
+        
+        let update_count = (self.cli.update_ratio
+            * self.data_source.get_custoemr_vec().len() as f64)
+            as usize;
+        self.gen_update_tx(update_count);
+
+        self.gen_mark_ts_txs();
+
+        let update_count = (self.cli.update_ratio
+            * self.data_source.get_custoemr_vec().len() as f64)
+            as usize;
+        self.gen_update_tx(update_count);
+
+        self.gen_mark_ts_txs();
 
         // let mut beginning_update_count = 7;
         // let mut beginning_ts = 1;
-
-        for mut i in 0..self.cli.txn_count {
-            let tx_type = Self::choose_transaction(
-                self.cli.txn_update_ratio.unwrap(),
-                self.cli.txn_probe_ratio.unwrap(),
-                self.cli.txn_scan_ratio.unwrap(),
-                self.cli.txn_delta_ratio.unwrap(),
+        let ops = Self::generate_tx_sequence(
+            self.cli.txn_count, 
+            self.cli.txn_update_ratio.as_ref().unwrap().to_owned(),
+                self.cli.txn_probe_ratio.as_ref().unwrap().to_owned(),
+                self.cli.txn_scan_ratio.as_ref().unwrap().to_owned(),
+                self.cli.txn_delta_ratio.as_ref().unwrap().to_owned(),
+                self.cli.txn_gc_ratio.as_ref().unwrap().to_owned(),
                 &mut self.rng,
             );
+        for i in 0..ops.len() {
+            let tx_type = &ops[i];
 
             match tx_type {
                 OperationType::Update => {
@@ -476,10 +520,7 @@ impl TxBench {
                     self.gen_probe_tx(probe_count, probe_ts);
                 }
                 OperationType::DeltaScan => {
-                    if !self.gen_delta_scan_tx(0) {
-                        i -= 1;
-                        continue;
-                    }
+                    self.gen_delta_scan_tx(0);
                 }
                 OperationType::Scan => {
                     if self.rng.gen_bool(self.cli.scan_reuse_ratio) {
@@ -498,6 +539,7 @@ impl TxBench {
                 }
             }
         }
+
     }
 
     pub fn gen_gc_txs(&mut self) {

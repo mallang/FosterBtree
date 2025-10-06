@@ -54,6 +54,9 @@ pub struct Cli {
 
     #[arg(long = "txn-delta-ratio")]
     pub txn_delta_ratio: Option<f64>,
+    
+    #[arg(long = "txn-gc-ratio")]
+    pub txn_gc_ratio: Option<f64>,
 
     #[arg(long = "scan-reuse-ratio", default_value = "0.8")]
     pub scan_reuse_ratio: f64,

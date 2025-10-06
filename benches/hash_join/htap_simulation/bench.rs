@@ -238,14 +238,14 @@ fn main() {
     if cli.delta_count.is_none() {
         cli.delta_count = Some(cli.scan_count);
     }
-
+    assert!(!cli.txn_gc_ratio.is_none());
     if cli.analytical_ratio.is_some() {
         assert!(cli.txn_update_ratio.is_none());
         assert!(cli.txn_probe_ratio.is_none());
         assert!(cli.txn_scan_ratio.is_none());
         assert!(cli.txn_delta_ratio.is_none());
         let analytical_ratio = cli.analytical_ratio.unwrap();
-        cli.txn_update_ratio = Some(1.0 - analytical_ratio);
+        cli.txn_update_ratio = Some(1.0 - analytical_ratio - *cli.txn_gc_ratio.as_ref().unwrap());
         cli.txn_probe_ratio = Some(analytical_ratio * 0.4);
         cli.txn_scan_ratio = Some(analytical_ratio * 0.4);
         cli.txn_delta_ratio = Some(analytical_ratio * 0.2);
@@ -253,10 +253,11 @@ fn main() {
         assert!(cli.txn_probe_ratio.is_some());
         assert!(cli.txn_update_ratio.is_some());
         assert!(cli.txn_delta_ratio.is_some());
-        let total = cli.txn_scan_ratio.unwrap()
-            + cli.txn_probe_ratio.unwrap()
-            + cli.txn_update_ratio.unwrap()
-            + cli.txn_delta_ratio.unwrap();
+        let total = *cli.txn_scan_ratio.as_ref().unwrap()
+            + *cli.txn_probe_ratio.as_ref().unwrap()
+            + *cli.txn_update_ratio.as_ref().unwrap()
+            + *cli.txn_delta_ratio.as_ref().unwrap()
+            + *cli.txn_gc_ratio.as_ref().unwrap();
         assert!(
             (total - 1.0).abs() < 1e-6,
             "The sum of txn ratios must be 1.0, but got {}",
