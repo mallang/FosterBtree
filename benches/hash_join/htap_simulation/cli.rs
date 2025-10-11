@@ -60,4 +60,7 @@ pub struct Cli {
 
     #[arg(long = "scan-reuse-ratio", default_value = "0.8")]
     pub scan_reuse_ratio: f64,
+
+    #[arg(long = "analytical-uniform")]
+    pub analytical_uniform: Option<String>,
 }

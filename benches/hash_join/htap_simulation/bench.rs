@@ -245,10 +245,17 @@ fn main() {
         assert!(cli.txn_scan_ratio.is_none());
         assert!(cli.txn_delta_ratio.is_none());
         let analytical_ratio = cli.analytical_ratio.unwrap();
+
         cli.txn_update_ratio = Some(1.0 - analytical_ratio - *cli.txn_gc_ratio.as_ref().unwrap());
-        cli.txn_probe_ratio = Some(analytical_ratio * 0.4);
-        cli.txn_scan_ratio = Some(analytical_ratio * 0.4);
-        cli.txn_delta_ratio = Some(analytical_ratio * 0.2);
+        if cli.analytical_uniform.is_some() {
+            cli.txn_probe_ratio = Some(analytical_ratio * 0.33);
+            cli.txn_scan_ratio = Some(analytical_ratio * 0.33);
+            cli.txn_delta_ratio = Some(analytical_ratio * (1.0 - 0.66));
+        } else {
+            cli.txn_probe_ratio = Some(analytical_ratio * 0.4);
+            cli.txn_scan_ratio = Some(analytical_ratio * 0.4);
+            cli.txn_delta_ratio = Some(1.0 - analytical_ratio * 0.8);
+        }
     } else if cli.txn_scan_ratio.is_some() {
         assert!(cli.txn_probe_ratio.is_some());
         assert!(cli.txn_update_ratio.is_some());
