@@ -295,7 +295,7 @@ impl TxBench {
         let op = TxOperation::new(
             tx_id,
             tx_ts,
-            OperationType::Scan,
+            OperationType::HistoryScan,
             scan_ts,
             vec![],
             vec![],
@@ -304,7 +304,7 @@ impl TxBench {
         );
 
         ops.push(op);
-        let tx = Tx::new(OperationType::Scan, tx_id, tx_ts, ops);
+        let tx = Tx::new(OperationType::HistoryScan, tx_id, tx_ts, ops);
         self.txs.push(tx);
     }
 
@@ -316,7 +316,7 @@ impl TxBench {
         let op = TxOperation::new(
             tx_id,
             tx_ts,
-            OperationType::Scan,
+            OperationType::RecentScan,
             *scan_ts,
             vec![],
             vec![],
@@ -325,7 +325,7 @@ impl TxBench {
         );
 
         ops.push(op);
-        let tx = Tx::new(OperationType::Scan, tx_id, tx_ts, ops);
+        let tx = Tx::new(OperationType::RecentScan, tx_id, tx_ts, ops);
         self.txs.push(tx);
     }
 
@@ -473,19 +473,32 @@ impl TxBench {
         // load markts txn
         self.gen_mark_ts_txs();
         
-        let update_count = (self.cli.update_ratio
-            * self.data_source.get_custoemr_vec().len() as f64)
-            as usize;
-        self.gen_update_tx(update_count);
+        if self.cli.analytical_ratio.as_ref().unwrap().to_owned() < 0.91 {
+            let update_count = (self.cli.update_ratio
+                * self.data_source.get_custoemr_vec().len() as f64)
+                as usize;
+            self.gen_update_tx(update_count);
+        }
+        
 
         self.gen_mark_ts_txs();
-
-        let update_count = (self.cli.update_ratio
-            * self.data_source.get_custoemr_vec().len() as f64)
-            as usize;
-        self.gen_update_tx(update_count);
+        if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.02 {
+            self.gen_scan_txs_latest();
+        }
+        // self.gen_scan_txs_latest();
+        if self.cli.analytical_ratio.as_ref().unwrap().to_owned() < 0.91 {
+            let update_count = (self.cli.update_ratio
+                * self.data_source.get_custoemr_vec().len() as f64)
+                as usize;
+            self.gen_update_tx(update_count);
+        }
+        
 
         self.gen_mark_ts_txs();
+        if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.1 {
+            self.gen_scan_txs_history();
+        }
+        // self.gen_scan_txs_history();
 
         // let mut beginning_update_count = 7;
         // let mut beginning_ts = 1;
@@ -611,7 +624,7 @@ impl TxBench {
             OperationType::UpdateWR => {
                 panic!("should not exist");
             }
-            OperationType::Scan => {
+            OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
                     let iter = hash_join_table.scan(op.read_ts, false).unwrap();
@@ -664,7 +677,7 @@ impl TxBench {
             OperationType::UpdateWR => {
                 panic!();
             }
-            OperationType::Scan => {
+            OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                 println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
             }
             OperationType::GbgCollect => {
@@ -724,7 +737,7 @@ impl TxBench {
             OperationType::UpdateWR => {
                 panic!("should not exist");
             }
-            OperationType::Scan => {
+            OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
                     let iter = hash_join_table.scan(op.read_ts, true).unwrap();
@@ -777,7 +790,7 @@ impl TxBench {
             OperationType::UpdateWR => {
                 panic!();
             }
-            OperationType::Scan => {
+            OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                 println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
             }
             OperationType::GbgCollect => {
@@ -841,7 +854,7 @@ impl TxBench {
             OperationType::UpdateWR => {
                 panic!("should not exist");
             }
-            OperationType::Scan => {
+            OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                 assert_eq!(tx.ops.len(), 1);
                 for op in &tx.ops {
                     let iter = hash_join_table.scan(op.read_ts, false).unwrap();
@@ -894,7 +907,7 @@ impl TxBench {
             OperationType::UpdateWR => {
                 panic!();
             }
-            OperationType::Scan => {
+            OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                 println!("Scan read_ts: {:?}", tx.ops[0].read_ts);
             }
             OperationType::GbgCollect => {
@@ -964,6 +977,8 @@ impl TxBench {
         println!("Transactions Probe ratio: {:?}", cli.txn_probe_ratio);
         println!("Transactions Scan ratio: {:?}", cli.txn_scan_ratio);
         println!("Transactions Delta Scan ratio: {:?}", cli.txn_delta_ratio);
+        println!("Transactions GC ratio: {:?}", cli.txn_gc_ratio);
+        println!("Transactions Scan Reuse ratio: {:?}", cli.scan_reuse_ratio);
         println!("-----------------------------------------------------------------------");
         println!();
         println!();
@@ -1009,7 +1024,7 @@ impl TxBench {
                 OperationType::UpdateWR => {
                     panic!();
                 }
-                OperationType::Scan => {
+                OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                     println!("Scan at ts: {:?}", tx.ops[0].read_ts);
                 }
                 OperationType::GbgCollect => {
@@ -1034,7 +1049,7 @@ impl TxBench {
                         tx.ops[0].delta_scan_ts.0, tx.ops[0].delta_scan_ts.1
                     );
                 }
-                OperationType::Scan => {
+                OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
                     println!("Scan at ts: {:?}", tx.ops[0].read_ts);
                 }
                 _ => {

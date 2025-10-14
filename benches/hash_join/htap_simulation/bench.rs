@@ -234,42 +234,55 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
 fn main() {
     let mut cli = Cli::parse();
 
-    // if delta_count is empty, set it to scan_count
-    if cli.delta_count.is_none() {
-        cli.delta_count = Some(cli.scan_count);
-    }
+
     assert!(!cli.txn_gc_ratio.is_none());
     if cli.analytical_ratio.is_some() {
         assert!(cli.txn_update_ratio.is_none());
         assert!(cli.txn_probe_ratio.is_none());
         assert!(cli.txn_scan_ratio.is_none());
         assert!(cli.txn_delta_ratio.is_none());
-        let analytical_ratio = cli.analytical_ratio.unwrap();
+        let analytical_ratio = *cli.analytical_ratio.as_ref().unwrap();
+        let gc_ratio = *cli.txn_gc_ratio.as_ref().unwrap();
+        let update_and_analytical = 1.0 - gc_ratio;
 
-        cli.txn_update_ratio = Some(1.0 - analytical_ratio - *cli.txn_gc_ratio.as_ref().unwrap());
+        cli.txn_update_ratio = Some(update_and_analytical * (1.0 - analytical_ratio));
+
+        let real_analytical_ratio = update_and_analytical * analytical_ratio;
         if cli.analytical_uniform.is_some() {
-            cli.txn_probe_ratio = Some(analytical_ratio * 0.33);
-            cli.txn_scan_ratio = Some(analytical_ratio * 0.33);
-            cli.txn_delta_ratio = Some(analytical_ratio * (1.0 - 0.66));
+            cli.txn_probe_ratio = Some(real_analytical_ratio * 0.25);
+            cli.txn_scan_ratio = Some(real_analytical_ratio * 0.50);
+            cli.txn_delta_ratio = Some(real_analytical_ratio * (1.0 - 0.75));
         } else {
-            cli.txn_probe_ratio = Some(analytical_ratio * 0.4);
-            cli.txn_scan_ratio = Some(analytical_ratio * 0.4);
-            cli.txn_delta_ratio = Some(1.0 - analytical_ratio * 0.8);
+            cli.txn_probe_ratio = Some(real_analytical_ratio * 0.4);
+            cli.txn_scan_ratio = Some(real_analytical_ratio * 0.4);
+            cli.txn_delta_ratio = Some(real_analytical_ratio * (1.0 - 0.8));
         }
     } else if cli.txn_scan_ratio.is_some() {
         assert!(cli.txn_probe_ratio.is_some());
         assert!(cli.txn_update_ratio.is_some());
         assert!(cli.txn_delta_ratio.is_some());
+        assert!(cli.txn_gc_ratio.is_some());
         let total = *cli.txn_scan_ratio.as_ref().unwrap()
             + *cli.txn_probe_ratio.as_ref().unwrap()
             + *cli.txn_update_ratio.as_ref().unwrap()
-            + *cli.txn_delta_ratio.as_ref().unwrap()
-            + *cli.txn_gc_ratio.as_ref().unwrap();
+            + *cli.txn_delta_ratio.as_ref().unwrap();
         assert!(
             (total - 1.0).abs() < 1e-6,
             "The sum of txn ratios must be 1.0, but got {}",
             total
         );
+        let gc_ratio = *cli.txn_gc_ratio.as_ref().unwrap();
+        let update_ratio = *cli.txn_update_ratio.as_ref().unwrap();
+        let scan_ratio = *cli.txn_scan_ratio.as_ref().unwrap();
+        let delta_ratio = *cli.txn_delta_ratio.as_ref().unwrap();
+        let probe_ratio = *cli.txn_probe_ratio.as_ref().unwrap();
+        let analytical_and_update = 1.0 - gc_ratio;
+
+        cli.analytical_ratio = Some(analytical_and_update * (1.0 - update_ratio));
+        cli.txn_update_ratio = Some(analytical_and_update * update_ratio);
+        cli.txn_scan_ratio = Some(analytical_and_update * scan_ratio);
+        cli.txn_delta_ratio = Some(analytical_and_update * delta_ratio);
+        cli.txn_probe_ratio = Some(analytical_and_update * probe_ratio);
     } else {
         panic!("Either analytical-ratio or all of txn-update-ratio, txn-probe-ratio, txn-scan-ratio, txn-delta-ratio must be set");
     }

@@ -21,6 +21,8 @@ pub enum OperationType {
     Scan,
     GbgCollect,
     Probe,
+    RecentScan,
+    HistoryScan,
 }
 
 pub trait MultiVersionJoinTable {

@@ -179,79 +179,6 @@ def prepare_plot_data(df):
 
     return color_map, repair_hatches, repair_types, table_types, unique_idx, x_labels, dict_labels
 
-# def draw_stack_bar(df, title1, classification):
-#     pivot_df = df.pivot_table(
-#         index=["table_type", "repair_type"],
-#         columns="tx_type",
-#         values="duration_ms",
-#         aggfunc="sum",
-#         fill_value=0
-#     )
-
-#     display(pivot_df)
-
-#     cols = pivot_df.columns.tolist()
-#     if "InitLoad" in cols:
-#         cols.remove("InitLoad")
-#         cols.append("InitLoad")
-#         pivot_df = pivot_df[cols]
-
-#     cols = pivot_df.columns.tolist()
-#     if "Update" in cols:
-#         cols.remove("Update")
-#         cols.append("Update")
-#         pivot_df = pivot_df[cols]
-
-#     cols = pivot_df.columns.tolist()
-#     if "GbgCollect" in cols:
-#         cols.remove("GbgCollect")
-#         cols.append("GbgCollect")
-#         pivot_df = pivot_df[cols]
-
-#     cols = pivot_df.columns.tolist()
-#     if "MarkTs" in cols:
-#         cols.remove("MarkTs")
-#         cols.append("MarkTs")
-#         pivot_df = pivot_df[cols]
-
-#     cols = pivot_df.columns.tolist()
-#     if "Probe" in cols:
-#         cols.remove("Probe")
-#         cols.append("Probe")
-#         pivot_df = pivot_df[cols]
-
-#     cols = pivot_df.columns.tolist()
-#     if "Scan" in cols:
-#         cols.remove("Scan")
-#         cols.append("Scan")
-#         pivot_df = pivot_df[cols]
-
-#     # 调整 DelSc 顺序
-#     cols = pivot_df.columns.tolist()
-#     if "DelSc" in cols:
-#         cols.remove("DelSc")
-#         cols.append("DelSc")
-#         pivot_df = pivot_df[cols]
-
-#     # 把 MultiIndex 转换成字符串：第一行 table_type，第二行 repair_type
-#     pivot_df.index = [f"{t}\n{r}" for t, r in pivot_df.index]
-
-#     # 画 stacked bar
-#     ax = pivot_df.plot(
-#         kind="bar",
-#         stacked=True,
-#         figsize=(10, 6)
-#     )
-
-#     plt.ylabel("Duration (ms)")
-#     plt.title(f"Stacked Duration ({title1} - {classification})")
-
-#     # 横着写 X 轴标签
-#     plt.xticks(rotation=0)
-
-#     plt.legend(title="tx_type", bbox_to_anchor=(1.05, 1), loc="upper left")
-#     plt.tight_layout()
-#     plt.show()
 def draw_stack_bar(df, title1, classification):
     pivot_df = df.pivot_table(
         index=["table_type", "repair_type"],
@@ -261,7 +188,6 @@ def draw_stack_bar(df, title1, classification):
         fill_value=0
     )
 
-    # === 调整顺序的逻辑，你已经写好了 ===
     for col in ["InitLoad", "Update", "GbgCollect", "MarkTs", "Probe", "Scan", "DelSc"]:
         cols = pivot_df.columns.tolist()
         if col in cols:
@@ -269,10 +195,9 @@ def draw_stack_bar(df, title1, classification):
             cols.append(col)
             pivot_df = pivot_df[cols]
 
-    # MultiIndex index 转换成字符串
     pivot_df.index = [f"{t}\n{r}" for t, r in pivot_df.index]
 
-    # 画 stacked bar
+    # stacked bar
     ax = pivot_df.plot(
         kind="bar",
         stacked=True,
@@ -283,9 +208,8 @@ def draw_stack_bar(df, title1, classification):
     plt.title(f"Stacked Duration ({title1} - {classification})")
     plt.xticks(rotation=0)
 
-    # === 保证 legend 跟 pivot_df.columns 一致 ===
     handles, labels = ax.get_legend_handles_labels()
-    # order = pivot_df.columns.tolist()
+
     order = pivot_df.columns.tolist()[::-1]
     label_to_handle = dict(zip(labels, handles))
     ax.legend(
@@ -301,6 +225,12 @@ def draw_stack_bar(df, title1, classification):
 
 
 def parse_result_space(log_text, table_type):
+    transalte_dict = {
+        "heap": "MONO",
+        "naive": "SNAP",
+        "par": "EPOCH",
+        "chain": "DUAL"
+    }
     data = []
     repair_type = None
     no_repair_run_count = 0
@@ -331,7 +261,7 @@ def parse_result_space(log_text, table_type):
             print("total_space:", total_space)
             print("all_versions_space:", all_versions_space)
             print("valid_space:", valid_space)
-            
+            table_type = transalte_dict[table_type]
             data.append({
                 'table_type': table_type,
                 'repair_type': repair_type,
@@ -344,6 +274,7 @@ def parse_result_space(log_text, table_type):
 
 def run_and_collect_space(bin_path, table_types, base_args, repeat):
     all_dfs = []
+    do_once_flag = True
     for table_type in table_types:
         print(f"Running for table_type={table_type} with {repeat} repeats...")
         dfs = []
@@ -359,6 +290,11 @@ def run_and_collect_space(bin_path, table_types, base_args, repeat):
                 stderr = subprocess.PIPE,
                 text=True,
             )
+
+            if do_once_flag and table_type == "heap":
+                df_once = parse_result(result.stdout, table_type)
+                display_all_txns(df_once)
+                do_once_flag = False
 
             print(result.stdout)
             df = parse_result_space(result.stdout, table_type)
@@ -394,3 +330,52 @@ def display_all_txns(df):
     agg["percentage"] = agg["count"] / agg["count"].sum() * 100
 
     display(agg)
+
+def plot_stack_bar_chart(df, title):
+    color_map, repair_hatches, repair_types, table_types, unique_idx, x_labels, dict_labels = prepare_plot_data(df)
+
+    groups = []
+    for table_type in table_types:
+        if table_type in ["chain", "naive"]:
+            groups.append((table_type, "Write Repair"))
+        else:
+            for repair_type in repair_types:
+                groups.append((table_type, repair_type))
+
+    print(groups)
+    type_and_durations = []
+    for i, (table_type, repair_type) in enumerate(groups):
+        if table_type in ["chain", "naive"] and repair_type != "Write Repair":
+            continue
+
+        df_group = df[(df['table_type'] == table_type) & (df['repair_type'] == repair_type)]
+
+        scan_count = 0
+
+        for idx in unique_idx:
+            df_row = df_group[df_group['idx'] == idx]
+            duration = df_row['duration_ms'].values[0] if not df_row.empty else 0
+            label = dict_labels[idx]
+            cur_tx_type = label['tx_type']
+
+            # line = {"table_type": table_type, "repair_type": repair_type, "duration_ms":duration, "tx_type": cur_tx_type, "idx": label["idx"], "optional": label["optional"] }
+            line = {"table_type": table_type, "repair_type": repair_type, "duration_ms":duration, "tx_type": cur_tx_type, "idx": label["idx"], "optional": label["optional"] }
+            type_and_durations.append(line)
+    # print(type_and_durations)
+    df = pd.DataFrame(type_and_durations)
+    filtered = df[(df["table_type"] == "heap") & (df["repair_type"] == "No Repair")]
+
+    # Group by tx_type and sum duration_ms
+    agg = filtered.groupby("tx_type").size().reset_index(name="count")
+    display(agg)
+    result = (
+        df.groupby(["table_type", "repair_type", "tx_type"], as_index=False)
+        .agg(duration_ms=("duration_ms", lambda x: x.sum())) #  if x.name[2] == "Update" or x.name[2] == "Probe" else x.mean()
+    )
+    display(result)
+
+    draw_stack_bar(result, title,  "All Types")
+
+    agg.to_csv(f'output/{title}_wkld.csv', index=False)
+    result.to_csv(f'output/{title}_result.csv', index=False)
+
