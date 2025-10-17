@@ -176,6 +176,8 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         let mut res = vec![];
         if let Some(entry) = tables.get(&ts) {
             res.extend(entry.scan().unwrap())
+        } else {
+            res.extend(tables.iter().last().as_ref().unwrap().1.scan().unwrap())
         }
         Ok(Box::new(res.into_iter()))
     }
