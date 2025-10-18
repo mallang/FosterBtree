@@ -1,7 +1,7 @@
 /target
 log*
 .DS_Store
-output/
+*.pdf
 benches/hash_join/csv/
 venv/
 *archive

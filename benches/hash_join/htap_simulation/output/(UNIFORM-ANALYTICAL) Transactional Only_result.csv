@@ -1,0 +1,17 @@
+table_type,repair_type,tx_type,duration_ms
+chain,Write Repair,InitLoad,756.927246
+chain,Write Repair,Update,8143.795665
+heap,No Repair,InitLoad,1173.291843
+heap,No Repair,Update,239.76013200000003
+heap,Read Repair,InitLoad,1165.45322
+heap,Read Repair,Update,243.895173
+heap,Write Repair,InitLoad,1161.7849330000001
+heap,Write Repair,Update,8808.039357
+naive,Write Repair,InitLoad,1227.194009
+naive,Write Repair,Update,223.39069199999997
+par,No Repair,InitLoad,1223.0314680000001
+par,No Repair,Update,247.641019
+par,Read Repair,InitLoad,1215.1278519999998
+par,Read Repair,Update,246.937282
+par,Write Repair,InitLoad,1223.663444
+par,Write Repair,Update,8892.806257
