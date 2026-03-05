@@ -148,9 +148,11 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         self.recent_chain
             .chain_scan_key(search_key, ts, res)
             .unwrap();
-        self.history_chain
-            .chain_scan_key(search_key, ts, res)
-            .unwrap();
+        if !self.history_chain.is_empty() {
+            self.history_chain
+                .chain_scan_key(search_key, ts, res)
+                .unwrap();
+        }
     }
 
     pub fn scan_into_vec(
@@ -159,7 +161,9 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         self.recent_chain.chain_scan_into_vec(ts, results)?;
-        self.history_chain.chain_scan_into_vec(ts, results)?;
+        if !self.history_chain.is_empty() {
+            self.history_chain.chain_scan_into_vec(ts, results)?;
+        }
         Ok(())
     }
 

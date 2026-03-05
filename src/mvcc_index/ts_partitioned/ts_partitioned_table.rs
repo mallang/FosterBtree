@@ -8,11 +8,12 @@ use crate::{
     prelude::{AccessMethodError, Timestamp},
 };
 use std::{
+    cell::UnsafeCell,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, RwLock,
+        Arc,
     },
 };
 
@@ -23,7 +24,7 @@ pub struct TsPartitionedTable<T: MemPool + 'static> {
     mem_pool: Arc<T>,
 
     bucket_count: usize,
-    bucket_entries: Vec<Arc<RwLock<TimestampPartitionCollection<T>>>>,
+    bucket_entries: Vec<UnsafeCell<TimestampPartitionCollection<T>>>,
     // read repair
     read_repair_ts: AtomicU64,
     latest_update_ts: AtomicU64,
@@ -34,10 +35,22 @@ pub struct TsPartitionedTable<T: MemPool + 'static> {
     is_write_repair: AtomicBool,
 }
 
+// SAFETY: split_at_ts is called between phases, never concurrent with reads.
+// All read paths use shared references only.
+unsafe impl<T: MemPool + 'static> Sync for TsPartitionedTable<T> {}
+unsafe impl<T: MemPool + 'static> Send for TsPartitionedTable<T> {}
+
 impl<T: MemPool + 'static> TsPartitionedTable<T> {
+    /// Zero-cost access to a bucket (no locking).
+    #[inline]
+    fn bucket(&self, idx: usize) -> &TimestampPartitionCollection<T> {
+        unsafe { &*self.bucket_entries[idx].get() }
+    }
+
     pub fn split_at_ts(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
         for bucket in &self.bucket_entries {
-            bucket.write().unwrap().split_last_partition_at(ts)?;
+            // SAFETY: split_at_ts is called between phases, never concurrent with reads.
+            unsafe { &mut *bucket.get() }.split_last_partition_at(ts)?;
         }
         Ok(())
     }
@@ -50,9 +63,9 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     /// Creates a new hash join table with a specified number of buckets.
     pub fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
         let mut bucket_entries = Vec::with_capacity(num_buckets);
-        for i in 0..num_buckets {
+        for _i in 0..num_buckets {
             let second_table = TimestampPartitionCollection::new(c_key, mem_pool.clone());
-            bucket_entries.push(Arc::new(RwLock::new(second_table)));
+            bucket_entries.push(UnsafeCell::new(second_table));
         }
 
         Self {
@@ -70,12 +83,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     /// Inserts a key-value pair with new pkey into the hash join table.
     pub fn _insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(entry.key());
-        let ts_partitions = &self.bucket_entries[index];
-
-        ts_partitions
-            .read()
-            .unwrap()
-            .insert(entry.start_ts(), entry)
+        self.bucket(index).insert(entry.start_ts(), entry)
     }
 
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
@@ -86,9 +94,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         ts: &Timestamp,
     ) -> Result<MvccEntry, AccessMethodError> {
         let index = self.get_bucket_index(key);
-        let ts_partitions = &self.bucket_entries[index];
-
-        ts_partitions.read().unwrap().get_no_repair(pkey, *ts)
+        self.bucket(index).get_no_repair(pkey, *ts)
     }
 
     pub fn _get_read_repair(
@@ -98,21 +104,13 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<MvccEntry, AccessMethodError> {
         let index = self.get_bucket_index(key);
-        let ts_partitions = &self.bucket_entries[index];
-
-        ts_partitions.read().unwrap().get_read_repair(pkey, ts)
+        self.bucket(index).get_read_repair(pkey, ts)
     }
 
     /// Updates an existing key-value pair in the hash join table.
     fn _update(&self, key: &[u8], pkey: &[u8], entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(key);
-        let ts_partitions = &self.bucket_entries[index];
-
-        // TODO: (JUN) now assume key is not changed, need to handle key change later
-        ts_partitions
-            .read()
-            .unwrap()
-            .update(entry.start_ts(), entry)
+        self.bucket(index).update(entry.start_ts(), entry)
     }
 
     /// Updates an existing key-value pair in the hash join table.
@@ -123,20 +121,12 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         entry: &MvccEntry,
     ) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(key);
-        let ts_partitions = &self.bucket_entries[index];
-
-        // TODO: (JUN) now assume key is not changed, need to handle key change later
-        ts_partitions
-            .read()
-            .unwrap()
-            .update_write_repair(entry.start_ts(), entry)
+        self.bucket(index).update_write_repair(entry.start_ts(), entry)
     }
 
     fn _bulk_update(&self) -> Result<(), AccessMethodError> {
         for (idx, bulk_repair) in self.bulk_update.get_updated_pkeys().iter_mut().enumerate() {
-            let bucket = &self.bucket_entries[idx];
-            let partition_collection = bucket.read().unwrap();
-            // let mut idx = 0;
+            let partition_collection = self.bucket(idx);
             for p in partition_collection.partitions().iter() {
                 p.chain().heap_bulk_update_collect(bulk_repair)?;
             }
@@ -157,10 +147,7 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         ts: &Timestamp,
     ) -> Result<(), AccessMethodError> {
         let index = self.get_bucket_index(key);
-        let ts_partitions = &self.bucket_entries[index];
-
-        // TODO: (JUN) now assume key is not changed, need to handle key change later
-        ts_partitions.read().unwrap().delete(*ts, pkey)
+        self.bucket(index).delete(*ts, pkey)
     }
 
     fn get_bucket_index(&self, key: &[u8]) -> usize {
@@ -171,8 +158,8 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
 
     fn _scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut all_entries = Vec::new();
-        for bucket in &self.bucket_entries {
-            let entries = bucket.read().unwrap().scan_all()?;
+        for idx in 0..self.bucket_entries.len() {
+            let entries = self.bucket(idx).scan_all()?;
             all_entries.extend(entries);
         }
         Ok(all_entries)
@@ -202,7 +189,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
         let v = self._get(key, pkey, &ts).map_or(None, |e| {
-            // log_warn!("get entry: {:?}", e);
             if e.value().is_empty() {
                 None
             } else {
@@ -218,7 +204,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<Option<Self::Value>, Self::Error> {
         let v = self._get_read_repair(key, pkey, ts).map_or(None, |e| {
-            // log_warn!("get entry: {:?}", e);
             if e.value().is_empty() {
                 None
             } else {
@@ -268,9 +253,6 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
         tx_id: TxId,
     ) -> Result<(), Self::Error> {
-        // let entry =
-        //     MvccEntry::new_with_tx_id(key.to_vec(), pkey.to_vec(), vec![], ts, u64::MAX, tx_id);
-        // self._insert(&entry)
         unimplemented!("delete is not implemented yet")
     }
 
@@ -283,8 +265,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Self::Error,
     > {
         let mut all_entries = Vec::new();
-        for bucket in &self.bucket_entries {
-            let entries = bucket.read().unwrap().scan_delta(from_ts, to_ts);
+        for idx in 0..self.bucket_entries.len() {
+            let entries = self.bucket(idx).scan_delta(from_ts, to_ts);
             all_entries.extend(entries);
         }
         Ok(Box::new(all_entries.into_iter()))
@@ -309,16 +291,12 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         };
 
         let mut all_entries = Vec::new();
-        for bucket in &self.bucket_entries {
+        for idx in 0..self.bucket_entries.len() {
             let entries = if is_need_repair {
-                bucket
-                    .read()
-                    .unwrap()
-                    .scan_delta_read_repair(from_ts, to_ts)
+                self.bucket(idx).scan_delta_read_repair(from_ts, to_ts)
             } else {
-                bucket.read().unwrap().scan_delta(from_ts, to_ts)
+                self.bucket(idx).scan_delta(from_ts, to_ts)
             };
-
             all_entries.extend(entries);
         }
         Ok(Box::new(all_entries.into_iter()))
@@ -331,35 +309,27 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     {
         let mut result = vec![];
         let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
-        for bucket in &self.bucket_entries {
-            let partition_collection = bucket.read().unwrap();
+        for idx in 0..self.bucket_entries.len() {
+            let partition_collection = self.bucket(idx);
             if self.is_write_repair.load(Ordering::SeqCst) {
                 // write repair -> no need to use map to track best candidates
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 {
+                    if ts >= p.get_range().0 && !p.chain().is_empty() {
                         p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
-                    } else {
-                        // println!("skip partition: {:?}, ts: {}", p.get_range(), ts);
                     }
                 }
             } else if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
                 // read repair ts > scan_ts -> no need ...
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 {
+                    if ts >= p.get_range().0 && !p.chain().is_empty() {
                         p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
-                    } else {
-                        // println!("skip partition: {:?}, ts: {}", p.get_range(), ts);
                     }
                 }
             } else {
                 let mut best_candidates = HashMap::new();
-                // let mut idx = 0;
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 {
-                        // println!("scan partition: {:?}, ts: {}", p.get_range(), ts);
+                    if ts >= p.get_range().0 && !p.chain().is_empty() {
                         p.chain().scan_unique(ts, &mut best_candidates).unwrap();
-                    } else {
-                        // println!("skip partition: {:?}, ts: {}", p.get_range(), ts);
                     }
                 }
 
@@ -388,12 +358,12 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         Ok(if is_need_repair {
             Box::new({
                 let mut result = vec![];
-                for bucket in &self.bucket_entries {
-                    let partition_collection = bucket.read().unwrap();
+                for idx in 0..self.bucket_entries.len() {
+                    let partition_collection = self.bucket(idx);
                     let mut best_candidates = HashMap::new();
                     let mut versions_map = HashMap::new();
                     for p in partition_collection.partitions().iter() {
-                        if ts >= p.get_range().0 {
+                        if ts >= p.get_range().0 && !p.chain().is_empty() {
                             p.chain()
                                 .scan_unique_read_repair(
                                     ts,
@@ -424,9 +394,21 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Self::PKey, Self::Value)> + Send>, Self::Error> {
         let idx = self.get_bucket_index(key);
-        let partitions = &self.bucket_entries[idx];
+        let partitions = self.bucket(idx);
 
-        let mvccs = partitions.read().unwrap().scan_with_key(ts, key)?;
+        let mvccs = if self.is_write_repair.load(Ordering::SeqCst) {
+            // write repair done → no dedup needed, use vector-based fast path
+            partitions.scan_with_key_write_repair(ts, key)?
+        } else {
+            let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+            if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
+                // read repair completed for this ts → same fast path
+                partitions.scan_with_key_write_repair(ts, key)?
+            } else {
+                // no repair → need HashMap dedup
+                partitions.scan_with_key(ts, key)?
+            }
+        };
 
         Ok(Box::new(mvccs.into_iter()))
     }
@@ -454,15 +436,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
             false
         };
         let idx = self.get_bucket_index(key);
-        let partitions = &self.bucket_entries[idx];
+        let partitions = self.bucket(idx);
 
         let mvccs = if is_need_repair {
-            partitions
-                .read()
-                .unwrap()
-                .scan_with_key_read_repair(ts, key)?
+            partitions.scan_with_key_read_repair(ts, key)?
+        } else if self.is_write_repair.load(Ordering::SeqCst)
+            || repair_ts >= ts.min(latest_update_ts)
+        {
+            // repair already done → no dedup needed
+            partitions.scan_with_key_write_repair(ts, key)?
         } else {
-            partitions.read().unwrap().scan_with_key(ts, key)?
+            partitions.scan_with_key(ts, key)?
         };
         Ok(mvccs)
     }
@@ -472,8 +456,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
     }
 
     fn garbage_collect(&self, safe_ts: Timestamp) -> Result<(), Self::Error> {
-        for chain_bucket in &self.bucket_entries {
-            chain_bucket.read().unwrap().garbage_collect(safe_ts)?;
+        for idx in 0..self.bucket_entries.len() {
+            self.bucket(idx).garbage_collect(safe_ts)?;
         }
         Ok(())
     }
@@ -515,8 +499,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
 
     fn collect_space_stat(&self) -> StatCollector {
         let mut stat = StatCollector::new();
-        for bucket in &self.bucket_entries {
-            bucket.read().unwrap().collect_space_stat(&mut stat);
+        for idx in 0..self.bucket_entries.len() {
+            self.bucket(idx).collect_space_stat(&mut stat);
         }
 
         let max_ts = self.latest_update_ts.load(Ordering::Relaxed);

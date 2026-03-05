@@ -35,6 +35,9 @@ pub struct HeapHashChain<T: MemPool> {
 
     last_page_id: AtomicU32,
     last_frame_id: AtomicU32,
+
+    /// Number of entries in this chain (used for fast is_empty check).
+    entry_count: AtomicU64,
 }
 
 impl<T: MemPool + 'static> HeapHashChain<T> {
@@ -114,7 +117,14 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             first_frame_id: AtomicU32::new(first_frame_id),
             last_page_id: AtomicU32::new(first_page_id),
             last_frame_id: AtomicU32::new(first_frame_id),
+            entry_count: AtomicU64::new(0),
         }
+    }
+
+    /// Returns true if this chain has never had any entries inserted.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entry_count.load(Ordering::Acquire) == 0
     }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
@@ -140,6 +150,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                     self.last_frame_id
                         .store(last_page.frame_id(), Ordering::Release);
                 }
+                self.entry_count.fetch_add(1, Ordering::Release);
                 Ok(())
             }
             Err(AccessMethodError::OutOfSpace) => {
@@ -160,7 +171,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                 self.last_frame_id
                     .store(new_page.frame_id(), Ordering::Release);
                 match new_page.upsert_history(&rec, entry.start_ts(), entry.end_ts()) {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        self.entry_count.fetch_add(1, Ordering::Release);
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -191,6 +205,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                     self.last_frame_id
                         .store(last_page.frame_id(), Ordering::Release);
                 }
+                self.entry_count.fetch_add(1, Ordering::Release);
                 Ok(())
             }
             Err(AccessMethodError::OutOfSpace) => {
@@ -211,7 +226,10 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                 self.last_frame_id
                     .store(new_page.frame_id(), Ordering::Release);
                 match new_page.upsert_history(&rec, entry.start_ts(), entry.end_ts()) {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        self.entry_count.fetch_add(1, Ordering::Release);
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 }
             }

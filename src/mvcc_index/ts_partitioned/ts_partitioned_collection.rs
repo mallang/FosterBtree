@@ -197,7 +197,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let mut best_candidates = HashMap::new();
         for p in self.partitions.iter() {
-            if ts >= p.range.0 {
+            if ts >= p.range.0 && !p.chain.is_empty() {
                 let partition_scanner = p.chain.scan_key_vec_read_repair(key, &ts, None)?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
@@ -209,6 +209,23 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         Ok(best_candidates.into_iter().collect())
     }
 
+    /// Fast path for single-key lookup after write repair (or read repair completion).
+    /// Since repair guarantees at most one valid version per pkey at a given ts,
+    /// we can skip HashMap dedup and directly collect into a Vec.
+    pub fn scan_with_key_write_repair(
+        &self,
+        ts: Timestamp,
+        key: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let mut result = Vec::new();
+        for p in self.partitions.iter() {
+            if ts >= p.range.0 && !p.chain.is_empty() {
+                p.chain.chain_scan_key(key, &ts, &mut result)?;
+            }
+        }
+        Ok(result)
+    }
+
     pub fn scan_with_key_read_repair(
         &self,
         ts: Timestamp,
@@ -218,7 +235,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         let mut versions_map = HashMap::new();
         // iterate in natural order
         for p in self.partitions.iter() {
-            if ts >= p.range.0 {
+            if ts >= p.range.0 && !p.chain.is_empty() {
                 let partition_scanner =
                     p.chain
                         .scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
