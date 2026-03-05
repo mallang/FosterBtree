@@ -60,9 +60,11 @@ impl<T: MemPool + 'static> HeapHashTable<T> {
         let meta_page_id = meta_page.get_id();
         let meta_frame_id = AtomicU32::new(meta_page.frame_id());
 
+        // Bulk-allocate all chain pages in one latch acquisition
+        let pages = mem_pool.create_new_pages_for_write(c_key, num_buckets).unwrap();
         let mut bucket_entries: Vec<Arc<HeapHashChain<T>>> = Vec::with_capacity(num_buckets);
-        for i in 0..num_buckets {
-            let heap_chain = HeapHashChain::new(c_key, mem_pool.clone());
+        for page in pages {
+            let heap_chain = HeapHashChain::new_from_page(c_key, mem_pool.clone(), page);
             bucket_entries.push(Arc::new(heap_chain));
         }
         drop(meta_page);

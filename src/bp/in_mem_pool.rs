@@ -93,6 +93,50 @@ impl MemPool for InMemPool {
         Ok(guard)
     }
 
+    fn create_new_pages_for_write(
+        &self,
+        c_key: ContainerKey,
+        count: usize,
+    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
+        self.exclusive();
+        let frames = unsafe { &mut *self.frames.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let container_page_count = unsafe { &mut *self.container_page_count.get() };
+
+        // Reserve capacity once
+        frames.reserve(count);
+        id_to_index.reserve(count);
+
+        let start_page_id = match container_page_count.entry(c_key) {
+            Entry::Occupied(mut entry) => {
+                let start = *entry.get();
+                *entry.get_mut() += count as u32;
+                start
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(count as u32);
+                0
+            }
+        };
+
+        let mut guards = Vec::with_capacity(count);
+        for i in 0..count {
+            let page_id = start_page_id + i as u32;
+            let page = Page::new(page_id);
+            let page_key = PageKey::new(c_key, page_id);
+            let frame_index = frames.len();
+            let frame = Box::new(BufferFrame::new(frame_index as u32));
+            frames.push(frame);
+            id_to_index.insert(page_key, frame_index);
+            let mut guard = frames.get(frame_index).unwrap().write(true);
+            guard.copy(&page);
+            *guard.page_key_mut() = Some(page_key);
+            guards.push(guard);
+        }
+        self.release_exclusive();
+        Ok(guards)
+    }
+
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.shared();
         let frames = unsafe { &*self.frames.get() };

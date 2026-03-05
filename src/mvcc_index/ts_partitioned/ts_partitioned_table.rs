@@ -48,9 +48,11 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     }
 
     pub fn split_at_ts(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
-        for bucket in &self.bucket_entries {
+        // Bulk-allocate pages for new partitions (one per bucket)
+        let pages = self.mem_pool.create_new_pages_for_write(self.c_key, self.bucket_entries.len()).unwrap();
+        for (bucket, page) in self.bucket_entries.iter().zip(pages) {
             // SAFETY: split_at_ts is called between phases, never concurrent with reads.
-            unsafe { &mut *bucket.get() }.split_last_partition_at(ts)?;
+            unsafe { &mut *bucket.get() }.split_last_partition_at_with_page(ts, page)?;
         }
         Ok(())
     }
@@ -62,9 +64,11 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
 
     /// Creates a new hash join table with a specified number of buckets.
     pub fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
+        // Bulk-allocate all chain pages in one latch acquisition
+        let pages = mem_pool.create_new_pages_for_write(c_key, num_buckets).unwrap();
         let mut bucket_entries = Vec::with_capacity(num_buckets);
-        for _i in 0..num_buckets {
-            let second_table = TimestampPartitionCollection::new(c_key, mem_pool.clone());
+        for page in pages {
+            let second_table = TimestampPartitionCollection::new_from_page(c_key, mem_pool.clone(), page);
             bucket_entries.push(UnsafeCell::new(second_table));
         }
 

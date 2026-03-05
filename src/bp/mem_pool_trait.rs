@@ -180,6 +180,21 @@ pub trait MemPool: Sync + Send {
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard, MemPoolStatus>;
 
+    /// Bulk-create `count` new pages for write under a single latch acquisition.
+    /// Returns a vector of FrameWriteGuards, one per page.
+    /// The default implementation simply calls `create_new_page_for_write` in a loop.
+    fn create_new_pages_for_write(
+        &self,
+        c_key: ContainerKey,
+        count: usize,
+    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
+        let mut guards = Vec::with_capacity(count);
+        for _ in 0..count {
+            guards.push(self.create_new_page_for_write(c_key)?);
+        }
+        Ok(guards)
+    }
+
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.

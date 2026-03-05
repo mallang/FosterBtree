@@ -121,6 +121,24 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         }
     }
 
+    /// Construct a chain from a pre-allocated page (bulk alloc path).
+    pub fn new_from_page(c_key: ContainerKey, mem_pool: Arc<T>, mut page: FrameWriteGuard) -> Self {
+        let first_page_id = page.get_id();
+        let first_frame_id = page.frame_id();
+        HashJoinPage::init(&mut *page);
+        drop(page);
+
+        Self {
+            mem_pool,
+            c_key,
+            first_page_id: AtomicU32::new(first_page_id),
+            first_frame_id: AtomicU32::new(first_frame_id),
+            last_page_id: AtomicU32::new(first_page_id),
+            last_frame_id: AtomicU32::new(first_frame_id),
+            entry_count: AtomicU64::new(0),
+        }
+    }
+
     /// Returns true if this chain has never had any entries inserted.
     #[inline]
     pub fn is_empty(&self) -> bool {

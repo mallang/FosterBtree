@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    bp::{ContainerKey, MemPool, PageFrameKey},
+    bp::{ContainerKey, FrameWriteGuard, MemPool, PageFrameKey},
     log_warn,
     mvcc_index::{
         hash_common::{
@@ -42,6 +42,14 @@ impl<T: MemPool + 'static> TimestampPartition<T> {
         }
     }
 
+    /// Construct from a pre-allocated page (bulk alloc path).
+    pub fn new_from_page(c_key: ContainerKey, mem_pool: Arc<T>, range: (Timestamp, Timestamp), page: FrameWriteGuard) -> Self {
+        Self {
+            range,
+            chain: Arc::new(HeapHashChain::new_from_page(c_key, mem_pool, page)),
+        }
+    }
+
     pub fn get_range(&self) -> &(Timestamp, Timestamp) {
         &self.range
     }
@@ -69,6 +77,21 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         }
     }
 
+    /// Construct from a pre-allocated page (bulk alloc path).
+    pub fn new_from_page(c_key: ContainerKey, mem_pool: Arc<T>, page: FrameWriteGuard) -> Self {
+        let partitions = vec![TimestampPartition::new_from_page(
+            c_key,
+            mem_pool.clone(),
+            (0, Timestamp::MAX),
+            page,
+        )];
+        Self {
+            mem_pool,
+            c_key,
+            partitions,
+        }
+    }
+
     pub fn partitions(&self) -> &Vec<TimestampPartition<T>> {
         &self.partitions
     }
@@ -78,15 +101,22 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         let last_partition = &mut self.partitions[last_idx];
         last_partition.set_max_start_ts(new_ts - 1);
 
-        // if &new_ts <= start || &new_ts >= end {
-        //     panic!(
-        //         "Invalid timestamp for partition split, start & end ts: ({} {}), new_ts: {}",
-        //         start, end, new_ts
-        //     );
-        // }
-
         let new_partition =
             TimestampPartition::new(self.c_key, self.mem_pool.clone(), (new_ts, Timestamp::MAX));
+
+        self.partitions.push(new_partition);
+
+        Ok(())
+    }
+
+    /// Split with a pre-allocated page (bulk alloc path).
+    pub fn split_last_partition_at_with_page(&mut self, new_ts: Timestamp, page: FrameWriteGuard) -> Result<(), AccessMethodError> {
+        let last_idx = self.partitions.len().saturating_sub(1);
+        let last_partition = &mut self.partitions[last_idx];
+        last_partition.set_max_start_ts(new_ts - 1);
+
+        let new_partition =
+            TimestampPartition::new_from_page(self.c_key, self.mem_pool.clone(), (new_ts, Timestamp::MAX), page);
 
         self.partitions.push(new_partition);
 

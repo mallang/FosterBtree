@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    bp::{ContainerKey, FrameReadGuard, MemPool, MemPoolStatus, PageFrameKey},
+    bp::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey},
     log_debug, log_info, log_warn,
     mvcc_index::{
         hash_common::{fix_frame_id2, write_page, KVWithTs, RowDelta, StatCollector},
@@ -42,6 +42,28 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         let recent_chain = Arc::new(HeapHashChain::new(c_key, mem_pool.clone()));
         let history_chain = Arc::new(HeapHashChain::new(c_key, mem_pool.clone()));
+
+        Self {
+            c_key,
+            mem_pool,
+            recent_chain,
+            history_chain,
+            bulk_update: Mutex::new(ChainBucketBulkUpdate {
+                updated_entries: HashMap::new(),
+                old_entries: Vec::new(),
+            }),
+        }
+    }
+
+    /// Construct from two pre-allocated pages (bulk alloc path).
+    pub fn new_from_pages(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        recent_page: FrameWriteGuard,
+        history_page: FrameWriteGuard,
+    ) -> Self {
+        let recent_chain = Arc::new(HeapHashChain::new_from_page(c_key, mem_pool.clone(), recent_page));
+        let history_chain = Arc::new(HeapHashChain::new_from_page(c_key, mem_pool.clone(), history_page));
 
         Self {
             c_key,
