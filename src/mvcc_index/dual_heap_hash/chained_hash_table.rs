@@ -60,18 +60,16 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
         ChainedHashMetaPage::init(&mut *meta_page, num_buckets);
         ChainedHashMetaPage::set_bucket_num(&mut *meta_page, num_buckets);
 
-        // Bulk-allocate all chain pages: 2 per bucket (recent + history)
-        let mut pages = mem_pool.create_new_pages_for_write(c_key, num_buckets * 2).unwrap();
+        // Bulk-allocate only recent chain pages. History stays lazy until first update.
+        let mem_pool_for_bulk = Arc::clone(&mem_pool);
+        let mut pages = mem_pool_for_bulk
+            .create_new_pages_for_write(c_key, num_buckets)
+            .unwrap();
         let mut bucket_entries = Vec::with_capacity(num_buckets);
-        // Drain pages in reverse pairs so we can pop efficiently
-        for _ in 0..num_buckets {
-            let history_page = pages.pop().unwrap();
-            let recent_page = pages.pop().unwrap();
-            let second_table = DualChainBucket::new_from_pages(c_key, mem_pool.clone(), recent_page, history_page);
+        for page in pages.drain(..) {
+            let second_table = DualChainBucket::new_from_page(c_key, mem_pool.clone(), page);
             bucket_entries.push(Arc::new(second_table));
         }
-        // Reverse to restore original order (we popped from end)
-        bucket_entries.reverse();
         drop(meta_page);
 
         Self {

@@ -262,6 +262,8 @@ fn write_result_csv(
     part_rows: usize,
     lineitem_rows: usize,
     update_ops: usize,
+    j1_alloc_ms: f64,
+    j1_insert_ms: f64,
     join1_build_ms: f64,
     join1_probe_ms: f64,
     update_ms: f64,
@@ -278,8 +280,8 @@ fn write_result_csv(
         writeln!(
             file,
             "table_type,repair_mode,update_pct,distribution,part_rows,lineitem_rows,update_ops,\
-             join1_build_ms,join1_probe_ms,update_ms,join2_build_ms,join2_probe_ms,\
-             total_join_update_join_ms,\
+             j1_alloc_ms,j1_insert_ms,\
+             join1_build_ms,join1_probe_ms,update_ms,join2_build_ms,join2_probe_ms,total_ms,\
              join1_matched,join2_matched,join1_q14_ratio,join2_q14_ratio"
         )?;
     }
@@ -294,7 +296,7 @@ fn write_result_csv(
 
     writeln!(
         file,
-        "{:?},{:?},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6}",
+        "{:?},{:?},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6}",
         table_type,
         repair_mode,
         update_pct
@@ -304,6 +306,8 @@ fn write_result_csv(
         part_rows,
         lineitem_rows,
         update_ops,
+        j1_alloc_ms,
+        j1_insert_ms,
         join1_build_ms,
         join1_probe_ms,
         update_ms,
@@ -323,13 +327,13 @@ fn write_result_csv(
 // Main
 // ---------------------------------------------------------------------------
 
-/// Run a full J-U-J cycle. Returns (j1_build, j1_probe, update, j2_build, j2_probe, j1_stats, j2_stats).
+/// Run a full J-U-J cycle. Returns (j1_alloc, j1_insert, j1_build, j1_probe, update, j2_build, j2_probe, j1_stats, j2_stats).
 fn run_juj(
     cli: &Cli,
     part_entries: &[PartEntry],
     probe_rows: &[ProbeRow],
     updates: &[PartEntry],
-) -> Result<(f64, f64, f64, f64, f64, JoinStats, JoinStats), Box<dyn Error>> {
+) -> Result<(f64, f64, f64, f64, f64, f64, f64, JoinStats, JoinStats), Box<dyn Error>> {
     // ====================================================================
     //  Phase 1: JOIN 1  (table allocation + build + probe)
     //
@@ -338,9 +342,13 @@ fn run_juj(
     //  so MVHT's table allocation should also be measured.
     // ====================================================================
 
-    // -- join1 build (table allocation + index construction) --
-    let j1_build_start = Instant::now();
+    // -- join1 build: table allocation --
+    let j1_alloc_start = Instant::now();
     let table = create_table(cli.table_type, cli.bucket_num)?;
+    let j1_alloc_ms = j1_alloc_start.elapsed().as_secs_f64() * 1000.0;
+
+    // -- join1 build: index construction --
+    let j1_build_start = Instant::now();
     match &table {
         TableEngine::Mvcc(t) => {
             for entry in part_entries {
@@ -360,7 +368,8 @@ fn run_juj(
             t.mark_ts(0);
         }
     }
-    let join1_build_ms = j1_build_start.elapsed().as_secs_f64() * 1000.0;
+    let j1_insert_ms = j1_build_start.elapsed().as_secs_f64() * 1000.0;
+    let join1_build_ms = j1_alloc_ms + j1_insert_ms;
 
     // -- join1 probe --
     let j1_probe_start = Instant::now();
@@ -457,7 +466,17 @@ fn run_juj(
         }
     };
 
-    Ok((join1_build_ms, join1_probe_ms, update_ms, join2_build_ms, join2_probe_ms, join1_stats, join2_stats))
+    Ok((
+        j1_alloc_ms,
+        j1_insert_ms,
+        join1_build_ms,
+        join1_probe_ms,
+        update_ms,
+        join2_build_ms,
+        join2_probe_ms,
+        join1_stats,
+        join2_stats,
+    ))
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -483,20 +502,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Measured runs ──────────────────────────────────────────────────
     let n = cli.repeat.max(1);
-    // Each run: [j1_build, j1_probe, update, j2_build, j2_probe]
-    let mut runs: Vec<[f64; 5]> = Vec::with_capacity(n);
+    // Each run: [j1_alloc, j1_insert, j1_build, j1_probe, update, j2_build, j2_probe]
+    let mut runs: Vec<[f64; 7]> = Vec::with_capacity(n);
     let mut last_j1_stats = None;
     let mut last_j2_stats = None;
 
     for r in 0..n {
-        let (j1b, j1p, upd, j2b, j2p, j1s, j2s) =
+        let (j1alloc, j1ins, j1b, j1p, upd, j2b, j2p, j1s, j2s) =
             run_juj(&cli, &part_entries, &probe_rows, &updates)?;
         let total = j1b + j1p + upd + j2b + j2p;
         println!(
-            "  run {}/{}: j1_build={:.3} j1_probe={:.3} update={:.3} j2_build={:.3} j2_probe={:.3} total={:.3}",
-            r + 1, n, j1b, j1p, upd, j2b, j2p, total
+            "  run {}/{}: j1_alloc={:.3} j1_insert={:.3} j1_build={:.3} j1_probe={:.3} update={:.3} j2_build={:.3} j2_probe={:.3} total={:.3}",
+            r + 1, n, j1alloc, j1ins, j1b, j1p, upd, j2b, j2p, total
         );
-        runs.push([j1b, j1p, upd, j2b, j2p]);
+        runs.push([j1alloc, j1ins, j1b, j1p, upd, j2b, j2p]);
         last_j1_stats = Some(j1s);
         last_j2_stats = Some(j2s);
     }
@@ -515,9 +534,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         n, trim, trim, trimmed.len()
     );
 
-    let mut avg = [0.0_f64; 5];
+    let mut avg = [0.0_f64; 7];
     for run in trimmed {
-        for i in 0..5 {
+        for i in 0..7 {
             avg[i] += run[i];
         }
     }
@@ -525,11 +544,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         *v /= kept;
     }
 
-    let join1_build_ms = avg[0];
-    let join1_probe_ms = avg[1];
-    let update_ms = avg[2];
-    let join2_build_ms = avg[3];
-    let join2_probe_ms = avg[4];
+    let j1_alloc_ms = avg[0];
+    let j1_insert_ms = avg[1];
+    let join1_build_ms = avg[2];
+    let join1_probe_ms = avg[3];
+    let update_ms = avg[4];
+    let join2_build_ms = avg[5];
+    let join2_probe_ms = avg[6];
     let total_j_u_j_ms =
         join1_build_ms + join1_probe_ms + update_ms + join2_build_ms + join2_probe_ms;
 
@@ -555,9 +576,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         part_entries.len(), probe_rows.len(), updates.len()
     );
     println!(
-        "join1_build_ms={:.6}, join1_probe_ms={:.6}, update_ms={:.6}, \
-         join2_build_ms={:.6}, join2_probe_ms={:.6}, total_ms={:.6}",
-        join1_build_ms, join1_probe_ms, update_ms, join2_build_ms, join2_probe_ms, total_j_u_j_ms
+        "j1_alloc_ms={:.6}, j1_insert_ms={:.6}, join1_build_ms={:.6}, join1_probe_ms={:.6}, \
+         update_ms={:.6}, join2_build_ms={:.6}, join2_probe_ms={:.6}, total_ms={:.6}",
+        j1_alloc_ms,
+        j1_insert_ms,
+        join1_build_ms,
+        join1_probe_ms,
+        update_ms,
+        join2_build_ms,
+        join2_probe_ms,
+        total_j_u_j_ms
     );
     println!(
         "join1: matched={}, q14={:.6}",
@@ -578,6 +606,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             part_entries.len(),
             probe_rows.len(),
             updates.len(),
+            j1_alloc_ms,
+            j1_insert_ms,
             join1_build_ms,
             join1_probe_ms,
             update_ms,

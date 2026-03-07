@@ -48,11 +48,9 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
     }
 
     pub fn split_at_ts(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
-        // Bulk-allocate pages for new partitions (one per bucket)
-        let pages = self.mem_pool.create_new_pages_for_write(self.c_key, self.bucket_entries.len()).unwrap();
-        for (bucket, page) in self.bucket_entries.iter().zip(pages) {
+        for bucket in &self.bucket_entries {
             // SAFETY: split_at_ts is called between phases, never concurrent with reads.
-            unsafe { &mut *bucket.get() }.split_last_partition_at_with_page(ts, page)?;
+            unsafe { &mut *bucket.get() }.split_last_partition_at(ts)?;
         }
         Ok(())
     }
@@ -132,7 +130,9 @@ impl<T: MemPool + 'static> TsPartitionedTable<T> {
         for (idx, bulk_repair) in self.bulk_update.get_updated_pkeys().iter_mut().enumerate() {
             let partition_collection = self.bucket(idx);
             for p in partition_collection.partitions().iter() {
-                p.chain().heap_bulk_update_collect(bulk_repair)?;
+                if let Some(chain) = p.chain() {
+                    chain.heap_bulk_update_collect(bulk_repair)?;
+                }
             }
             // repair
             for versions in bulk_repair.values() {
@@ -318,22 +318,28 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
             if self.is_write_repair.load(Ordering::SeqCst) {
                 // write repair -> no need to use map to track best candidates
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 && !p.chain().is_empty() {
-                        p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
+                    if let Some(chain) = p.chain() {
+                        if ts >= p.get_range().0 && !chain.is_empty() {
+                            chain.scan_unique_write_repair(ts, &mut result).unwrap();
+                        }
                     }
                 }
             } else if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
                 // read repair ts > scan_ts -> no need ...
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 && !p.chain().is_empty() {
-                        p.chain().scan_unique_write_repair(ts, &mut result).unwrap();
+                    if let Some(chain) = p.chain() {
+                        if ts >= p.get_range().0 && !chain.is_empty() {
+                            chain.scan_unique_write_repair(ts, &mut result).unwrap();
+                        }
                     }
                 }
             } else {
                 let mut best_candidates = HashMap::new();
                 for p in partition_collection.partitions().iter() {
-                    if ts >= p.get_range().0 && !p.chain().is_empty() {
-                        p.chain().scan_unique(ts, &mut best_candidates).unwrap();
+                    if let Some(chain) = p.chain() {
+                        if ts >= p.get_range().0 && !chain.is_empty() {
+                            chain.scan_unique(ts, &mut best_candidates).unwrap();
+                        }
                     }
                 }
 
@@ -367,14 +373,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
                     let mut best_candidates = HashMap::new();
                     let mut versions_map = HashMap::new();
                     for p in partition_collection.partitions().iter() {
-                        if ts >= p.get_range().0 && !p.chain().is_empty() {
-                            p.chain()
-                                .scan_unique_read_repair(
-                                    ts,
-                                    &mut best_candidates,
-                                    &mut versions_map,
-                                )
-                                .unwrap();
+                        if let Some(chain) = p.chain() {
+                            if ts >= p.get_range().0 && !chain.is_empty() {
+                                chain
+                                    .scan_unique_read_repair(
+                                        ts,
+                                        &mut best_candidates,
+                                        &mut versions_map,
+                                    )
+                                    .unwrap();
+                            }
                         }
                     }
 

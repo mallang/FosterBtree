@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -30,24 +30,27 @@ pub struct DualChainBucket<T: MemPool> {
     mem_pool: Arc<T>,
 
     recent_chain: Arc<HeapHashChain<T>>,
-    history_chain: Arc<HeapHashChain<T>>,
+    history_chain: OnceLock<Arc<HeapHashChain<T>>>,
 
     bulk_update: Mutex<ChainBucketBulkUpdate>,
 }
 
 impl<T: MemPool + 'static> DualChainBucket<T> {
     pub fn collect_page_num(&self) -> usize {
-        self.recent_chain.collect_page_num() + self.history_chain.collect_page_num()
+        self.recent_chain.collect_page_num()
+            + self
+                .history_chain()
+                .map(|chain| chain.collect_page_num())
+                .unwrap_or(0)
     }
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         let recent_chain = Arc::new(HeapHashChain::new(c_key, mem_pool.clone()));
-        let history_chain = Arc::new(HeapHashChain::new(c_key, mem_pool.clone()));
 
         Self {
             c_key,
             mem_pool,
             recent_chain,
-            history_chain,
+            history_chain: OnceLock::new(),
             bulk_update: Mutex::new(ChainBucketBulkUpdate {
                 updated_entries: HashMap::new(),
                 old_entries: Vec::new(),
@@ -55,26 +58,33 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         }
     }
 
-    /// Construct from two pre-allocated pages (bulk alloc path).
-    pub fn new_from_pages(
+    /// Construct from a pre-allocated recent page (bulk alloc path).
+    pub fn new_from_page(
         c_key: ContainerKey,
         mem_pool: Arc<T>,
         recent_page: FrameWriteGuard,
-        history_page: FrameWriteGuard,
     ) -> Self {
         let recent_chain = Arc::new(HeapHashChain::new_from_page(c_key, mem_pool.clone(), recent_page));
-        let history_chain = Arc::new(HeapHashChain::new_from_page(c_key, mem_pool.clone(), history_page));
 
         Self {
             c_key,
             mem_pool,
             recent_chain,
-            history_chain,
+            history_chain: OnceLock::new(),
             bulk_update: Mutex::new(ChainBucketBulkUpdate {
                 updated_entries: HashMap::new(),
                 old_entries: vec![],
             }),
         }
+    }
+
+    fn history_chain(&self) -> Option<&Arc<HeapHashChain<T>>> {
+        self.history_chain.get()
+    }
+
+    fn ensure_history_chain(&self) -> &Arc<HeapHashChain<T>> {
+        self.history_chain
+            .get_or_init(|| Arc::new(HeapHashChain::new(self.c_key, self.mem_pool.clone())))
     }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
@@ -88,10 +98,14 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
             Ok(entry) => Ok(entry),
             Err(AccessMethodError::KeyNotFound)
             | Err(AccessMethodError::KeyFoundButInvalidTimestamp) => {
-                let history_entry = self.history_chain.chain_get(pkey, ts);
-                match history_entry {
-                    Ok(entry) => Ok(entry),
-                    Err(e) => Err(e),
+                if let Some(history_chain) = self.history_chain() {
+                    let history_entry = history_chain.chain_get(pkey, ts);
+                    match history_entry {
+                        Ok(entry) => Ok(entry),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Err(AccessMethodError::KeyNotFound)
                 }
             }
             Err(e) => panic!("unreachable err: {:?}", e),
@@ -113,7 +127,7 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         let old_result = self.recent_chain.chain_update_recent(pkey, entry);
         match old_result {
             Ok(old_entry) => {
-                self.history_chain.history_insert(&old_entry)?;
+                self.ensure_history_chain().history_insert(&old_entry)?;
                 Ok(())
             }
             Err(e) => Err(e),
@@ -127,8 +141,10 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
             &mut bulk,
             new_start_ts,
         )?;
-        self.history_chain
-            .chain_bulk_update_history_entries(&bulk)?;
+        if !bulk.old_entries.is_empty() {
+            self.ensure_history_chain()
+                .chain_bulk_update_history_entries(&bulk)?;
+        }
         bulk.old_entries.clear();
         bulk.updated_entries.clear();
         Ok(())
@@ -139,7 +155,7 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         match old_result {
             Ok(mut old_entry) => {
                 old_entry.set_end_ts(ts);
-                self.history_chain.history_insert(&old_entry)?;
+                self.ensure_history_chain().history_insert(&old_entry)?;
                 Ok(())
             }
             Err(e) => Err(e),
@@ -147,13 +163,20 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
     }
 
     pub fn garbage_collect(&self, ts: &Timestamp) -> Result<(), AccessMethodError> {
-        self.history_chain.gc_truncate_entries_before_ts(ts)
+        if let Some(history_chain) = self.history_chain() {
+            history_chain.gc_truncate_entries_before_ts(ts)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn stat(&self) -> String {
         // Obtain stats from both chains.
         let recent_stat = self.recent_chain.stat();
-        let history_stat = self.history_chain.stat();
+        let history_stat = self
+            .history_chain()
+            .map(|chain| chain.stat())
+            .unwrap_or_else(|| "<lazy-unallocated>".to_string());
         // Format a combined report.
         format!(
             "=== SecondBucket Stats ===\nRecent Chain:\n{}\nHistory Chain:\n{}",
@@ -170,10 +193,12 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         self.recent_chain
             .chain_scan_key(search_key, ts, res)
             .unwrap();
-        if !self.history_chain.is_empty() {
-            self.history_chain
-                .chain_scan_key(search_key, ts, res)
-                .unwrap();
+        if let Some(history_chain) = self.history_chain() {
+            if !history_chain.is_empty() {
+                history_chain
+                    .chain_scan_key(search_key, ts, res)
+                    .unwrap();
+            }
         }
     }
 
@@ -183,8 +208,10 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         results: &mut Vec<MvccEntry>,
     ) -> Result<(), AccessMethodError> {
         self.recent_chain.chain_scan_into_vec(ts, results)?;
-        if !self.history_chain.is_empty() {
-            self.history_chain.chain_scan_into_vec(ts, results)?;
+        if let Some(history_chain) = self.history_chain() {
+            if !history_chain.is_empty() {
+                history_chain.chain_scan_into_vec(ts, results)?;
+            }
         }
         Ok(())
     }
@@ -208,8 +235,9 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
         self.recent_chain
             .scan_delta_into(from, to, &mut delta_map)?;
-        self.history_chain
-            .scan_delta_into(from, to, &mut delta_map)?;
+        if let Some(history_chain) = self.history_chain() {
+            history_chain.scan_delta_into(from, to, &mut delta_map)?;
+        }
 
         results.extend(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
             let (from_kv, to_kv) = from_to_delta.split();
@@ -243,13 +271,17 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
 
     pub fn scan_all(&self, results: &mut Vec<MvccEntry>) -> Result<(), AccessMethodError> {
         results.extend(self.recent_chain.scan_all()?);
-        results.extend(self.history_chain.scan_all()?);
+        if let Some(history_chain) = self.history_chain() {
+            results.extend(history_chain.scan_all()?);
+        }
         Ok(())
     }
 
     pub fn collect_space_stat(&self, stat: &mut StatCollector) -> Result<(), AccessMethodError> {
         self.recent_chain.collect_space_statistics(stat);
-        self.history_chain.collect_space_statistics(stat);
+        if let Some(history_chain) = self.history_chain() {
+            history_chain.collect_space_statistics(stat);
+        }
         Ok(())
     }
 }

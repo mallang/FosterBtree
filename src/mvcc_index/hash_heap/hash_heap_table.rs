@@ -481,7 +481,9 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
             }
             rett
         } else {
-            chain.scan_key_vec_read_repair(key, &ts, None)?
+            let mut res = vec![];
+            chain.heap_scan_key_no_repair(key, &ts, &mut res)?;
+            res
         };
 
         Ok(mvccs)

@@ -2,7 +2,7 @@ use core::panic;
 use std::{
     collections::{BTreeMap, HashMap},
     ops::Bound::{Excluded, Unbounded},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
@@ -31,22 +31,45 @@ pub struct TimestampPartitionCollection<T: MemPool> {
 
 pub struct TimestampPartition<T: MemPool> {
     range: (Timestamp, Timestamp), // [start, end)
-    chain: Arc<HeapHashChain<T>>,
+    c_key: ContainerKey,
+    mem_pool: Arc<T>,
+    chain: OnceLock<Arc<HeapHashChain<T>>>,
 }
 
 impl<T: MemPool + 'static> TimestampPartition<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, range: (Timestamp, Timestamp)) -> Self {
+        let chain = OnceLock::new();
+        let _ = chain.set(Arc::new(HeapHashChain::new(c_key, mem_pool.clone())));
         Self {
             range,
-            chain: Arc::new(HeapHashChain::new(c_key, mem_pool)),
+            c_key,
+            mem_pool,
+            chain,
         }
     }
 
     /// Construct from a pre-allocated page (bulk alloc path).
     pub fn new_from_page(c_key: ContainerKey, mem_pool: Arc<T>, range: (Timestamp, Timestamp), page: FrameWriteGuard) -> Self {
+        let chain = OnceLock::new();
+        let _ = chain.set(Arc::new(HeapHashChain::new_from_page(
+            c_key,
+            mem_pool.clone(),
+            page,
+        )));
         Self {
             range,
-            chain: Arc::new(HeapHashChain::new_from_page(c_key, mem_pool, page)),
+            c_key,
+            mem_pool,
+            chain,
+        }
+    }
+
+    pub fn new_lazy(c_key: ContainerKey, mem_pool: Arc<T>, range: (Timestamp, Timestamp)) -> Self {
+        Self {
+            range,
+            c_key,
+            mem_pool,
+            chain: OnceLock::new(),
         }
     }
 
@@ -58,8 +81,13 @@ impl<T: MemPool + 'static> TimestampPartition<T> {
         self.range.1 = new_ts;
     }
 
-    pub fn chain(&self) -> &Arc<HeapHashChain<T>> {
-        &self.chain
+    pub fn chain(&self) -> Option<&Arc<HeapHashChain<T>>> {
+        self.chain.get()
+    }
+
+    pub fn ensure_chain(&self) -> &Arc<HeapHashChain<T>> {
+        self.chain
+            .get_or_init(|| Arc::new(HeapHashChain::new(self.c_key, self.mem_pool.clone())))
     }
 }
 
@@ -102,7 +130,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         last_partition.set_max_start_ts(new_ts - 1);
 
         let new_partition =
-            TimestampPartition::new(self.c_key, self.mem_pool.clone(), (new_ts, Timestamp::MAX));
+            TimestampPartition::new_lazy(self.c_key, self.mem_pool.clone(), (new_ts, Timestamp::MAX));
 
         self.partitions.push(new_partition);
 
@@ -126,7 +154,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     pub fn insert(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let partition = self.partitions.last().unwrap();
 
-        partition.chain.insert(entry)
+        partition.ensure_chain().insert(entry)
     }
 
     pub fn get_no_repair(
@@ -136,7 +164,10 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     ) -> Result<MvccEntry, AccessMethodError> {
         for p in self.partitions.iter().rev() {
             if ts >= p.range.0 {
-                match p.chain.get_no_repair(pkey, &ts) {
+                let Some(chain) = p.chain() else {
+                    continue;
+                };
+                match chain.get_no_repair(pkey, &ts) {
                     Ok(entry) => return Ok(entry),
                     Err(AccessMethodError::KeyNotFound) => continue,
                     Err(e) => return Err(e),
@@ -157,7 +188,10 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         let mut ret = Err(AccessMethodError::KeyNotFound);
         for p in self.partitions.iter().rev() {
             if ts >= p.range.0 {
-                match p.chain.get_read_repair(pkey, &ts, &mut versions) {
+                let Some(chain) = p.chain() else {
+                    continue;
+                };
+                match chain.get_read_repair(pkey, &ts, &mut versions) {
                     Ok(entry) => {
                         ret = Ok(entry);
                         break;
@@ -178,7 +212,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     pub fn update(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let partition = self.partitions.last().unwrap();
 
-        partition.chain.update_no_repair(entry.pkey(), entry)
+        partition.ensure_chain().update_no_repair(entry.pkey(), entry)
     }
 
     pub fn update_write_repair(
@@ -188,10 +222,10 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     ) -> Result<(), AccessMethodError> {
         let mut repaired = false;
         for partition in self.partitions.iter().take(self.partitions.len() - 1) {
-            match partition
-                .chain
-                .update_write_repair_ts_partition_except_last(entry)
-            {
+            let Some(chain) = partition.chain() else {
+                continue;
+            };
+            match chain.update_write_repair_ts_partition_except_last(entry) {
                 Ok(_) => {
                     repaired = true;
                     break;
@@ -203,7 +237,7 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         self.partitions
             .last()
             .unwrap()
-            .chain
+            .ensure_chain()
             .update_write_repair_ts_partition_last(entry, repaired)?;
         Ok(())
     }
@@ -211,7 +245,10 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     pub fn delete(&self, ts: Timestamp, pkey: &[u8]) -> Result<(), AccessMethodError> {
         for p in self.partitions.iter().rev() {
             if ts >= p.range.0 {
-                if p.chain.delete(pkey, &ts).is_ok() {
+                let Some(chain) = p.chain() else {
+                    continue;
+                };
+                if chain.delete(pkey, &ts).is_ok() {
                     return Ok(());
                 }
                 continue;
@@ -225,10 +262,27 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         ts: Timestamp,
         key: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        if self.partitions.len() == 1 {
+            let partition = &self.partitions[0];
+            if ts < partition.range.0 {
+                return Ok(Vec::new());
+            }
+            let Some(chain) = partition.chain() else {
+                return Ok(Vec::new());
+            };
+            if chain.is_empty() {
+                return Ok(Vec::new());
+            }
+            return chain.scan_key_vec_read_repair(key, &ts, None);
+        }
+
         let mut best_candidates = HashMap::new();
         for p in self.partitions.iter() {
-            if ts >= p.range.0 && !p.chain.is_empty() {
-                let partition_scanner = p.chain.scan_key_vec_read_repair(key, &ts, None)?;
+            let Some(chain) = p.chain() else {
+                continue;
+            };
+            if ts >= p.range.0 && !chain.is_empty() {
+                let partition_scanner = chain.scan_key_vec_read_repair(key, &ts, None)?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
                     let (pkey, value) = entry;
@@ -249,8 +303,11 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let mut result = Vec::new();
         for p in self.partitions.iter() {
-            if ts >= p.range.0 && !p.chain.is_empty() {
-                p.chain.chain_scan_key(key, &ts, &mut result)?;
+            let Some(chain) = p.chain() else {
+                continue;
+            };
+            if ts >= p.range.0 && !chain.is_empty() {
+                chain.chain_scan_key(key, &ts, &mut result)?;
             }
         }
         Ok(result)
@@ -261,14 +318,36 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         ts: Timestamp,
         key: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        if self.partitions.len() == 1 {
+            let partition = &self.partitions[0];
+            if ts < partition.range.0 {
+                return Ok(Vec::new());
+            }
+            let Some(chain) = partition.chain() else {
+                return Ok(Vec::new());
+            };
+            if chain.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut versions_map = HashMap::new();
+            let res = chain.scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
+            for versions in versions_map.into_values() {
+                read_repair_vec(&self.mem_pool, &versions, self.c_key);
+            }
+            return Ok(res);
+        }
+
         let mut best_candidates: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
         let mut versions_map = HashMap::new();
         // iterate in natural order
         for p in self.partitions.iter() {
-            if ts >= p.range.0 && !p.chain.is_empty() {
+            let Some(chain) = p.chain() else {
+                continue;
+            };
+            if ts >= p.range.0 && !chain.is_empty() {
                 let partition_scanner =
-                    p.chain
-                        .scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
+                    chain.scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
                 // Iterate over all entries from the chain.
                 for entry in partition_scanner {
                     best_candidates.insert(entry.0, entry.1);
@@ -286,11 +365,13 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     pub fn scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {
         let mut res = vec![];
         for p in self.partitions.iter() {
-            let partition_scanner: crate::mvcc_index::hash_join_heap_chain::HeapChainScanner<
-                '_,
-                T,
-            > = p.chain.scan_all()?;
-            res.extend(partition_scanner);
+            if let Some(chain) = p.chain() {
+                let partition_scanner: crate::mvcc_index::hash_join_heap_chain::HeapChainScanner<
+                    '_,
+                    T,
+                > = chain.scan_all()?;
+                res.extend(partition_scanner);
+            }
         }
         Ok(res)
     }
@@ -303,8 +384,9 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
         let mut versions_map = HashMap::new();
         for p in self.partitions.iter() {
-            p.chain
-                .scan_delta_read_repair(from, to, &mut delta_map, &mut versions_map);
+            if let Some(chain) = p.chain() {
+                chain.scan_delta_read_repair(from, to, &mut delta_map, &mut versions_map);
+            }
         }
 
         for versions in versions_map.values() {
@@ -350,7 +432,9 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
             if from > max_start_ts {
                 continue;
             }
-            p.chain.scan_delta(from, to, &mut delta_map);
+            if let Some(chain) = p.chain() {
+                chain.scan_delta(from, to, &mut delta_map);
+            }
         }
 
         Box::new(delta_map.into_iter().filter_map(|(pk, from_to_delta)| {
@@ -384,7 +468,9 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
     pub fn garbage_collect(&self, ts: Timestamp) -> Result<(), AccessMethodError> {
         let mut best_map = HashMap::new();
         for part in &self.partitions {
-            part.chain.gc_collect_versions(&ts, &mut best_map)?;
+            if let Some(chain) = part.chain() {
+                chain.gc_collect_versions(&ts, &mut best_map)?;
+            }
         }
 
         for map in best_map.into_values() {
@@ -392,7 +478,9 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         }
 
         for part in &self.partitions {
-            part.chain.gc_truncate_entries_before_ts(&ts)?;
+            if let Some(chain) = part.chain() {
+                chain.gc_truncate_entries_before_ts(&ts)?;
+            }
         }
 
         Ok(())
@@ -400,7 +488,9 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
 
     pub fn collect_space_stat(&self, stat: &mut StatCollector) {
         for part in &self.partitions {
-            part.chain.collect_space_statistics(stat);
+            if let Some(chain) = part.chain() {
+                chain.collect_space_statistics(stat);
+            }
         }
     }
 }
