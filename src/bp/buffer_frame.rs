@@ -30,13 +30,17 @@ unsafe impl Sync for BufferFrame {}
 
 impl BufferFrame {
     pub fn new(frame_id: u32) -> Self {
+        Self::with_page(frame_id, Page::new_empty())
+    }
+
+    pub fn with_page(frame_id: u32, page: Page) -> Self {
         BufferFrame {
             frame_id,
             latch: RwLatch::default(),
             is_dirty: AtomicBool::new(false),
             key: UnsafeCell::new(None),
             evict_info: RwLock::new(EvictionPolicyType::new()),
-            page: UnsafeCell::new(Page::new_empty()),
+            page: UnsafeCell::new(page),
         }
     }
 

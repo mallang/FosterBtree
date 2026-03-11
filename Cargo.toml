@@ -132,3 +132,7 @@ path = "benches/hash_join/htap_simulation/bench.rs"
 name = "join_benchmark"
 path = "benches/sigmod/join_benchmark/main.rs"
 
+[[bin]]
+name = "tpch_q14_join_update_join"
+path = "benches/sigmod/tpch_q14_join_update_join.rs"
+

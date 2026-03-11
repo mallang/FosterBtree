@@ -60,10 +60,14 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
         ChainedHashMetaPage::init(&mut *meta_page, num_buckets);
         ChainedHashMetaPage::set_bucket_num(&mut *meta_page, num_buckets);
 
+        // Bulk-allocate only recent chain pages. History stays lazy until first update.
+        let mem_pool_for_bulk = Arc::clone(&mem_pool);
+        let mut pages = mem_pool_for_bulk
+            .create_new_pages_for_write(c_key, num_buckets)
+            .unwrap();
         let mut bucket_entries = Vec::with_capacity(num_buckets);
-        for i in 0..num_buckets {
-            let second_table = DualChainBucket::new(c_key, mem_pool.clone());
-            // MvccHashJoinMetaPage::set_bucket_entry(&mut *meta_page, i, &entry);
+        for page in pages.drain(..) {
+            let second_table = DualChainBucket::new_from_page(c_key, mem_pool.clone(), page);
             bucket_entries.push(Arc::new(second_table));
         }
         drop(meta_page);

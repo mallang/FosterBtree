@@ -17,9 +17,73 @@ use super::{
 /// An exclusive latch is required to create a new page and append it to the pool.
 /// Getting a page for read or write requires a shared latch.
 
+#[derive(Clone, Copy)]
+struct FrameLocator {
+    slab_index: usize,
+    frame_index: usize,
+}
+
+struct FrameSlab {
+    frames: Box<[BufferFrame]>,
+}
+
+struct FrameRegistry {
+    flat_index: Vec<FrameLocator>,
+    slabs: Vec<FrameSlab>,
+}
+
+impl FrameRegistry {
+    fn new() -> Self {
+        Self {
+            flat_index: Vec::new(),
+            slabs: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.flat_index.len()
+    }
+
+    fn reserve_flat(&mut self, additional: usize) {
+        self.flat_index.reserve(additional);
+        self.slabs.reserve(1);
+    }
+
+    fn push_frame(&mut self, frame: BufferFrame) -> usize {
+        self.push_slab(vec![frame]).start
+    }
+
+    fn push_slab(&mut self, frames: Vec<BufferFrame>) -> std::ops::Range<usize> {
+        let start = self.flat_index.len();
+        let slab_index = self.slabs.len();
+        let frames = frames.into_boxed_slice();
+        let frame_count = frames.len();
+        self.slabs.push(FrameSlab { frames });
+        self.flat_index.reserve(frame_count);
+        for frame_index in 0..frame_count {
+            self.flat_index.push(FrameLocator {
+                slab_index,
+                frame_index,
+            });
+        }
+        start..start + frame_count
+    }
+
+    fn get(&self, flat_index: usize) -> &BufferFrame {
+        let locator = self.flat_index[flat_index];
+        &self.slabs[locator.slab_index].frames[locator.frame_index]
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &BufferFrame> {
+        self.flat_index.iter().map(move |locator| {
+            &self.slabs[locator.slab_index].frames[locator.frame_index]
+        })
+    }
+}
+
 pub struct InMemPool {
     latch: RwLatch,
-    frames: UnsafeCell<Vec<Box<BufferFrame>>>, // Box is required to ensure that the frame does not move when the vector is resized
+    frames: UnsafeCell<FrameRegistry>,
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
 }
@@ -34,7 +98,7 @@ impl InMemPool {
     pub fn new() -> Self {
         InMemPool {
             latch: RwLatch::default(),
-            frames: UnsafeCell::new(Vec::new()),
+            frames: UnsafeCell::new(FrameRegistry::new()),
             id_to_index: UnsafeCell::new(HashMap::new()),
             container_page_count: UnsafeCell::new(HashMap::new()),
         }
@@ -78,19 +142,79 @@ impl MemPool for InMemPool {
                 0
             }
         };
-        let page = Page::new(page_id);
-
         let page_key = PageKey::new(c_key, page_id);
         let frame_index = frames.len();
-        let frame = Box::new(BufferFrame::new(frame_index as u32));
-        frames.push(frame);
+        let frame = BufferFrame::new(frame_index as u32);
+        frames.push_frame(frame);
         id_to_index.insert(page_key, frame_index);
-        let mut guard = (frames.get(frame_index).unwrap()).write(true);
-        self.release_exclusive();
-
-        guard.copy(&page);
+        let mut guard = frames.get(frame_index).write(true);
+        guard.set_id(page_id);
+        guard.set_lsn(crate::write_ahead_log::prelude::Lsn::new(0, 0));
         *guard.page_key_mut() = Some(page_key);
+        self.release_exclusive();
         Ok(guard)
+    }
+
+    fn create_new_pages_for_write(
+        &self,
+        c_key: ContainerKey,
+        count: usize,
+    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.exclusive();
+        let frames = unsafe { &mut *self.frames.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let container_page_count = unsafe { &mut *self.container_page_count.get() };
+
+        // Reserve capacity once
+        frames.reserve_flat(count);
+        id_to_index.reserve(count);
+
+        let start_page_id = match container_page_count.entry(c_key) {
+            Entry::Occupied(mut entry) => {
+                let start = *entry.get();
+                *entry.get_mut() += count as u32;
+                start
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(count as u32);
+                0
+            }
+        };
+
+        let base_frame_index = frames.len();
+        #[cfg(feature = "heap_allocated_page")]
+        let mut bulk_pages = Page::new_empty_pages_in_slab(count).into_iter();
+
+        let mut to_init = Vec::with_capacity(count);
+        let mut new_frames = Vec::with_capacity(count);
+        let mut guards = Vec::with_capacity(count);
+        for i in 0..count {
+            let page_id = start_page_id + i as u32;
+            let page_key = PageKey::new(c_key, page_id);
+            let frame_index = base_frame_index + i;
+            #[cfg(feature = "heap_allocated_page")]
+            let frame = BufferFrame::with_page(frame_index as u32, bulk_pages.next().unwrap());
+            #[cfg(not(feature = "heap_allocated_page"))]
+            let frame = BufferFrame::new(frame_index as u32);
+            new_frames.push(frame);
+            id_to_index.insert(page_key, frame_index);
+            to_init.push((frame_index, page_id, page_key));
+        }
+        frames.push_slab(new_frames);
+
+        for (frame_index, page_id, page_key) in to_init {
+            let mut guard = frames.get(frame_index).write(true);
+            guard.set_id(page_id);
+            guard.set_lsn(crate::write_ahead_log::prelude::Lsn::new(0, 0));
+            *guard.page_key_mut() = Some(page_key);
+            guards.push(guard);
+        }
+        self.release_exclusive();
+        Ok(guards)
     }
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
@@ -105,7 +229,7 @@ impl MemPool for InMemPool {
             }
         };
 
-        let frame = (frames.get(frame_index).unwrap()).try_write(true);
+        let frame = frames.get(frame_index).try_write(true);
         self.release_shared();
         if let Some(frame) = frame {
             Ok(frame)
@@ -126,7 +250,7 @@ impl MemPool for InMemPool {
             }
         };
 
-        let frame = (frames.get(frame_index).unwrap()).try_read();
+        let frame = frames.get(frame_index).try_read();
         self.release_shared();
         if let Some(frame) = frame {
             Ok(frame)
@@ -184,7 +308,7 @@ impl InMemPool {
         let frames = unsafe { &*self.frames.get() };
         let id_to_index = unsafe { &*self.id_to_index.get() };
         for (key, index) in id_to_index.iter() {
-            let frame = &frames[*index];
+            let frame = frames.get(*index);
             let frame = frame.read();
             assert_eq!(*frame.page_key(), Some(*key));
         }
