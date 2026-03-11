@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -95,10 +96,42 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         table
     }
 
+    fn build_table_from_recs(
+        &self,
+        vec_updates: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    ) -> (Arc<NaiveHashTable<T>>, Duration) {
+        let table = Arc::new(NaiveHashTable::new_with_bucket_num(
+            self.c_key,
+            self.mem_pool.clone(),
+            self.bucket_count,
+        ));
+
+        let start = Instant::now();
+
+        for (k, pk, v) in vec_updates {
+            let rec = Record::new(k.clone(), pk.clone(), v.clone());
+            table
+                .insert(RecordRef::new(rec.key(), rec.pkey(), rec.val()))
+                .unwrap();
+        }
+
+        (table, Instant::now() - start)
+    }
+
     // new: build and mark the current table with a timestamp
     pub fn mark_ts(&self, ts: Timestamp) {
         let cur_table = self.build_table_until_now();
         self.naivetables.borrow_mut().insert(ts, cur_table);
+    }
+
+    pub fn build_table_from_recs_and_ts(
+        &self,
+        ts: Timestamp,
+        vec_updates: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    ) -> Duration {
+        let (cur_table, duration) = self.build_table_from_recs(vec_updates);
+        self.naivetables.borrow_mut().insert(ts, cur_table);
+        duration
     }
 
     pub fn delta_scan(

@@ -6,7 +6,6 @@ use std::{
     time::Instant,
 };
 
-
 use anyhow::Error;
 use fbtree::{mvcc_index::TxId, prelude::Timestamp};
 use rand::{
@@ -219,7 +218,8 @@ impl TxBench {
 
     pub fn gen_update_tx(&mut self, update_count: usize) {
         let (tx_id, tx_ts) = self.gen_new_tx();
-        self.history_ts_candidates.extend_from_slice(&self.recent_ts_candidates);
+        self.history_ts_candidates
+            .extend_from_slice(&self.recent_ts_candidates);
         self.recent_ts_candidates.clear();
         let mut ops = Vec::new();
         let mut pkey_set = HashSet::new();
@@ -405,7 +405,10 @@ impl TxBench {
         rng: &mut SmallRng,
     ) -> OperationType {
         let x: f64 = rng.gen_range(0.0..1.0); // uniform [0,1)
-        assert!((update_ratio + probe_ratio + scan_ratio + delta_ratio + gc_ratio - 1.0f64).abs() < 1e-6);
+        assert!(
+            (update_ratio + probe_ratio + scan_ratio + delta_ratio + gc_ratio - 1.0f64).abs()
+                < 1e-6
+        );
 
         if x < update_ratio {
             OperationType::Update
@@ -413,7 +416,7 @@ impl TxBench {
             OperationType::Probe
         } else if x < update_ratio + probe_ratio + scan_ratio {
             OperationType::Scan
-        } else if x < update_ratio + probe_ratio + scan_ratio + delta_ratio{
+        } else if x < update_ratio + probe_ratio + scan_ratio + delta_ratio {
             OperationType::DeltaScan
         } else {
             OperationType::GbgCollect
@@ -430,7 +433,9 @@ impl TxBench {
         rng: &mut SmallRng,
         scan_reuse_ratio: f64,
     ) -> Vec<OperationType> {
-        assert!((update_ratio + probe_ratio + scan_ratio + delta_ratio + gc_ratio - 1.0).abs() < 1e-6);
+        assert!(
+            (update_ratio + probe_ratio + scan_ratio + delta_ratio + gc_ratio - 1.0).abs() < 1e-6
+        );
 
         let mut ops = Vec::with_capacity(txn_count);
 
@@ -461,38 +466,43 @@ impl TxBench {
         self.gen_initial_insert_from_cli();
 
         // load markts txn
-        if (*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6 { // not W-ONLY
+        if (*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6 {
+            // not W-ONLY
             self.gen_mark_ts_txs();
         }
-        
-        
 
-        let update_count = (self.cli.update_ratio
-            * self.data_source.get_custoemr_vec().len() as f64)
-            as usize;
+        let update_count =
+            (self.cli.update_ratio * self.data_source.get_custoemr_vec().len() as f64) as usize;
         self.gen_update_tx(update_count);
 
-
-        if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6) // not W-ONLY
+        if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6)
+        // not W-ONLY
         {
             self.gen_mark_ts_txs();
-            if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.02 && self.cli.scan_reuse_ratio < 0.999 { // not 100% HISTORY SCAN
+            if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.02
+                && self.cli.scan_reuse_ratio < 0.999
+            {
+                // not 100% HISTORY SCAN
                 self.gen_scan_txs_latest();
             } else {
                 self.gen_scan_txs_history();
             }
         }
 
-        if (*self.cli.analytical_ratio.as_ref().unwrap() - 1.0).abs() > 1e-6 { // NOT R-ONLY
-            let update_count = (self.cli.update_ratio
-                * self.data_source.get_custoemr_vec().len() as f64)
-                as usize;
+        if (*self.cli.analytical_ratio.as_ref().unwrap() - 1.0).abs() > 1e-6 {
+            // NOT R-ONLY
+            let update_count =
+                (self.cli.update_ratio * self.data_source.get_custoemr_vec().len() as f64) as usize;
             self.gen_update_tx(update_count);
 
-            if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6) // not W-ONLY
+            if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6)
+            // not W-ONLY
             {
                 self.gen_mark_ts_txs();
-                if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.02 && self.cli.scan_reuse_ratio < 0.999 { // not 100% HISTORY SCAN
+                if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.02
+                    && self.cli.scan_reuse_ratio < 0.999
+                {
+                    // not 100% HISTORY SCAN
                     self.gen_scan_txs_latest();
                 } else {
                     self.gen_scan_txs_history();
@@ -501,15 +511,15 @@ impl TxBench {
         }
 
         let ops = Self::generate_tx_sequence(
-            self.cli.txn_count, 
+            self.cli.txn_count,
             self.cli.txn_update_ratio.as_ref().unwrap().to_owned(),
-                self.cli.txn_probe_ratio.as_ref().unwrap().to_owned(),
-                self.cli.txn_scan_ratio.as_ref().unwrap().to_owned(),
-                self.cli.txn_delta_ratio.as_ref().unwrap().to_owned(),
-                self.cli.txn_gc_ratio.as_ref().unwrap().to_owned(),
-                &mut self.rng,
-                self.cli.scan_reuse_ratio.to_owned(),
-            );
+            self.cli.txn_probe_ratio.as_ref().unwrap().to_owned(),
+            self.cli.txn_scan_ratio.as_ref().unwrap().to_owned(),
+            self.cli.txn_delta_ratio.as_ref().unwrap().to_owned(),
+            self.cli.txn_gc_ratio.as_ref().unwrap().to_owned(),
+            &mut self.rng,
+            self.cli.scan_reuse_ratio.to_owned(),
+        );
         for i in 0..ops.len() {
             let tx_type = &ops[i];
 
@@ -543,7 +553,8 @@ impl TxBench {
                 }
                 OperationType::GbgCollect => {
                     if (*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6 // NOT W-ONLY
-                        &&  *self.cli.analytical_ratio.as_ref().unwrap() < 0.985 // NOT R-ONLY
+                        &&  *self.cli.analytical_ratio.as_ref().unwrap() < 0.985
+                    // NOT R-ONLY
                     {
                         self.gen_gc_txs();
                     }

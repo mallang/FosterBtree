@@ -234,7 +234,6 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
 fn main() {
     let mut cli = Cli::parse();
 
-
     assert!(!cli.txn_gc_ratio.is_none());
     if cli.analytical_ratio.is_some() {
         assert!(cli.txn_update_ratio.is_none());

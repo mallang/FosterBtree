@@ -401,7 +401,7 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         let mut results = Vec::new();
         let index = self.get_bucket_index(key);
         let second_table = &self.bucket_entries[index];
-    
+
         second_table.scan_key_into(key, &ts, &mut results);
 
         Ok(results)

@@ -7,7 +7,7 @@ mod header {
         page::{PageId, AVAILABLE_PAGE_SIZE},
         prelude::Timestamp,
     };
-    pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>();
+    pub const PAGE_HEADER_SIZE: usize = std::mem::size_of::<Header>() + 4; // alignment
     pub const PAGE_BASE_HEADER_SIZE: usize = PAGE_SIZE - AVAILABLE_PAGE_SIZE;
     impl Header {
         pub fn new() -> Self {

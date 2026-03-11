@@ -128,3 +128,7 @@ path = "benches/hash_join/join_simulation/join_repair.rs"
 name = "htap_wkld"
 path = "benches/hash_join/htap_simulation/bench.rs"
 
+[[bin]]
+name = "join_benchmark"
+path = "benches/sigmod/join_benchmark/main.rs"
+
