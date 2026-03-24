@@ -39,6 +39,8 @@ pub struct ChainedHashTable<T: MemPool + 'static> {
     // used in recent scan
     largest_txn_ts: AtomicU64,
     is_bulk_update: AtomicBool,
+    /// When true, probes only scan the recent chain (skip history).
+    is_write_repair: AtomicBool,
 }
 
 impl<T: MemPool + 'static> ChainedHashTable<T> {
@@ -81,6 +83,7 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
             bucket_entries,
             largest_txn_ts: AtomicU64::new(0),
             is_bulk_update: AtomicBool::new(false),
+            is_write_repair: AtomicBool::new(false),
         }
     }
 
@@ -232,6 +235,10 @@ impl<T: MemPool> Clone for ChainedHashTable<T> {
                 self.is_bulk_update
                     .load(std::sync::atomic::Ordering::Acquire),
             ),
+            is_write_repair: AtomicBool::new(
+                self.is_write_repair
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
         }
     }
 }
@@ -328,6 +335,8 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
+        self.is_write_repair
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.set_largest_txn_ts(ts);
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         ChainedHashTable::update(
@@ -406,7 +415,14 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         let index = self.get_bucket_index(key);
         let second_table = &self.bucket_entries[index];
 
-        second_table.scan_key_into(key, &ts, &mut results);
+        if self.is_write_repair.load(std::sync::atomic::Ordering::SeqCst)
+            && ts >= self.largest_txn_ts.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // WR + latest snapshot: recent chain has all current versions, skip history.
+            second_table.scan_key_into_recent_only(key, &ts, &mut results);
+        } else {
+            second_table.scan_key_into(key, &ts, &mut results);
+        }
 
         Ok(results)
     }

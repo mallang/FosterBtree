@@ -1,0 +1,5 @@
+table_type,repair_mode,num_rounds,bucket_num,build_r_ms,build_s_ms,avg_delta_r_update_ms,avg_delta_r_probe_ms,avg_delta_s_insert_ms,avg_delta_s_probe_ms,avg_total_round_ms,total_ms
+Snap,Nr,5,2048,26.249,9.425,30.686,0.329,12.048,2.274,45.337,285.909
+Heap,Wr,5,2048,52.603,18.467,0.251,0.210,0.916,1.877,3.254,87.341
+Chain,Wr,5,2048,40.468,14.053,0.599,0.160,0.701,1.459,2.918,69.114
+Par,Wr,5,2048,47.869,16.224,0.532,0.270,1.433,1.544,3.778,83.211

@@ -3,9 +3,8 @@ use fbtree::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccIndex};
+use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccIndex, VersionsMap};
 use fbtree::naive_hash_index::NaiveMvHashTable;
-use fbtree::naive_hash_index::IvmHashTable;
 use fbtree::prelude::*;
 use std::collections::HashMap;
 use std::error::Error;
@@ -25,7 +24,6 @@ enum TableType {
     Par,
     Rust,
     Naive,
-    Ivmh,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -36,24 +34,27 @@ enum RepairMode {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(about = "TPC-H Q14 style join-update-join benchmark for MVHT")]
+#[command(about = "CH-benCHmark ORDER_LINE ⋈ STOCK join-update-join benchmark (Exp 4)")]
 struct Cli {
-    /// PART table file (build side)
+    /// STOCK table file (build side, pipe-separated)
     #[arg(long)]
-    part_file: String,
-    /// Pre-filtered LINEITEM probe file (probe side, already filtered by shipdate)
+    stock_file: String,
+
+    /// ORDER_LINE table file (probe side, pipe-separated)
     #[arg(long)]
-    lineitem_file: String,
-    /// Update operations file
+    orderline_file: String,
+
+    /// Update operations file (same format as STOCK file; each row = one update op)
     #[arg(long)]
     updates_file: String,
 
     #[arg(long, value_enum, default_value = "heap")]
     table_type: TableType,
+
     #[arg(long, value_enum, default_value = "nr")]
     repair_mode: RepairMode,
 
-    #[arg(long, default_value_t = 128)]
+    #[arg(long, default_value_t = 1024)]
     bucket_num: usize,
 
     /// Number of warmup iterations (full J-U-J cycle, results discarded).
@@ -61,7 +62,7 @@ struct Cli {
     warmup: usize,
 
     /// Number of measured iterations (averaged for final result).
-    #[arg(long, default_value_t = 7)]
+    #[arg(long, default_value_t = 10)]
     repeat: usize,
 
     /// Trim top/bottom N runs by total time before averaging.
@@ -71,8 +72,11 @@ struct Cli {
     #[arg(long)]
     output_csv: Option<String>,
 
+    /// Update intensity percentage (for CSV annotation only)
     #[arg(long)]
     update_pct: Option<f64>,
+
+    /// Distribution label (e.g. "zipf0.99") for CSV annotation
     #[arg(long)]
     distribution: Option<String>,
 }
@@ -81,42 +85,47 @@ struct Cli {
 // Data structures
 // ---------------------------------------------------------------------------
 
-struct PartEntry {
-    partkey: Vec<u8>,
-    ptype: Vec<u8>,
+/// Fixed-size value stored in the hash table for each STOCK row.
+/// We store S_QUANTITY as a space-padded decimal string (mirrors Q14 P_TYPE layout).
+const QUANTITY_VALUE_SIZE: usize = 8;
+
+fn normalize_quantity_value(raw: &[u8]) -> Vec<u8> {
+    let mut out = vec![b' '; QUANTITY_VALUE_SIZE];
+    let n = raw.len().min(QUANTITY_VALUE_SIZE);
+    out[..n].copy_from_slice(&raw[..n]);
+    out
 }
 
-struct ProbeRow {
-    partkey: Vec<u8>,
-    revenue: f64,
+fn parse_quantity_value(value: &[u8]) -> i64 {
+    let s = std::str::from_utf8(value).unwrap_or("0");
+    s.trim().parse::<i64>().unwrap_or(0)
+}
+
+struct StockEntry {
+    s_i_id: Vec<u8>,    // hash key
+    s_quantity: Vec<u8>, // normalized value (QUANTITY_VALUE_SIZE bytes)
+}
+
+struct OrderLineRow {
+    ol_i_id: Vec<u8>,   // probe key (matches S_I_ID)
+    ol_quantity: i64,
 }
 
 struct JoinStats {
     matched_rows: u64,
-    promo_revenue: f64,
-    total_revenue: f64,
+    total_qty_product: i64, // sum of S_QUANTITY * OL_QUANTITY for matched pairs
 }
 
 enum TableEngine {
     Mvcc(BoxMvccIndexMemPool),
     Snap(NaiveMvHashTable<InMemPool>),
-    Ivmh(IvmHashTable<InMemPool>),
 }
 
 // ---------------------------------------------------------------------------
 // File readers
 // ---------------------------------------------------------------------------
 
-const PTYPE_VALUE_SIZE: usize = 32;
-
-fn normalize_ptype_value(raw: &[u8]) -> Vec<u8> {
-    let mut out = vec![b' '; PTYPE_VALUE_SIZE];
-    let n = raw.len().min(PTYPE_VALUE_SIZE);
-    out[..n].copy_from_slice(&raw[..n]);
-    out
-}
-
-fn parse_tpch_line(line: &str) -> Option<Vec<&str>> {
+fn parse_tpcc_line(line: &str) -> Option<Vec<&str>> {
     let mut fields: Vec<&str> = line.split('|').collect();
     if fields.last().is_some_and(|f| f.is_empty()) {
         fields.pop();
@@ -128,7 +137,9 @@ fn parse_tpch_line(line: &str) -> Option<Vec<&str>> {
     }
 }
 
-fn read_part_table(path: &str) -> Result<Vec<PartEntry>, Box<dyn Error>> {
+/// Read STOCK table.
+/// Format: S_I_ID|S_W_ID|S_QUANTITY|S_DIST_01|...|S_DIST_10|S_YTD|S_ORDER_CNT|S_REMOTE_CNT|S_DATA
+fn read_stock_table(path: &str) -> Result<Vec<StockEntry>, Box<dyn Error>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
@@ -138,25 +149,24 @@ fn read_part_table(path: &str) -> Result<Vec<PartEntry>, Box<dyn Error>> {
         if line.trim().is_empty() {
             continue;
         }
-        let Some(fields) = parse_tpch_line(&line) else {
+        let Some(fields) = parse_tpcc_line(&line) else {
             continue;
         };
-        // PART: P_PARTKEY | P_NAME | P_MFGR | P_BRAND | P_TYPE | ...
-        if fields.len() < 5 {
+        if fields.len() < 3 {
             continue;
         }
-        entries.push(PartEntry {
-            partkey: fields[0].as_bytes().to_vec(),
-            ptype: normalize_ptype_value(fields[4].as_bytes()),
+        entries.push(StockEntry {
+            s_i_id: fields[0].as_bytes().to_vec(),
+            s_quantity: normalize_quantity_value(fields[2].as_bytes()),
         });
     }
 
     Ok(entries)
 }
 
-/// Read pre-filtered LINEITEM probe file.
-/// Expected format: L_PARTKEY|L_EXTENDEDPRICE|L_DISCOUNT  (3 columns, already filtered)
-fn read_probe_rows(path: &str) -> Result<Vec<ProbeRow>, Box<dyn Error>> {
+/// Read ORDER_LINE probe file.
+/// Format: OL_O_ID|OL_D_ID|OL_W_ID|OL_NUMBER|OL_I_ID|OL_SUPPLY_W_ID|OL_DELIVERY_D|OL_QUANTITY|OL_AMOUNT|OL_DIST_INFO
+fn read_orderline_rows(path: &str) -> Result<Vec<OrderLineRow>, Box<dyn Error>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut rows = Vec::new();
@@ -166,18 +176,15 @@ fn read_probe_rows(path: &str) -> Result<Vec<ProbeRow>, Box<dyn Error>> {
         if line.trim().is_empty() {
             continue;
         }
-        let Some(fields) = parse_tpch_line(&line) else {
+        let Some(fields) = parse_tpcc_line(&line) else {
             continue;
         };
-        if fields.len() < 3 {
+        if fields.len() < 8 {
             continue;
         }
-        let partkey = fields[0].as_bytes().to_vec();
-        let extended_price = fields[1].parse::<f64>().unwrap_or(0.0);
-        let discount = fields[2].parse::<f64>().unwrap_or(0.0);
-        let revenue = extended_price * (1.0 - discount);
-
-        rows.push(ProbeRow { partkey, revenue });
+        let ol_i_id = fields[4].as_bytes().to_vec();
+        let ol_quantity = fields[7].parse::<i64>().unwrap_or(5);
+        rows.push(OrderLineRow { ol_i_id, ol_quantity });
     }
 
     Ok(rows)
@@ -200,8 +207,12 @@ fn create_table(table_type: TableType, bucket_num: usize) -> Result<TableEngine,
                 as BoxMvccIndexMemPool
         }
         TableType::Par => {
-            Box::new(TsPartitionedTable::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?)
-                as BoxMvccIndexMemPool
+            Box::new(TsPartitionedTable::create_with_bucket_num(
+                c_key,
+                mem_pool.clone(),
+                bucket_num,
+            )?)
+            as BoxMvccIndexMemPool
         }
         TableType::Rust => {
             Box::new(MvccRustHashMap::create_with_bucket_num(c_key, mem_pool.clone(), bucket_num)?)
@@ -214,50 +225,39 @@ fn create_table(table_type: TableType, bucket_num: usize) -> Result<TableEngine,
                 bucket_num,
             )));
         }
-        TableType::Ivmh => {
-            return Ok(TableEngine::Ivmh(IvmHashTable::new_with_bucket_num(
-                c_key,
-                mem_pool.clone(),
-                bucket_num,
-            )));
-        }
     };
     Ok(TableEngine::Mvcc(t))
 }
 
 fn run_probe(
     table: &TableEngine,
-    probe_rows: &[ProbeRow],
+    probe_rows: &[OrderLineRow],
     ts: Timestamp,
     repair_mode: RepairMode,
 ) -> Result<JoinStats, Box<dyn Error>> {
     let mut matched_rows: u64 = 0;
-    let mut promo_revenue: f64 = 0.0;
-    let mut total_revenue: f64 = 0.0;
+    let mut total_qty_product: i64 = 0;
+    let mut nr_buf = HashMap::new();
+    let mut rr_dedup = HashMap::new();
+    let mut rr_versions: VersionsMap = HashMap::new();
 
     for row in probe_rows {
         let matches = match table {
             TableEngine::Mvcc(t) => match repair_mode {
-                RepairMode::Rr => t.scan_key_vec_read_repair(&row.partkey, ts)?,
-                RepairMode::Nr | RepairMode::Wr => t.scan_key_vec(&row.partkey, ts)?,
+                RepairMode::Rr => t.scan_key_vec_rr(&row.ol_i_id, ts, &mut rr_dedup, &mut rr_versions)?,
+                RepairMode::Nr => t.scan_key_vec_nr(&row.ol_i_id, ts, &mut nr_buf)?,
+                RepairMode::Wr => t.scan_key_vec(&row.ol_i_id, ts)?,
             },
-            TableEngine::Snap(t) => t.scan_key_vec(&row.partkey, ts)?,
-            TableEngine::Ivmh(t) => t.scan_key_vec(&row.partkey, ts)?,
+            TableEngine::Snap(t) => t.scan_key_vec(&row.ol_i_id, ts)?,
         };
-        for (_pkey, value) in matches {
+        for (_pk, value) in matches {
             matched_rows += 1;
-            total_revenue += row.revenue;
-            if value.starts_with(b"PROMO") {
-                promo_revenue += row.revenue;
-            }
+            let s_quantity = parse_quantity_value(&value);
+            total_qty_product += s_quantity * row.ol_quantity;
         }
     }
 
-    Ok(JoinStats {
-        matched_rows,
-        promo_revenue,
-        total_revenue,
-    })
+    Ok(JoinStats { matched_rows, total_qty_product })
 }
 
 // ---------------------------------------------------------------------------
@@ -270,8 +270,8 @@ fn write_result_csv(
     repair_mode: RepairMode,
     update_pct: Option<f64>,
     distribution: Option<&str>,
-    part_rows: usize,
-    lineitem_rows: usize,
+    stock_rows: usize,
+    orderline_rows: usize,
     update_ops: usize,
     j1_alloc_ms: f64,
     j1_insert_ms: f64,
@@ -290,32 +290,24 @@ fn write_result_csv(
     if !exists {
         writeln!(
             file,
-            "table_type,repair_mode,update_pct,distribution,part_rows,lineitem_rows,update_ops,\
+            "table_type,repair_mode,update_pct,distribution,stock_rows,orderline_rows,update_ops,\
              j1_alloc_ms,j1_insert_ms,\
              join1_build_ms,join1_probe_ms,update_ms,join2_build_ms,join2_probe_ms,total_ms,\
-             join1_matched,join2_matched,join1_q14_ratio,join2_q14_ratio"
+             join1_matched,join2_matched,join1_total_qty,join2_total_qty"
         )?;
     }
 
-    let q14 = |s: &JoinStats| -> f64 {
-        if s.total_revenue > 0.0 {
-            100.0 * s.promo_revenue / s.total_revenue
-        } else {
-            0.0
-        }
-    };
-
     writeln!(
         file,
-        "{:?},{:?},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6}",
+        "{:?},{:?},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{}",
         table_type,
         repair_mode,
         update_pct
             .map(|v| format!("{:.6}", v))
             .unwrap_or_default(),
         distribution.unwrap_or(""),
-        part_rows,
-        lineitem_rows,
+        stock_rows,
+        orderline_rows,
         update_ops,
         j1_alloc_ms,
         j1_insert_ms,
@@ -327,30 +319,27 @@ fn write_result_csv(
         total_j_u_j_ms,
         join1_stats.matched_rows,
         join2_stats.matched_rows,
-        q14(join1_stats),
-        q14(join2_stats),
+        join1_stats.total_qty_product,
+        join2_stats.total_qty_product,
     )?;
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Main J-U-J cycle
 // ---------------------------------------------------------------------------
 
-/// Run a full J-U-J cycle. Returns (j1_alloc, j1_insert, j1_build, j1_probe, update, j2_build, j2_probe, j1_stats, j2_stats).
+/// Run one full Join-Update-Join cycle.
+/// Returns (j1_alloc, j1_insert, j1_build, j1_probe, update, j2_build, j2_probe, j1_stats, j2_stats).
 fn run_juj(
     cli: &Cli,
-    part_entries: &[PartEntry],
-    probe_rows: &[ProbeRow],
-    updates: &[PartEntry],
+    stock_entries: &[StockEntry],
+    probe_rows: &[OrderLineRow],
+    updates: &[StockEntry],
 ) -> Result<(f64, f64, f64, f64, f64, f64, f64, JoinStats, JoinStats), Box<dyn Error>> {
     // ====================================================================
     //  Phase 1: JOIN 1  (table allocation + build + probe)
-    //
-    //  Table allocation is included in build timing for fairness:
-    //  SNAP's mark_ts internally allocates a new hash table each time,
-    //  so MVHT's table allocation should also be measured.
     // ====================================================================
 
     // -- join1 build: table allocation --
@@ -362,25 +351,19 @@ fn run_juj(
     let j1_build_start = Instant::now();
     match &table {
         TableEngine::Mvcc(t) => {
-            for entry in part_entries {
+            for entry in stock_entries {
                 t.insert(
-                    entry.partkey.clone(),
-                    entry.partkey.clone(),
+                    entry.s_i_id.clone(),
+                    entry.s_i_id.clone(),
                     0,
                     0,
-                    entry.ptype.clone(),
+                    entry.s_quantity.clone(),
                 )?;
             }
         }
         TableEngine::Snap(t) => {
-            for entry in part_entries {
-                t.add_insert_rec_new(&entry.partkey, &entry.partkey, &entry.ptype);
-            }
-            t.mark_ts(0);
-        }
-        TableEngine::Ivmh(t) => {
-            for entry in part_entries {
-                t.add_insert_rec(&entry.partkey, &entry.partkey, &entry.ptype);
+            for entry in stock_entries {
+                t.add_insert_rec_new(&entry.s_i_id, &entry.s_i_id, &entry.s_quantity);
             }
             t.mark_ts(0);
         }
@@ -394,11 +377,10 @@ fn run_juj(
     let join1_probe_ms = j1_probe_start.elapsed().as_secs_f64() * 1000.0;
 
     // ====================================================================
-    //  Phase 2: UPDATE
+    //  Phase 2: UPDATE  (skewed update on STOCK.S_QUANTITY)
     // ====================================================================
 
-    // Split epoch before updates: creates a new partition for the update phase.
-    // No-op for non-partitioned implementations (Heap, Chain, Rust).
+    // Split epoch before updates (no-op for non-partitioned impls)
     if let TableEngine::Mvcc(t) = &table {
         t.split_at_ts(1)?;
     }
@@ -411,11 +393,11 @@ fn run_juj(
                 for (idx, update) in updates.iter().enumerate() {
                     let ts = (idx + 1) as u64;
                     t.update_write_repair(
-                        update.partkey.clone(),
-                        update.partkey.clone(),
+                        update.s_i_id.clone(),
+                        update.s_i_id.clone(),
                         ts,
                         0,
-                        update.ptype.clone(),
+                        update.s_quantity.clone(),
                     )?;
                 }
                 t.bulk_update_end()?;
@@ -423,22 +405,16 @@ fn run_juj(
                 for (idx, update) in updates.iter().enumerate() {
                     let ts = (idx + 1) as u64;
                     t.update(
-                        update.partkey.clone(),
-                        update.partkey.clone(),
+                        update.s_i_id.clone(),
+                        update.s_i_id.clone(),
                         ts,
                         0,
-                        update.ptype.clone(),
+                        update.s_quantity.clone(),
                     )?;
                 }
             }
         }
         TableEngine::Snap(_) => {}
-        TableEngine::Ivmh(t) => {
-            // In-place update on current state (O(|Δ|))
-            for update in updates {
-                t.add_update_rec(&update.partkey, &update.partkey, &update.ptype);
-            }
-        }
     }
     let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -450,25 +426,26 @@ fn run_juj(
 
     let (join2_build_ms, join2_probe_ms, join2_stats) = match &table {
         TableEngine::Snap(_) => {
-            // -- prepare updated base table (outside timing) --
+            // Build override map with the LAST update value per key
             let mut overrides: HashMap<Vec<u8>, Vec<u8>> = HashMap::with_capacity(updates.len());
             for update in updates {
-                overrides.insert(update.partkey.clone(), update.ptype.clone());
+                overrides.insert(update.s_i_id.clone(), update.s_quantity.clone());
             }
+
+            // Rebuild hash table with updated values (outside of timed section)
             let rebuilt = match create_table(TableType::Naive, cli.bucket_num)? {
                 TableEngine::Snap(t) => t,
                 TableEngine::Mvcc(_) => unreachable!(),
-                TableEngine::Ivmh(_) => unreachable!(),
             };
-            for entry in part_entries {
-                let ptype = overrides
-                    .get(&entry.partkey)
+            for entry in stock_entries {
+                let qty = overrides
+                    .get(&entry.s_i_id)
                     .cloned()
-                    .unwrap_or_else(|| entry.ptype.clone());
-                rebuilt.add_insert_rec_new(&entry.partkey, &entry.partkey, &ptype);
+                    .unwrap_or_else(|| entry.s_quantity.clone());
+                rebuilt.add_insert_rec_new(&entry.s_i_id, &entry.s_i_id, &qty);
             }
 
-            // -- join2 build: hash index construction only (timed) --
+            // -- join2 build: mark_ts (snapshot finalization, timed) --
             let j2_build_start = Instant::now();
             rebuilt.mark_ts(after_update_ts);
             let j2_build = j2_build_start.elapsed().as_secs_f64() * 1000.0;
@@ -481,21 +458,8 @@ fn run_juj(
 
             (j2_build, j2_probe, stats)
         }
-        TableEngine::Ivmh(t) => {
-            // IVMH: current state already updated in-place.
-            // Materialise a new snapshot (O(|R|) rebuild from current state).
-            let j2_build_start = Instant::now();
-            t.mark_ts(after_update_ts);
-            let j2_build = j2_build_start.elapsed().as_secs_f64() * 1000.0;
-
-            // -- join2 probe --
-            let j2_probe_start = Instant::now();
-            let stats = run_probe(&table, probe_rows, after_update_ts, cli.repair_mode)?;
-            let j2_probe = j2_probe_start.elapsed().as_secs_f64() * 1000.0;
-
-            (j2_build, j2_probe, stats)
-        }
         TableEngine::Mvcc(_) => {
+            // MVHT: just probe the same table at the new timestamp
             let j2_probe_start = Instant::now();
             let stats = run_probe(&table, probe_rows, after_update_ts, cli.repair_mode)?;
             let j2_probe = j2_probe_start.elapsed().as_secs_f64() * 1000.0;
@@ -521,36 +485,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
     // ── Read input files (outside timing) ──────────────────────────────
-    let part_entries = read_part_table(&cli.part_file)?;
-    let probe_rows = read_probe_rows(&cli.lineitem_file)?;
-    let updates = read_part_table(&cli.updates_file)?;
+    let stock_entries = read_stock_table(&cli.stock_file)?;
+    let probe_rows = read_orderline_rows(&cli.orderline_file)?;
+    let updates = read_stock_table(&cli.updates_file)?;
 
     println!(
-        "Loaded: part_rows={}, probe_rows={}, update_ops={}",
-        part_entries.len(),
+        "Loaded: stock_rows={}, orderline_rows={}, update_ops={}",
+        stock_entries.len(),
         probe_rows.len(),
         updates.len()
     );
 
     // ── Warmup (discard results) ───────────────────────────────────────
     for w in 0..cli.warmup {
-        let _ = run_juj(&cli, &part_entries, &probe_rows, &updates)?;
+        let _ = run_juj(&cli, &stock_entries, &probe_rows, &updates)?;
         println!("warmup {}/{} done", w + 1, cli.warmup);
     }
 
     // ── Measured runs ──────────────────────────────────────────────────
     let n = cli.repeat.max(1);
-    // Each run: [j1_alloc, j1_insert, j1_build, j1_probe, update, j2_build, j2_probe]
     let mut runs: Vec<[f64; 7]> = Vec::with_capacity(n);
     let mut last_j1_stats = None;
     let mut last_j2_stats = None;
 
     for r in 0..n {
         let (j1alloc, j1ins, j1b, j1p, upd, j2b, j2p, j1s, j2s) =
-            run_juj(&cli, &part_entries, &probe_rows, &updates)?;
+            run_juj(&cli, &stock_entries, &probe_rows, &updates)?;
         let total = j1b + j1p + upd + j2b + j2p;
         println!(
-            "  run {}/{}: j1_alloc={:.3} j1_insert={:.3} j1_build={:.3} j1_probe={:.3} update={:.3} j2_build={:.3} j2_probe={:.3} total={:.3}",
+            "  run {}/{}: j1_alloc={:.3} j1_insert={:.3} j1_build={:.3} j1_probe={:.3} \
+             update={:.3} j2_build={:.3} j2_probe={:.3} total={:.3}",
             r + 1, n, j1alloc, j1ins, j1b, j1p, upd, j2b, j2p, total
         );
         runs.push([j1alloc, j1ins, j1b, j1p, upd, j2b, j2p]);
@@ -558,8 +522,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         last_j2_stats = Some(j2s);
     }
 
-    // ── Trimmed mean: sort by total, drop top/bottom `trim` runs ──
-    let trim = cli.trim.min(n / 2); // can't trim more than half
+    // ── Trimmed mean ──────────────────────────────────────────────────
+    let trim = cli.trim.min(n / 2);
     runs.sort_by(|a, b| {
         let ta: f64 = a.iter().sum();
         let tb: f64 = b.iter().sum();
@@ -569,7 +533,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let kept = trimmed.len() as f64;
     println!(
         "trimmed mean: {} runs total, dropped {} lowest + {} highest, averaging {} runs",
-        n, trim, trim, trimmed.len()
+        n,
+        trim,
+        trim,
+        trimmed.len()
     );
 
     let mut avg = [0.0_f64; 7];
@@ -595,23 +562,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let join1_stats = last_j1_stats.unwrap();
     let join2_stats = last_j2_stats.unwrap();
 
-    // ====================================================================
-    //  Report
-    // ====================================================================
-
-    let q14 = |s: &JoinStats| -> f64 {
-        if s.total_revenue > 0.0 {
-            100.0 * s.promo_revenue / s.total_revenue
-        } else {
-            0.0
-        }
-    };
-
-    println!("=== tpch_q14_join_update_join (avg of {} runs) ===", n);
+    // ── Report ─────────────────────────────────────────────────────────
+    println!("=== stock_join_update_join (avg of {} runs) ===", trimmed.len());
     println!("table_type={:?}, repair_mode={:?}", cli.table_type, cli.repair_mode);
     println!(
-        "part_rows={}, probe_rows={}, update_ops={}",
-        part_entries.len(), probe_rows.len(), updates.len()
+        "stock_rows={}, orderline_rows={}, update_ops={}",
+        stock_entries.len(),
+        probe_rows.len(),
+        updates.len()
     );
     println!(
         "j1_alloc_ms={:.6}, j1_insert_ms={:.6}, join1_build_ms={:.6}, join1_probe_ms={:.6}, \
@@ -626,12 +584,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         total_j_u_j_ms
     );
     println!(
-        "join1: matched={}, q14={:.6}",
-        join1_stats.matched_rows, q14(&join1_stats)
+        "join1: matched={}, total_qty_product={}",
+        join1_stats.matched_rows, join1_stats.total_qty_product
     );
     println!(
-        "join2: matched={}, q14={:.6}",
-        join2_stats.matched_rows, q14(&join2_stats)
+        "join2: matched={}, total_qty_product={}",
+        join2_stats.matched_rows, join2_stats.total_qty_product
     );
 
     if let Some(output_csv) = &cli.output_csv {
@@ -641,7 +599,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             cli.repair_mode,
             cli.update_pct,
             cli.distribution.as_deref(),
-            part_entries.len(),
+            stock_entries.len(),
             probe_rows.len(),
             updates.len(),
             j1_alloc_ms,

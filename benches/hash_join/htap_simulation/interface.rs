@@ -5,7 +5,7 @@ use fbtree::{
         hash_heap::hash_heap_table::HeapHashTable,
         ts_partitioned::ts_partitioned_table::TsPartitionedTable, Delta, MvccIndex,
     },
-    naive_hash_index::NaiveMvHashTable,
+    naive_hash_index::{NaiveMvHashTable, IvmHashTable},
     prelude::{AccessMethodError, Timestamp},
 };
 
@@ -364,9 +364,77 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
         NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
     }
-    fn garbage_collect(&self, ts: Timestamp) {}
+    fn garbage_collect(&self, ts: Timestamp) {
+        NaiveMvHashTable::garbage_collect(&self, ts);
+    }
 
     fn collect_space_stat(&self) -> StatCollector {
         NaiveMvHashTable::collect_space_stat_into_collector(&self)
+    }
+}
+
+// IVMH — IVM-style baseline: in-place update + rebuild for snapshot
+impl<T: MemPool + 'static> MultiVersionJoinTable for IvmHashTable<T> {
+    fn after_mark_ts(&self, _ts: Timestamp) {}
+
+    fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
+        IvmHashTable::add_insert_rec(self, key, pkey, value);
+    }
+
+    fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
+        IvmHashTable::scan_key_vec(self, join_key, ts).unwrap()
+    }
+
+    fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
+        IvmHashTable::get_key(self, key, pkey, ts)
+    }
+
+    fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], _ts: Timestamp) {
+        // In-place overwrite on current state — O(1) per record
+        IvmHashTable::add_update_rec(self, key, pkey, value);
+    }
+
+    fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], _ts: Timestamp) {
+        // Same as update — IVMH has no version chains to repair
+        IvmHashTable::add_update_rec(self, key, pkey, value);
+    }
+
+    fn mark_ts(&self, ts: u64) {
+        // Rebuild snapshot from current state — O(|R|)
+        IvmHashTable::mark_ts(self, ts);
+    }
+
+    fn scan_delta(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+        _is_read_repair: bool,
+    ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>> {
+        Box::new(IvmHashTable::delta_scan(self, from_ts, to_ts).unwrap())
+    }
+
+    fn begin_txs(&self, _optype: OperationType) -> Result<(), AccessMethodError> {
+        Ok(())
+    }
+
+    fn end_txs(&self, _optype: OperationType) -> Result<(), AccessMethodError> {
+        Ok(())
+    }
+
+    fn scan(
+        &self,
+        ts: Timestamp,
+        _is_read_repair: bool,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
+    {
+        IvmHashTable::scan(self, ts)
+    }
+
+    fn garbage_collect(&self, ts: Timestamp) {
+        IvmHashTable::garbage_collect(self, ts);
+    }
+
+    fn collect_space_stat(&self) -> StatCollector {
+        IvmHashTable::collect_space_stat_into_collector(self)
     }
 }

@@ -202,6 +202,19 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         }
     }
 
+    /// WR-optimized scan: only scan recent chain, skip history entirely.
+    /// Safe when write-repair ensures the recent chain always holds the latest version.
+    pub fn scan_key_into_recent_only(
+        &self,
+        search_key: &[u8],
+        ts: &Timestamp,
+        res: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
+        self.recent_chain
+            .chain_scan_key(search_key, ts, res)
+            .unwrap();
+    }
+
     pub fn scan_into_vec(
         &self,
         ts: Timestamp,

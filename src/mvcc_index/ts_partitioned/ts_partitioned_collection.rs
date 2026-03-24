@@ -262,6 +262,21 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         ts: Timestamp,
         key: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let mut buf = HashMap::new();
+        self.scan_with_key_nr(&mut buf, ts, key)
+    }
+
+    /// NR scan with reusable HashMap buffer to avoid per-probe allocation.
+    /// Uses chain_scan_key (Vec append) per partition instead of scan_key_vec_read_repair
+    /// (which creates an internal HashMap).
+    pub fn scan_with_key_nr(
+        &self,
+        nr_buf: &mut HashMap<Vec<u8>, Vec<u8>>,
+        ts: Timestamp,
+        key: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        nr_buf.clear();
+
         if self.partitions.len() == 1 {
             let partition = &self.partitions[0];
             if ts < partition.range.0 {
@@ -273,44 +288,47 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
             if chain.is_empty() {
                 return Ok(Vec::new());
             }
-            return chain.scan_key_vec_read_repair(key, &ts, None);
+            // Single partition: no dedup needed, use fast Vec path.
+            let mut res = Vec::new();
+            chain.chain_scan_key(key, &ts, &mut res)?;
+            return Ok(res);
         }
 
-        let mut best_candidates = HashMap::new();
+        // Multiple partitions: use chain_scan_key (Vec) + external HashMap dedup.
+        let mut temp = Vec::new();
         for p in self.partitions.iter() {
             let Some(chain) = p.chain() else {
                 continue;
             };
             if ts >= p.range.0 && !chain.is_empty() {
-                let partition_scanner = chain.scan_key_vec_read_repair(key, &ts, None)?;
-                // Iterate over all entries from the chain.
-                for entry in partition_scanner {
-                    let (pkey, value) = entry;
-                    best_candidates.entry(pkey).or_insert(value);
+                temp.clear();
+                chain.chain_scan_key(key, &ts, &mut temp)?;
+                for (pkey, value) in temp.drain(..) {
+                    nr_buf.entry(pkey).or_insert(value);
                 }
             }
         }
-        Ok(best_candidates.into_iter().collect())
+        Ok(nr_buf.drain().collect())
     }
 
     /// Fast path for single-key lookup after write repair (or read repair completion).
     /// Since repair guarantees at most one valid version per pkey at a given ts,
-    /// we can skip HashMap dedup and directly collect into a Vec.
+    /// we can skip HashMap dedup and directly append into the caller's Vec.
     pub fn scan_with_key_write_repair(
         &self,
         ts: Timestamp,
         key: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
-        let mut result = Vec::new();
+        result: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), AccessMethodError> {
         for p in self.partitions.iter() {
             let Some(chain) = p.chain() else {
                 continue;
             };
             if ts >= p.range.0 && !chain.is_empty() {
-                chain.chain_scan_key(key, &ts, &mut result)?;
+                chain.chain_scan_key(key, &ts, result)?;
             }
         }
-        Ok(result)
+        Ok(())
     }
 
     pub fn scan_with_key_read_repair(
@@ -318,6 +336,22 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
         ts: Timestamp,
         key: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        let mut best_candidates = HashMap::new();
+        let mut versions_map = HashMap::new();
+        self.scan_with_key_rr(&mut best_candidates, &mut versions_map, ts, key)
+    }
+
+    /// RR scan with reusable HashMap buffers to avoid per-probe allocation.
+    pub fn scan_with_key_rr(
+        &self,
+        rr_dedup: &mut HashMap<Vec<u8>, Vec<u8>>,
+        rr_versions: &mut HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>,
+        ts: Timestamp,
+        key: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
+        rr_dedup.clear();
+        rr_versions.clear();
+
         if self.partitions.len() == 1 {
             let partition = &self.partitions[0];
             if ts < partition.range.0 {
@@ -330,16 +364,13 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
                 return Ok(Vec::new());
             }
 
-            let mut versions_map = HashMap::new();
-            let res = chain.scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
-            for versions in versions_map.into_values() {
-                read_repair_vec(&self.mem_pool, &versions, self.c_key);
+            let res = chain.scan_key_vec_read_repair(key, &ts, Some(rr_versions))?;
+            for versions in rr_versions.drain() {
+                read_repair_vec(&self.mem_pool, &versions.1, self.c_key);
             }
             return Ok(res);
         }
 
-        let mut best_candidates: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-        let mut versions_map = HashMap::new();
         // iterate in natural order
         for p in self.partitions.iter() {
             let Some(chain) = p.chain() else {
@@ -347,19 +378,18 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
             };
             if ts >= p.range.0 && !chain.is_empty() {
                 let partition_scanner =
-                    chain.scan_key_vec_read_repair(key, &ts, Some(&mut versions_map))?;
-                // Iterate over all entries from the chain.
+                    chain.scan_key_vec_read_repair(key, &ts, Some(rr_versions))?;
                 for entry in partition_scanner {
-                    best_candidates.insert(entry.0, entry.1);
+                    rr_dedup.insert(entry.0, entry.1);
                 }
             }
         }
 
-        for versions in versions_map.into_values() {
-            read_repair_vec(&self.mem_pool, &versions, self.c_key);
+        for versions in rr_versions.drain() {
+            read_repair_vec(&self.mem_pool, &versions.1, self.c_key);
         }
 
-        Ok(best_candidates.into_iter().collect())
+        Ok(rr_dedup.drain().collect())
     }
 
     pub fn scan_all(&self) -> Result<Vec<MvccEntry>, AccessMethodError> {

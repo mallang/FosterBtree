@@ -436,11 +436,22 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
 
-        let pk_v = chain.scan_key_vec_read_repair(key, &ts, None)?;
+        let mvccs = if self.is_write_repair.load(Ordering::SeqCst) {
+            let mut res = vec![];
+            chain.chain_scan_key(key, &ts, &mut res)?;
+            res
+        } else {
+            let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+            if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
+                let mut res = vec![];
+                chain.chain_scan_key(key, &ts, &mut res)?;
+                res
+            } else {
+                chain.scan_key_vec_read_repair(key, &ts, None)?
+            }
+        };
 
-        let mapped: IntoIter<(Vec<u8>, Vec<u8>)> = pk_v.into_iter();
-
-        Ok(Box::new(mapped))
+        Ok(Box::new(mvccs.into_iter()))
     }
 
     fn scan_key_vec(
@@ -451,7 +462,18 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];
         let mut res = vec![];
-        chain.heap_scan_key_no_repair(key, &ts, &mut res)?;
+        if self.is_write_repair.load(Ordering::SeqCst) {
+            // WR fast path: chain_scan_key uses Vec append + proper ts filter (no BTreeMap)
+            chain.chain_scan_key(key, &ts, &mut res)?;
+        } else {
+            let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+            if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
+                // Repair already done → same fast path
+                chain.chain_scan_key(key, &ts, &mut res)?;
+            } else {
+                chain.heap_scan_key_no_repair(key, &ts, &mut res)?;
+            }
+        }
 
         Ok(res)
     }
@@ -463,12 +485,17 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
         let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
         let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
-        let is_need_repair = if ts > repair_ts && repair_ts < latest_update_ts {
-            // scan key can not repair the whole table
-            true
-        } else {
-            false
-        };
+
+        if self.is_write_repair.load(Ordering::SeqCst) || repair_ts >= ts.min(latest_update_ts) {
+            // WR or already repaired → Vec fast path (no dedup needed)
+            let idx = self.get_bucket_index(key);
+            let chain = &self.bucket_entries[idx];
+            let mut res = vec![];
+            chain.chain_scan_key(key, &ts, &mut res)?;
+            return Ok(res);
+        }
+
+        let is_need_repair = ts > repair_ts && repair_ts < latest_update_ts;
 
         let idx = self.get_bucket_index(key);
         let chain = &self.bucket_entries[idx];

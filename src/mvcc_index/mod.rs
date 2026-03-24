@@ -15,11 +15,15 @@ pub type TxId = u64; // Transaction ID
 
 use crate::{
     bp::{ContainerKey, InMemPool, MemPool},
-    mvcc_index::hash_common::StatCollector,
+    mvcc_index::hash_common::{MvccEntryLoc, StatCollector},
     prelude::{AccessMethodError, Timestamp},
 };
+
+/// Reusable buffer type for read-repair version tracking.
+pub type VersionsMap = HashMap<Vec<u8>, Vec<(Timestamp, MvccEntryLoc, bool)>>;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     error::Error,
     fmt::Debug,
     hash::{Hash, Hasher},
@@ -257,6 +261,18 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error>;
 
+    /// Like `scan_key_vec`, but accepts a reusable HashMap buffer for NR dedup.
+    /// Default impl ignores the buffer and delegates to `scan_key_vec`.
+    /// EPOCH overrides this to avoid per-probe HashMap allocation.
+    fn scan_key_vec_nr(
+        &self,
+        key: &[u8],
+        ts: Timestamp,
+        _nr_buf: &mut HashMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        self.scan_key_vec(key, ts)
+    }
+
     /// Scans all entries with the given key at the specified timestamp.
     /// Returns a vec over primary key and value pairs.
     fn scan_key_vec_read_repair(
@@ -264,6 +280,18 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         key: &Self::Key,
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error>;
+
+    /// Like `scan_key_vec_read_repair`, but accepts reusable buffers.
+    /// Default impl ignores the buffers. EPOCH overrides to avoid per-probe allocation.
+    fn scan_key_vec_rr(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+        _rr_dedup: &mut HashMap<Vec<u8>, Vec<u8>>,
+        _rr_versions: &mut VersionsMap,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        self.scan_key_vec_read_repair(key, ts)
+    }
 
     /// Delta scan between two timestamps.
     /// Returns an iterator over key-primary key and the delta (change) that occurred between `from_ts` and `to_ts`.

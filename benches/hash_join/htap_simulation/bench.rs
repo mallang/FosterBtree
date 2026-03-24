@@ -56,6 +56,13 @@ fn run_no_repair(bench: &TxBench, cli: &Cli) {
                 NUM_BUCKETS,
             ),
         ) as BoxMVIndex,
+        cli::TableType::Ivmh => Box::new(
+            fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            ),
+        ) as BoxMVIndex,
     };
 
     bench.run_all_txs_no_repair(&table);
@@ -90,6 +97,13 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
                     NUM_BUCKETS,
                 ),
             ) as BoxMVIndex,
+        cli::TableType::Ivmh => Box::new(
+            fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            ),
+        ) as BoxMVIndex,
         };
 
         bench.run_all_txs_no_repair(&table);
@@ -123,6 +137,13 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
                     NUM_BUCKETS,
                 ),
             ) as BoxMVIndex,
+        cli::TableType::Ivmh => Box::new(
+            fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            ),
+        ) as BoxMVIndex,
         };
 
         bench.run_all_txs_read_repair(&table);
@@ -156,6 +177,13 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
                     NUM_BUCKETS,
                 ),
             ) as BoxMVIndex,
+        cli::TableType::Ivmh => Box::new(
+            fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            ),
+        ) as BoxMVIndex,
         };
 
         bench.run_all_txs_write_repair(&table);
@@ -191,6 +219,13 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
                     NUM_BUCKETS,
                 ),
             ) as BoxMVIndex,
+        cli::TableType::Ivmh => Box::new(
+            fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            ),
+        ) as BoxMVIndex,
         };
 
         bench.run_all_txs_no_repair(&table);
@@ -223,6 +258,13 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
                     NUM_BUCKETS,
                 ),
             ) as BoxMVIndex,
+        cli::TableType::Ivmh => Box::new(
+            fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
+                c_key,
+                mem_pool,
+                NUM_BUCKETS,
+            ),
+        ) as BoxMVIndex,
         };
 
         bench.run_all_txs_no_repair(&table);

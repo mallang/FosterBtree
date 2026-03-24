@@ -3,7 +3,7 @@ use crate::{
     log_warn,
     mvcc_index::{
         hash_common::{read_repair_vec, BulkUpdate, StatCollector, DEFAULT_BUCKET_NUM},
-        Delta, MvccEntry, MvccIndex, TxId,
+        Delta, MvccEntry, MvccIndex, TxId, VersionsMap,
     },
     prelude::{AccessMethodError, Timestamp},
 };
@@ -409,15 +409,16 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         let partitions = self.bucket(idx);
 
         let mvccs = if self.is_write_repair.load(Ordering::SeqCst) {
-            // write repair done → no dedup needed, use vector-based fast path
-            partitions.scan_with_key_write_repair(ts, key)?
+            let mut res = Vec::new();
+            partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+            res
         } else {
             let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
             if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
-                // read repair completed for this ts → same fast path
-                partitions.scan_with_key_write_repair(ts, key)?
+                let mut res = Vec::new();
+                partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+                res
             } else {
-                // no repair → need HashMap dedup
                 partitions.scan_with_key(ts, key)?
             }
         };
@@ -430,9 +431,46 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         key: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
-        Ok(self
-            .scan_key(key, ts)
-            .map(|iter| iter.collect::<Vec<_>>())?)
+        let idx = self.get_bucket_index(key);
+        let partitions = self.bucket(idx);
+
+        let mut res = Vec::new();
+        if self.is_write_repair.load(Ordering::SeqCst) {
+            partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+        } else {
+            let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+            if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
+                partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+            } else {
+                return partitions.scan_with_key(ts, key);
+            }
+        }
+        Ok(res)
+    }
+
+    fn scan_key_vec_nr(
+        &self,
+        key: &[u8],
+        ts: Timestamp,
+        nr_buf: &mut HashMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let idx = self.get_bucket_index(key);
+        let partitions = self.bucket(idx);
+
+        if self.is_write_repair.load(Ordering::SeqCst) {
+            let mut res = Vec::new();
+            partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+            Ok(res)
+        } else {
+            let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+            if self.read_repair_ts.load(Ordering::SeqCst) >= ts.min(latest_update_ts) {
+                let mut res = Vec::new();
+                partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+                Ok(res)
+            } else {
+                partitions.scan_with_key_nr(nr_buf, ts, key)
+            }
+        }
     }
 
     fn scan_key_vec_read_repair(
@@ -455,12 +493,40 @@ impl<T: MemPool + 'static> MvccIndex<T> for TsPartitionedTable<T> {
         } else if self.is_write_repair.load(Ordering::SeqCst)
             || repair_ts >= ts.min(latest_update_ts)
         {
-            // repair already done → no dedup needed
-            partitions.scan_with_key_write_repair(ts, key)?
+            let mut res = Vec::new();
+            partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+            res
         } else {
             partitions.scan_with_key(ts, key)?
         };
         Ok(mvccs)
+    }
+
+    fn scan_key_vec_rr(
+        &self,
+        key: &Self::Key,
+        ts: Timestamp,
+        rr_dedup: &mut HashMap<Vec<u8>, Vec<u8>>,
+        rr_versions: &mut VersionsMap,
+    ) -> Result<Vec<(Self::PKey, Self::Value)>, Self::Error> {
+        let repair_ts = self.read_repair_ts.load(Ordering::SeqCst);
+        let latest_update_ts = self.latest_update_ts.load(Ordering::SeqCst);
+        let is_need_repair = ts > repair_ts && repair_ts < latest_update_ts;
+
+        let idx = self.get_bucket_index(key);
+        let partitions = self.bucket(idx);
+
+        if is_need_repair {
+            partitions.scan_with_key_rr(rr_dedup, rr_versions, ts, key)
+        } else if self.is_write_repair.load(Ordering::SeqCst)
+            || repair_ts >= ts.min(latest_update_ts)
+        {
+            let mut res = Vec::new();
+            partitions.scan_with_key_write_repair(ts, key, &mut res)?;
+            Ok(res)
+        } else {
+            partitions.scan_with_key(ts, key)
+        }
     }
 
     fn scan_all(&self) -> Result<Box<dyn Iterator<Item = MvccEntry> + Send>, Self::Error> {

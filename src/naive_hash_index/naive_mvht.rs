@@ -240,6 +240,11 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         println!("Bucket Count: {}", self.bucket_count);
     }
 
+    /// Remove snapshots with timestamp <= `ts` to free memory.
+    pub fn garbage_collect(&self, ts: Timestamp) {
+        self.naivetables.borrow_mut().retain(|&k, _| k > ts);
+    }
+
     pub fn collect_space_stat_into_collector(&self) -> StatCollector {
         let mut stat = StatCollector::new();
         let tables = self.naivetables.borrow();

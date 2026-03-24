@@ -1,0 +1,2 @@
+# Large TPC-H data files (>50MB) — generate locally with generate_chbenchmark_data.py
+*.tbl

@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["256k_page"]
+default = ["16k_page"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -136,3 +136,14 @@ path = "benches/sigmod/join_benchmark/main.rs"
 name = "tpch_q14_join_update_join"
 path = "benches/sigmod/tpch_q14_join_update_join.rs"
 
+[[bin]]
+name = "stock_join_bench"
+path = "benches/exp4_stock_join/stock_join_bench.rs"
+
+[[bin]]
+name = "ivm_bench"
+path = "benches/exp5_ivm_join/ivm_bench.rs"
+
+[[bin]]
+name = "symmetric_bench"
+path = "benches/exp6_symmetric_join/symmetric_bench.rs"

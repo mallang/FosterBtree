@@ -6,6 +6,7 @@ pub enum TableType {
     Chain,
     Heap,
     Par,
+    Ivmh,
 }
 
 #[derive(Parser, Debug, Clone)]
