@@ -239,6 +239,7 @@ fn create_mvcc_table(
             c_key, mem_pool.clone(), bucket_num,
         )?),
         TableType::Snap => panic!("Use run_symmetric_snap for SNAP"),
+        TableType::Ivmh => panic!("Use run_symmetric_ivmh for IVMH"),
     };
     Ok(t)
 }
