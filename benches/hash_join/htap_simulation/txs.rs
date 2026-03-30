@@ -955,7 +955,7 @@ impl TxBench {
         let cli = &self.cli;
         println!("-----------------------------------------------------------------------");
         println!("Hash table type: {:?}", cli.table_type);
-        // println!("Bucket number: {:?}", cli.bucket_num);
+        println!("Bucket number: {:?}", cli.bucket_num);
         // println!(
         //     "Pkey per Bucket: {}",
         //     PKEY_PER_JOIN_KEY * JOIN_KEY_PER_BUCKET

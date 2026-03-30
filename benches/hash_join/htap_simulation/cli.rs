@@ -38,6 +38,9 @@ pub struct Cli {
     #[arg(long = "scan-count", default_value = "3")]
     pub scan_count: usize,
 
+    #[arg(long = "bucket-num", default_value = "128")]
+    pub bucket_num: usize,
+
     #[arg(long = "delta-count")]
     pub delta_count: Option<usize>,
 

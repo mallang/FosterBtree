@@ -19,8 +19,6 @@ use interface::BoxMVIndex;
 
 use crate::txs::TxBench;
 
-const NUM_BUCKETS: usize = 128;
-
 #[derive(PartialEq)]
 enum RepairType {
     ReadRepair,
@@ -37,30 +35,30 @@ fn run_no_repair(bench: &TxBench, cli: &Cli) {
         cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
             c_key,
             mem_pool,
-            NUM_BUCKETS,
+            cli.bucket_num,
         )) as BoxMVIndex,
         cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
             c_key,
             mem_pool,
-            NUM_BUCKETS,
+            cli.bucket_num,
         )) as BoxMVIndex,
         cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
             c_key,
             mem_pool,
-            NUM_BUCKETS,
+            cli.bucket_num,
         )) as BoxMVIndex,
         cli::TableType::Naive => Box::new(
             fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             ),
         ) as BoxMVIndex,
         cli::TableType::Ivmh => Box::new(
             fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             ),
         ) as BoxMVIndex,
     };
@@ -78,30 +76,30 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
             cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Naive => Box::new(
                 fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
                     c_key,
                     mem_pool,
-                    NUM_BUCKETS,
+                    cli.bucket_num,
                 ),
             ) as BoxMVIndex,
         cli::TableType::Ivmh => Box::new(
             fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             ),
         ) as BoxMVIndex,
         };
@@ -118,30 +116,30 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
             cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Naive => Box::new(
                 fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
                     c_key,
                     mem_pool,
-                    NUM_BUCKETS,
+                    cli.bucket_num,
                 ),
             ) as BoxMVIndex,
         cli::TableType::Ivmh => Box::new(
             fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             ),
         ) as BoxMVIndex,
         };
@@ -158,30 +156,30 @@ fn run_three_repairs(bench: &TxBench, cli: &Cli) {
             cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Naive => Box::new(
                 fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
                     c_key,
                     mem_pool,
-                    NUM_BUCKETS,
+                    cli.bucket_num,
                 ),
             ) as BoxMVIndex,
         cli::TableType::Ivmh => Box::new(
             fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             ),
         ) as BoxMVIndex,
         };
@@ -200,30 +198,30 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
             cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Naive => Box::new(
                 fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
                     c_key,
                     mem_pool,
-                    NUM_BUCKETS,
+                    cli.bucket_num,
                 ),
             ) as BoxMVIndex,
         cli::TableType::Ivmh => Box::new(
             fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             ),
         ) as BoxMVIndex,
         };
@@ -239,30 +237,30 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli) {
             cli::TableType::Chain => Box::new(ChainedHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Heap => Box::new(HeapHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Par => Box::new(TsPartitionedTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             )) as BoxMVIndex,
             cli::TableType::Naive => Box::new(
                 fbtree::naive_hash_index::NaiveMvHashTable::new_with_bucket_num(
                     c_key,
                     mem_pool,
-                    NUM_BUCKETS,
+                    cli.bucket_num,
                 ),
             ) as BoxMVIndex,
         cli::TableType::Ivmh => Box::new(
             fbtree::naive_hash_index::IvmHashTable::new_with_bucket_num(
                 c_key,
                 mem_pool,
-                NUM_BUCKETS,
+                cli.bucket_num,
             ),
         ) as BoxMVIndex,
         };
