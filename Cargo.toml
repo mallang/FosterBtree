@@ -147,3 +147,7 @@ path = "benches/exp5_ivm_join/ivm_bench.rs"
 [[bin]]
 name = "symmetric_bench"
 path = "benches/exp6_symmetric_join/symmetric_bench.rs"
+
+[[bin]]
+name = "exp7_bench"
+path = "benches/exp7_fresh_query/exp7_bench.rs"
