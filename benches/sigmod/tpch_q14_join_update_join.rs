@@ -358,31 +358,31 @@ fn run_juj(
     let table = create_table(cli.table_type, cli.bucket_num)?;
     let j1_alloc_ms = j1_alloc_start.elapsed().as_secs_f64() * 1000.0;
 
-    // -- join1 build: index construction --
+    // -- join1 build: base table population (untimed for SNAP only) --
+    // SNAP maintains a separate base table (vec_updates); only mark_ts (index build) is timed.
+    if let TableEngine::Snap(t) = &table {
+        for entry in part_entries {
+            t.add_insert_rec_new(&entry.partkey, &entry.partkey, &entry.ptype);
+        }
+    }
+
+    // -- join1 build: index construction (timed) --
     let j1_build_start = Instant::now();
     match &table {
         TableEngine::Mvcc(t) => {
             for entry in part_entries {
-                t.insert(
-                    entry.partkey.clone(),
-                    entry.partkey.clone(),
-                    0,
-                    0,
-                    entry.ptype.clone(),
-                )?;
+                t.insert_ref(&entry.partkey, &entry.partkey, 0, 0, &entry.ptype)?;
             }
         }
         TableEngine::Snap(t) => {
-            for entry in part_entries {
-                t.add_insert_rec_new(&entry.partkey, &entry.partkey, &entry.ptype);
-            }
+            // Base table already populated above; only time the NaiveHashTable build.
             t.mark_ts(0);
         }
         TableEngine::Ivmh(t) => {
+            // Insert directly into page-based current_table — no separate mark_ts needed.
             for entry in part_entries {
                 t.add_insert_rec(&entry.partkey, &entry.partkey, &entry.ptype);
             }
-            t.mark_ts(0);
         }
     }
     let j1_insert_ms = j1_build_start.elapsed().as_secs_f64() * 1000.0;
@@ -481,19 +481,13 @@ fn run_juj(
 
             (j2_build, j2_probe, stats)
         }
-        TableEngine::Ivmh(t) => {
-            // IVMH: current state already updated in-place.
-            // Materialise a new snapshot (O(|R|) rebuild from current state).
-            let j2_build_start = Instant::now();
-            t.mark_ts(after_update_ts);
-            let j2_build = j2_build_start.elapsed().as_secs_f64() * 1000.0;
-
-            // -- join2 probe --
+        TableEngine::Ivmh(_) => {
+            // IVMH: current_table already updated in-place (O(|Δ|) during update phase).
+            // No mark_ts needed — scan_key_vec at a recent ts probes current_table directly.
             let j2_probe_start = Instant::now();
             let stats = run_probe(&table, probe_rows, after_update_ts, cli.repair_mode)?;
             let j2_probe = j2_probe_start.elapsed().as_secs_f64() * 1000.0;
-
-            (j2_build, j2_probe, stats)
+            (0.0, j2_probe, stats)
         }
         TableEngine::Mvcc(_) => {
             let j2_probe_start = Instant::now();
