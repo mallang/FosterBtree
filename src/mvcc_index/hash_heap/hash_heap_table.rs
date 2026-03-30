@@ -200,9 +200,22 @@ impl<T: MemPool + 'static> MvccIndex<T> for HeapHashTable<T> {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error> {
-        let entry = MvccEntry::new_with_tx_id(key.clone(), pkey, value, ts, u64::MAX, tx_id);
+        let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         self.insert(&entry)
     }
+
+    fn insert_ref(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        _tx_id: TxId,
+        value: &[u8],
+    ) -> Result<(), Self::Error> {
+        let index = self.get_bucket_index(key);
+        self.bucket_entries[index].insert_ref(key, pkey, value, ts, u64::MAX)
+    }
+
     fn get(
         &self,
         key: &[u8],

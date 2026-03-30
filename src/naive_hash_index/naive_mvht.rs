@@ -76,7 +76,6 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     }
 
     fn build_table_until_now(&self) -> Arc<NaiveHashTable<T>> {
-        // let start = std::time::Instant::now();
         let table = Arc::new(NaiveHashTable::new_with_bucket_num(
             self.c_key,
             self.mem_pool.clone(),
@@ -84,15 +83,15 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         ));
         let cur_table = self.map_current_recs.borrow();
         let vec_updates = self.vec_updates.borrow();
-        for (_, idx) in cur_table.iter() {
-            let rec = &vec_updates[*idx];
+        // Sort indices for sequential (cache-friendly) access to vec_updates.
+        let mut indices: Vec<usize> = cur_table.values().copied().collect();
+        indices.sort_unstable();
+        for idx in indices {
+            let rec = &vec_updates[idx];
             table
                 .insert(RecordRef::new(&rec.key(), &rec.pkey(), &rec.val()))
                 .unwrap();
         }
-
-        // let elapsed = start.elapsed();
-        // println!("time elapsed: {:?}, row count: {:?}", elapsed, cur_table.len());
         table
     }
 

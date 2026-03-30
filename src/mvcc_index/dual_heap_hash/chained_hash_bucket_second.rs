@@ -91,6 +91,17 @@ impl<T: MemPool + 'static> DualChainBucket<T> {
         self.recent_chain.insert(entry)
     }
 
+    pub fn insert_ref(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        value: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        self.recent_chain.insert_ref(key, pkey, value, start_ts, end_ts)
+    }
+
     pub fn get(&self, pkey: &[u8], ts: &Timestamp) -> Result<MvccEntry, AccessMethodError> {
         let recent_result = self.recent_chain.chain_get(pkey, ts);
 

@@ -1,11 +1,17 @@
 /// IVMH (IVM-style Hash Table) — IVM baseline for MVHT comparison.
 ///
-/// Maintains a *single current-state* hash table with in-place updates (O(|Δ|)).
-/// When a snapshot or historical probe is requested, the current table is rebuilt
-/// from accumulated state.  Delta scans diff two materialized snapshots (like SNAP).
+/// Maintains a *single page-based current-state NaiveHashTable* with in-place updates.
+/// Updates are O(|Δ|): find pkey in the hash chain and overwrite the value in-place
+/// (same size) or delete + reinsert (different size).
 ///
-/// Compared to SNAP:  update is O(|Δ|) instead of O(|R|),
-///                     but history/delta still requires full rebuild + diff.
+/// Because current_table IS a NaiveHashTable (identical page structure to SNAP snapshots),
+/// J2 probe can read directly from current_table — no mark_ts rebuild needed before probing.
+///
+/// mark_ts() is still available for historical snapshots: it scans current_table and
+/// copies all records into a new NaiveHashTable snapshot (O(|R|), same as SNAP).
+///
+/// Compared to SNAP:  update is O(|Δ|) in-place instead of O(|R|) full rebuild;
+///                    J2 build is 0 ms (no mark_ts needed after updates).
 /// Compared to MVHT:  no multi-version retention, no native delta scan.
 
 use std::{
@@ -29,116 +35,102 @@ use crate::{
     mvcc_index::hash_common::KVWithTs,
 };
 
-/// A single current-state record.
-#[derive(Clone)]
-struct CurrentRec {
-    key: Vec<u8>,
-    pkey: Vec<u8>,
-    value: Vec<u8>,
-}
-
 pub struct IvmHashTable<T: MemPool + 'static> {
     c_key: ContainerKey,
     mem_pool: Arc<T>,
     bucket_count: usize,
 
-    /// Current state: pkey → CurrentRec  (latest version of every record)
-    current_state: std::cell::RefCell<HashMap<Vec<u8>, CurrentRec>>,
+    /// Page-based hash table for the current state.
+    /// Always up-to-date: inserts and updates are applied in-place (O(|Δ|)).
+    /// Probe reads go directly here for recent timestamps — no mark_ts needed.
+    current_table: NaiveHashTable<T>,
 
-    /// Materialized snapshots for scan/probe at specific timestamps
+    /// Materialized snapshots at specific timestamps (for historical reads / delta scan).
     snapshots: std::cell::RefCell<HashMap<Timestamp, Arc<NaiveHashTable<T>>>>,
+
+    /// The most recent timestamp passed to mark_ts().
+    latest_mark_ts: std::cell::RefCell<Option<Timestamp>>,
 }
 
 impl<T: MemPool + 'static> IvmHashTable<T> {
     pub fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, bucket_count: usize) -> Self {
+        let current_table = NaiveHashTable::new_with_bucket_num(c_key, mem_pool.clone(), bucket_count);
         Self {
             c_key,
             mem_pool,
             bucket_count,
-            current_state: std::cell::RefCell::new(HashMap::new()),
+            current_table,
             snapshots: std::cell::RefCell::new(HashMap::new()),
+            latest_mark_ts: std::cell::RefCell::new(None),
         }
     }
 
     // -----------------------------------------------------------------------
-    // In-place updates on current state (O(|Δ|))
+    // Writes — O(|Δ|) in-place on current_table
     // -----------------------------------------------------------------------
 
-    /// Insert a new record into current state.
+    /// Insert a new record into current_table.
     pub fn add_insert_rec(&self, k: &[u8], pk: &[u8], v: &[u8]) {
-        let rec = CurrentRec {
-            key: k.to_vec(),
-            pkey: pk.to_vec(),
-            value: v.to_vec(),
-        };
-        self.current_state.borrow_mut().insert(pk.to_vec(), rec);
+        self.current_table
+            .insert(RecordRef::new(k, pk, v))
+            .unwrap();
     }
 
-    /// Update an existing record in current state (in-place overwrite).
+    /// Update an existing record in current_table (in-place page update).
     pub fn add_update_rec(&self, k: &[u8], pk: &[u8], v: &[u8]) {
-        // Same as insert — overwrites previous version.
-        self.add_insert_rec(k, pk, v);
-    }
-
-    /// Delete a record from current state.
-    pub fn add_delete_rec(&self, pk: &[u8]) {
-        self.current_state.borrow_mut().remove(pk);
+        self.current_table
+            .update(RecordRef::new(k, pk, v))
+            .unwrap();
     }
 
     // -----------------------------------------------------------------------
-    // Snapshot materialisation (O(|R|))
+    // Snapshot materialisation (O(|R|)) — for historical reads
     // -----------------------------------------------------------------------
 
-    /// Materialise the current state as a snapshot at timestamp `ts`.
-    /// Returns the time taken to build the snapshot.
+    /// Materialise current_table as a snapshot at timestamp `ts`.
+    /// Scans current_table and copies all records into a new NaiveHashTable.
     pub fn mark_ts(&self, ts: Timestamp) -> Duration {
         let start = Instant::now();
-        let table = Arc::new(NaiveHashTable::new_with_bucket_num(
+        let snapshot = Arc::new(NaiveHashTable::new_with_bucket_num(
             self.c_key,
             self.mem_pool.clone(),
             self.bucket_count,
         ));
-        let state = self.current_state.borrow();
-        for rec in state.values() {
-            table
-                .insert(RecordRef::new(&rec.key, &rec.pkey, &rec.value))
-                .unwrap();
+        let records: Vec<_> = self.current_table.scan().unwrap().collect();
+        for (k, pk, v) in records {
+            snapshot.insert(RecordRef::new(&k, &pk, &v)).unwrap();
         }
         let duration = start.elapsed();
-        self.snapshots.borrow_mut().insert(ts, table);
-        duration
-    }
-
-    /// Build a snapshot from an explicit set of records (for initial load).
-    pub fn build_table_from_recs_and_ts(
-        &self,
-        ts: Timestamp,
-        recs: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
-    ) -> Duration {
-        let start = Instant::now();
-        let table = Arc::new(NaiveHashTable::new_with_bucket_num(
-            self.c_key,
-            self.mem_pool.clone(),
-            self.bucket_count,
-        ));
-        for (k, pk, v) in &recs {
-            table.insert(RecordRef::new(k, pk, v)).unwrap();
+        self.snapshots.borrow_mut().insert(ts, snapshot);
+        let mut lts = self.latest_mark_ts.borrow_mut();
+        if lts.map_or(true, |prev| ts > prev) {
+            *lts = Some(ts);
         }
-        let duration = start.elapsed();
-        self.snapshots.borrow_mut().insert(ts, table);
         duration
     }
 
     // -----------------------------------------------------------------------
-    // Reads — delegate to materialised snapshots
+    // Reads
     // -----------------------------------------------------------------------
+
+    fn is_recent(&self, ts: Timestamp) -> bool {
+        self.latest_mark_ts.borrow().map_or(true, |lts| ts > lts)
+    }
 
     pub fn get_key(&self, k: &[u8], pk: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
-        let snaps = self.snapshots.borrow();
-        if let Some(table) = snaps.get(&ts) {
-            table.get(k, pk).unwrap()
+        {
+            let snaps = self.snapshots.borrow();
+            if let Some(table) = snaps.get(&ts) {
+                return table.get(k, pk).unwrap();
+            }
+        }
+        if self.is_recent(ts) {
+            // Recent: read directly from current_table (page-based, O(bucket)).
+            self.current_table.get(k, pk).unwrap()
         } else {
-            None
+            self.mark_ts(ts);
+            let snaps = self.snapshots.borrow();
+            snaps.get(&ts).and_then(|t| t.get(k, pk).unwrap())
         }
     }
 
@@ -147,28 +139,28 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         key: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
-        let snaps = self.snapshots.borrow();
-        let mut result = vec![];
-        if let Some(table) = snaps.get(&ts) {
-            table.scan_key_vec(key, &mut result).unwrap();
+        {
+            let snaps = self.snapshots.borrow();
+            if let Some(table) = snaps.get(&ts) {
+                let mut result = vec![];
+                table.scan_key_vec(key, &mut result).unwrap();
+                return Ok(result);
+            }
+        }
+        if self.is_recent(ts) {
+            // Recent: probe current_table directly — page-based, O(bucket).
+            let mut result = vec![];
+            self.current_table.scan_key_vec(key, &mut result).unwrap();
             Ok(result)
         } else {
-            Ok(vec![])
+            self.mark_ts(ts);
+            let snaps = self.snapshots.borrow();
+            let mut result = vec![];
+            if let Some(table) = snaps.get(&ts) {
+                table.scan_key_vec(key, &mut result).unwrap();
+            }
+            Ok(result)
         }
-    }
-
-    /// Scan key against the *current* (not materialised) state.
-    /// Avoids a full rebuild when only current-snapshot probes are needed.
-    pub fn scan_key_vec_current(
-        &self,
-        key: &[u8],
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let state = self.current_state.borrow();
-        state
-            .values()
-            .filter(|rec| rec.key == key)
-            .map(|rec| (rec.pkey.clone(), rec.value.clone()))
-            .collect()
     }
 
     pub fn scan(
@@ -176,12 +168,26 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
     {
-        let snaps = self.snapshots.borrow();
-        let mut res = vec![];
-        if let Some(table) = snaps.get(&ts) {
-            res.extend(table.scan().unwrap());
+        {
+            let snaps = self.snapshots.borrow();
+            if let Some(table) = snaps.get(&ts) {
+                let res: Vec<_> = table.scan().unwrap().collect();
+                return Ok(Box::new(res.into_iter()));
+            }
         }
-        Ok(Box::new(res.into_iter()))
+        if self.is_recent(ts) {
+            // Recent: scan current_table directly.
+            let res: Vec<_> = self.current_table.scan().unwrap().collect();
+            Ok(Box::new(res.into_iter()))
+        } else {
+            self.mark_ts(ts);
+            let snaps = self.snapshots.borrow();
+            let res: Vec<_> = snaps
+                .get(&ts)
+                .map(|t| t.scan().unwrap().collect())
+                .unwrap_or_default();
+            Ok(Box::new(res.into_iter()))
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -197,10 +203,15 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         AccessMethodError,
     > {
         assert!(from_ts < to_ts, "from_ts must be less than to_ts");
-        let tables = self.snapshots.borrow();
-        assert!(tables.contains_key(&from_ts), "from_ts snapshot does not exist");
-        assert!(tables.contains_key(&to_ts), "to_ts snapshot does not exist");
 
+        if !self.snapshots.borrow().contains_key(&from_ts) {
+            self.mark_ts(from_ts);
+        }
+        if !self.snapshots.borrow().contains_key(&to_ts) {
+            self.mark_ts(to_ts);
+        }
+
+        let tables = self.snapshots.borrow();
         let from = tables.get(&from_ts).unwrap();
         let to = tables.get(&to_ts).unwrap();
 
@@ -238,10 +249,9 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
     }
 
     // -----------------------------------------------------------------------
-    // Garbage collection — drop snapshots no longer needed
+    // Garbage collection
     // -----------------------------------------------------------------------
 
-    /// Remove snapshots with timestamp <= `ts` to free memory.
     pub fn garbage_collect(&self, ts: Timestamp) {
         self.snapshots.borrow_mut().retain(|&k, _| k > ts);
     }
@@ -260,10 +270,8 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
     }
 
     pub fn print_stats(&self) {
-        let state = self.current_state.borrow();
-        println!("IVMH current state: {} records", state.len());
         let snaps = self.snapshots.borrow();
+        println!("IVMH current_table bucket count: {}", self.bucket_count);
         println!("IVMH materialised snapshots: {}", snaps.len());
-        println!("IVMH bucket count: {}", self.bucket_count);
     }
 }

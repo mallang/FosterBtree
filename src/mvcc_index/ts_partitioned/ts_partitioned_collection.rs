@@ -153,8 +153,19 @@ impl<T: MemPool + 'static> TimestampPartitionCollection<T> {
 
     pub fn insert(&self, ts: Timestamp, entry: &MvccEntry) -> Result<(), AccessMethodError> {
         let partition = self.partitions.last().unwrap();
-
         partition.ensure_chain().insert(entry)
+    }
+
+    pub fn insert_ref(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        value: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let partition = self.partitions.last().unwrap();
+        partition.ensure_chain().insert_ref(key, pkey, value, start_ts, end_ts)
     }
 
     pub fn get_no_repair(

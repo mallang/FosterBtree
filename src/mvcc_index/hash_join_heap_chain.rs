@@ -14,7 +14,7 @@ use crate::{
     log_debug, log_info, log_trace, log_warn,
     mvcc_index::{
         hash_common::{fix_frame_id, fix_frame_id2, StatCollector},
-        hash_join_page::{record::RecordRef, HashJoinPage, PAGE_CNT},
+        hash_join_page::{record::RecordRef, slot::SLOT_SIZE, HashJoinPage, PAGE_CNT},
         MvccEntry,
     },
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
@@ -146,7 +146,30 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
     }
 
     pub fn insert(&self, entry: &MvccEntry) -> Result<(), AccessMethodError> {
-        let space_need = <Page as HashJoinPage>::require_space(&entry);
+        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
+        self.insert_ref_inner(&rec, entry.start_ts(), entry.end_ts())
+    }
+
+    /// Zero-copy insert: takes borrowed slices directly, bypassing MvccEntry allocation.
+    pub fn insert_ref(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        value: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let rec = RecordRef::new(key, pkey, value);
+        self.insert_ref_inner(&rec, start_ts, end_ts)
+    }
+
+    fn insert_ref_inner(
+        &self,
+        rec: &RecordRef,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let space_need = SLOT_SIZE + rec.size();
         if space_need > AVAILABLE_PAGE_SIZE.try_into().unwrap() {
             return Err(AccessMethodError::RecordTooLarge);
         }
@@ -156,8 +179,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
             PageFrameKey::new_with_frame_id(self.c_key, last_page_id, last_frame_id);
         let mut last_page = self.get_tail_page_for_write(last_page_frame_key)?;
         log_trace!("Acquired write lock for page {}", last_page.get_id());
-        let rec = RecordRef::new(entry.key(), entry.pkey(), entry.value());
-        match last_page.insert_heap_no_repair(&rec, entry.start_ts(), entry.end_ts()) {
+        match last_page.insert_heap_no_repair(rec, start_ts, end_ts) {
             Ok(_) => {
                 if self.last_page_id.load(Ordering::Acquire) != last_page.get_id() {
                     self.last_page_id
@@ -188,7 +210,7 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
                     .store(new_page.get_id(), Ordering::Release);
                 self.last_frame_id
                     .store(new_page.frame_id(), Ordering::Release);
-                match new_page.upsert_history(&rec, entry.start_ts(), entry.end_ts()) {
+                match new_page.upsert_history(rec, start_ts, end_ts) {
                     Ok(_) => {
                         self.entry_count.fetch_add(1, Ordering::Release);
                         Ok(())

@@ -282,6 +282,67 @@ impl<T: MemPool + 'static> HeapHashChain<T> {
         self.last_frame_id.load(Ordering::Acquire)
     }
 
+    /// Update the value for a record identified by `pkey`.
+    ///
+    /// - Same value size  → overwrite value bytes in-place on the page (O(chain length)).
+    /// - Different size   → delete old slot (reclaim both slot + record bytes from accounting)
+    ///                      then reinsert at the chain tail via `insert`.
+    pub fn update_value(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        new_value: &[u8],
+    ) -> Result<(), AccessMethodError> {
+        let mut current_pid = self.first_page_id.load(Ordering::Acquire);
+        let mut current_fid = self.first_frame_id.load(Ordering::Acquire);
+
+        loop {
+            let pfk = PageFrameKey::new_with_frame_id(self.c_key, current_pid, current_fid);
+            let rpage = read_page(&*self.mem_pool, pfk);
+
+            // Search for pkey on this page.
+            let mut found: Option<(usize, usize, usize, usize)> = None; // (slot_id, val_offset, old_val_size, rec_size)
+            for i in 0..rpage.slot_count() {
+                let slot = rpage.unsafe_slot(i);
+                if rpage.slot_pkey_matches_new(slot, pkey) {
+                    let val_offset = slot.offset() + slot.key_size() + slot.pkey_size();
+                    found = Some((i, val_offset, slot.val_size(), slot.rec_size()));
+                    break;
+                }
+            }
+            let next = rpage.next_page();
+            drop(rpage); // release read lock before acquiring write lock
+
+            if let Some((slot_id, val_offset, old_val_size, rec_size)) = found {
+                if old_val_size == new_value.len() {
+                    // Same size: in-place overwrite.
+                    let mut wpage = write_page(&*self.mem_pool, pfk);
+                    wpage.write_bytes(val_offset, new_value);
+                } else {
+                    // Different size: delete old slot + reinsert at tail.
+                    {
+                        let mut wpage = write_page(&*self.mem_pool, pfk);
+                        wpage.delete_slot_at_id(slot_id);
+                        // delete_slot_at_id only decrements by SLOT_SIZE; also reclaim record bytes.
+                        wpage.decrease_total_bytes_used(rec_size);
+                    }
+                    self.insert(&RecordRef::new(key, pkey, new_value))?;
+                }
+                return Ok(());
+            }
+
+            match next {
+                Some((npid, nfid)) => {
+                    current_pid = npid;
+                    current_fid = nfid;
+                }
+                None => break,
+            }
+        }
+
+        Err(AccessMethodError::KeyNotFound)
+    }
+
     pub fn first_key(&self) -> PageFrameKey {
         PageFrameKey::new_with_frame_id(
             self.c_key,

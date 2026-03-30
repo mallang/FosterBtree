@@ -94,6 +94,19 @@ impl<T: MemPool + 'static> ChainedHashTable<T> {
         second_table.insert(entry)
     }
 
+    pub fn insert_ref(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        value: &[u8],
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> Result<(), AccessMethodError> {
+        let index = self.get_bucket_index(key);
+        let second_table = &self.bucket_entries[index];
+        second_table.insert_ref(key, pkey, value, start_ts, end_ts)
+    }
+
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
     pub fn get(
         &self,
@@ -276,9 +289,20 @@ impl<T: MemPool + 'static> MvccIndex<T> for ChainedHashTable<T> {
         value: Self::Value,
     ) -> Result<(), Self::Error> {
         self.set_largest_txn_ts(ts);
-        // self.insert(key, pkey, ts, tx_id, value)
         let entry = MvccEntry::new_with_tx_id(key, pkey, value, ts, u64::MAX, tx_id);
         ChainedHashTable::insert(self, &entry)
+    }
+
+    fn insert_ref(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        _tx_id: TxId,
+        value: &[u8],
+    ) -> Result<(), Self::Error> {
+        self.set_largest_txn_ts(ts);
+        ChainedHashTable::insert_ref(self, key, pkey, value, ts, u64::MAX)
     }
 
     fn get(

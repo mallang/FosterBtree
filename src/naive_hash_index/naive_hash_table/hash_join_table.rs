@@ -87,6 +87,13 @@ impl<T: MemPool + 'static> NaiveHashTable<T> {
         heap_chain.insert(&rec)
     }
 
+    /// Update the value of an existing record in-place (same value size) or via
+    /// delete + reinsert (different value size).  Delegates to the bucket's chain.
+    pub fn update(&self, rec: RecordRef) -> Result<(), AccessMethodError> {
+        let index = self.get_bucket_index(rec.key());
+        self.bucket_entries[index].update_value(rec.key(), rec.pkey(), rec.val())
+    }
+
     /// Retrieves a value associated with the given key and primary key at a specific timestamp.
     pub fn get(&self, key: &[u8], pkey: &[u8]) -> Result<Option<Vec<u8>>, AccessMethodError> {
         let index = self.get_bucket_index(key);

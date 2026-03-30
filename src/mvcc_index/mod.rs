@@ -156,9 +156,9 @@ impl Hash for MvccEntry {
 use std::any::Any;
 
 pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
-    type Key: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
-    type PKey: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]>;
-    type Value: Clone + Debug + Send + Sync + AsRef<[u8]>;
+    type Key: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]> + From<Vec<u8>>;
+    type PKey: Clone + PartialEq<[u8]> + Eq + std::hash::Hash + Debug + Send + Sync + AsRef<[u8]> + From<Vec<u8>>;
+    type Value: Clone + Debug + Send + Sync + AsRef<[u8]> + From<Vec<u8>>;
     type Error: Error + Debug + Send + Sync + 'static;
 
     /// Creates a new instance of the index.
@@ -183,6 +183,25 @@ pub trait MvccIndex<T: MemPool>: Send + Sync + Any {
         tx_id: TxId,
         value: Self::Value,
     ) -> Result<(), Self::Error>;
+
+    /// Zero-copy insert using borrowed slices. Default impl converts slices to owned keys.
+    /// Override in page-based implementations for truly zero-copy page writes.
+    fn insert_ref(
+        &self,
+        key: &[u8],
+        pkey: &[u8],
+        ts: Timestamp,
+        tx_id: TxId,
+        value: &[u8],
+    ) -> Result<(), Self::Error> {
+        self.insert(
+            key.to_vec().into(),
+            pkey.to_vec().into(),
+            ts,
+            tx_id,
+            value.to_vec().into(),
+        )
+    }
 
     /// Retrieves the value associated with the key and primary key at the given timestamp.
     /// Returns `None` if no matching record is found at that timestamp.
