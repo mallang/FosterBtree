@@ -179,7 +179,7 @@ fn get_pool() -> Arc<InMemPool> {
 
 // ---------------------------------------------------------------------------
 // SNAP: setup = insert all parts + mark_ts(0)
-//        rebuild = mark_ts(1) after N% updates are appended → O(|R|) always
+//        rebuild = mark_ts(1) after N% updates are applied to the current table → O(|R|) always
 //        query  = probe at ts=1
 // ---------------------------------------------------------------------------
 
@@ -189,13 +189,13 @@ fn run_snap(parts: &[PartEntry], probe_rows: &[ProbeRow], update_pct: f64, bucke
     let c_key = ContainerKey::new(0, 0);
     let snap = NaiveMvHashTable::new_with_bucket_num(c_key, pool, bucket_num);
 
-    // SETUP: push all parts into log + build initial snapshot
+    // SETUP: populate the page-based current table + build initial snapshot
     let setup_start = Instant::now();
     for p in parts { snap.add_insert_rec_new(&p.partkey, &p.partkey, &p.ptype); }
     snap.mark_ts(0);
     let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
 
-    // Append N% updates to log (log-append only, O(Δ))
+    // Apply N% updates to the current table (O(Δ))
     let log_start = Instant::now();
     for p in &parts[..n_upd] {
         snap.add_update_rec_new(&p.partkey, &p.partkey, UPDATED_PTYPE);

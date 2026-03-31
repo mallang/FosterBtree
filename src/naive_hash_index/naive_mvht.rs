@@ -34,45 +34,41 @@ pub struct NaiveMvHashTable<T: MemPool + 'static> {
 
     bucket_count: usize,
 
+    current_table: NaiveHashTable<T>,
+
     naivetables: RefCell<HashMap<Timestamp, Arc<NaiveHashTable<T>>>>,
 
     build_table_stats: RefCell<BTreeMap<Timestamp, std::time::Duration>>,
     scan_delta_stats: RefCell<BTreeMap<(Timestamp, Timestamp), std::time::Duration>>,
     table_space_stats: RefCell<BTreeMap<Timestamp, usize>>,
-
-    vec_updates: RefCell<Vec<Record>>,
-    map_current_recs: RefCell<HashMap<Vec<u8>, usize>>, // map from pkey to index in vec_updates
 }
 
 impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     pub fn new_with_bucket_num(c_key: ContainerKey, mem_pool: Arc<T>, bucket_count: usize) -> Self {
-        let mut vec_updates = Vec::<Record>::new();
-        // vec_updates.reserve(150000);
+        let current_table =
+            NaiveHashTable::new_with_bucket_num(c_key, mem_pool.clone(), bucket_count);
         Self {
             c_key,
             mem_pool,
             bucket_count,
+            current_table,
             naivetables: RefCell::new(HashMap::new()),
             build_table_stats: RefCell::new(BTreeMap::new()),
             scan_delta_stats: RefCell::new(BTreeMap::new()),
             table_space_stats: RefCell::new(BTreeMap::new()),
-            vec_updates: RefCell::new(vec_updates),
-            map_current_recs: RefCell::new(HashMap::new()),
         }
     }
 
     pub fn add_insert_rec_new(&self, k: &[u8], pk: &[u8], v: &[u8]) {
-        let mut vec_updates = self.vec_updates.borrow_mut();
-        vec_updates.push(Record::new(k.to_vec(), pk.to_vec(), v.to_vec()));
-        let mut map_current_recs = self.map_current_recs.borrow_mut();
-        map_current_recs.insert(pk.to_vec(), vec_updates.len() - 1);
+        self.current_table
+            .insert(RecordRef::new(k, pk, v))
+            .unwrap();
     }
 
     pub fn add_update_rec_new(&self, k: &[u8], pk: &[u8], v: &[u8]) {
-        let mut vec_updates = self.vec_updates.borrow_mut();
-        vec_updates.push(Record::new(k.to_vec(), pk.to_vec(), v.to_vec()));
-        let mut map_current_recs = self.map_current_recs.borrow_mut();
-        map_current_recs.insert(pk.to_vec(), vec_updates.len() - 1);
+        self.current_table
+            .update(RecordRef::new(k, pk, v))
+            .unwrap();
     }
 
     fn build_table_until_now(&self) -> Arc<NaiveHashTable<T>> {
@@ -81,16 +77,9 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
             self.mem_pool.clone(),
             self.bucket_count,
         ));
-        let cur_table = self.map_current_recs.borrow();
-        let vec_updates = self.vec_updates.borrow();
-        // Sort indices for sequential (cache-friendly) access to vec_updates.
-        let mut indices: Vec<usize> = cur_table.values().copied().collect();
-        indices.sort_unstable();
-        for idx in indices {
-            let rec = &vec_updates[idx];
-            table
-                .insert(RecordRef::new(&rec.key(), &rec.pkey(), &rec.val()))
-                .unwrap();
+        let records: Vec<_> = self.current_table.scan().unwrap().collect();
+        for (k, pk, v) in records {
+            table.insert(RecordRef::new(&k, &pk, &v)).unwrap();
         }
         table
     }

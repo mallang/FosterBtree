@@ -590,12 +590,33 @@ impl TxBench {
         todo!()
     }
 
+    fn prepare_tx_untimed(&self, tx: &Tx, hash_join_table: &BoxMVIndex) {
+        match tx.tx_type {
+            OperationType::InitLoad => {
+                for op in self.data_source.get_custoemr_vec() {
+                    hash_join_table.prepare_insert(
+                        &op.generate_join_key(),
+                        &op.generate_pkey(),
+                        &op.generate_value(),
+                    );
+                }
+            }
+            OperationType::Update => {
+                for op in &tx.ops {
+                    hash_join_table.prepare_update(&op.join_key, &op.pkey, &op.value, op.tx_ts);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn run_tx_no_repair(
         &self,
         txs_idx: TxId,
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
+        self.prepare_tx_untimed(tx, hash_join_table);
         let start = Instant::now();
         let mut is_need_scan_warpup = false;
         match tx.tx_type {
@@ -710,6 +731,7 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
+        self.prepare_tx_untimed(tx, hash_join_table);
         let start = Instant::now();
         let mut is_need_scan_warpup = false;
 
@@ -823,6 +845,7 @@ impl TxBench {
         hash_join_table: &BoxMVIndex,
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
+        self.prepare_tx_untimed(tx, hash_join_table);
         let start = Instant::now();
         let mut is_need_scan_warmup = false;
         match tx.tx_type {

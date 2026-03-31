@@ -26,6 +26,8 @@ pub enum OperationType {
 }
 
 pub trait MultiVersionJoinTable {
+    fn prepare_insert(&self, _key: &[u8], _pkey: &[u8], _value: &[u8]) {}
+    fn prepare_update(&self, _key: &[u8], _pkey: &[u8], _value: &[u8], _ts: Timestamp) {}
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]);
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp);
     fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>>;
@@ -318,8 +320,14 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
 // NAIVE
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn after_mark_ts(&self, ts: Timestamp) {}
-    fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
+    fn prepare_insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         NaiveMvHashTable::add_insert_rec_new(&self, key, pkey, value);
+    }
+    fn prepare_update(&self, key: &[u8], pkey: &[u8], value: &[u8], _ts: Timestamp) {
+        NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
+    }
+    fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
+        let _ = (key, pkey, value);
     }
 
     fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -332,7 +340,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     }
 
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
-        NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
+        let _ = (key, pkey, value, ts);
     }
 
     fn mark_ts(&self, ts: u64) {
@@ -362,7 +370,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
         NaiveMvHashTable::scan(&self, ts)
     }
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
-        NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
+        let _ = (key, pkey, value, ts);
     }
     fn garbage_collect(&self, ts: Timestamp) {
         NaiveMvHashTable::garbage_collect(&self, ts);

@@ -359,7 +359,8 @@ fn run_juj(
     let j1_alloc_ms = j1_alloc_start.elapsed().as_secs_f64() * 1000.0;
 
     // -- join1 build: base table population (untimed for SNAP only) --
-    // SNAP maintains a separate base table (vec_updates); only mark_ts (index build) is timed.
+    // SNAP now maintains the same page-based current state as IVMH and materialises
+    // snapshots by scanning that state during mark_ts().
     if let TableEngine::Snap(t) = &table {
         for entry in part_entries {
             t.add_insert_rec_new(&entry.partkey, &entry.partkey, &entry.ptype);
