@@ -270,11 +270,11 @@ impl TxBench {
 
     pub fn gen_scan_txs_history(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
-        let scan_ts = self
-            .history_ts_candidates
-            .choose(&mut self.rng)
-            .unwrap()
-            .to_owned();
+        let scan_ts = if let Some(ts) = self.history_ts_candidates.choose(&mut self.rng) {
+            *ts
+        } else {
+            *self.read_ts_candidates.choose(&mut self.rng).unwrap()
+        };
         let mut ops = Vec::new();
 
         let op = TxOperation::new(
@@ -578,6 +578,8 @@ impl TxBench {
         let (_first, right) = tss.split_first().unwrap();
         let new_tss = right.to_owned();
         self.read_ts_candidates = new_tss;
+        self.recent_ts_candidates.retain(|&ts| ts > min_ts);
+        self.history_ts_candidates.retain(|&ts| ts > min_ts);
 
         let op = TxOperation::new_gc(tx_id, tx_ts, min_ts);
         let tx = Tx::new(OperationType::GbgCollect, tx_id, tx_ts, vec![op]);

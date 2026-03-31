@@ -205,13 +205,18 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
     {
         let tables = self.naivetables.borrow();
-        let mut res = vec![];
         if let Some(entry) = tables.get(&ts) {
-            res.extend(entry.scan().unwrap())
-        } else {
-            res.extend(tables.iter().last().as_ref().unwrap().1.scan().unwrap())
+            let res: Vec<_> = entry.scan().unwrap().collect();
+            return Ok(Box::new(res.into_iter()));
         }
-        Ok(Box::new(res.into_iter()))
+        let max_ts = tables.keys().max().copied();
+        if let Some(latest_ts) = max_ts {
+            if ts > latest_ts {
+                let res: Vec<_> = tables.get(&latest_ts).unwrap().scan().unwrap().collect();
+                return Ok(Box::new(res.into_iter()));
+            }
+        }
+        Err(AccessMethodError::InvalidTimestamp)
     }
 
     pub fn print_stats(&self) {
@@ -270,7 +275,14 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         if let Some(table) = tables.get(&ts) {
             table.get(k, pk).unwrap()
         } else {
-            None
+            let max_ts = tables.keys().max().copied();
+            max_ts.and_then(|latest_ts| {
+                if ts > latest_ts {
+                    tables.get(&latest_ts).and_then(|table| table.get(k, pk).unwrap())
+                } else {
+                    None
+                }
+            })
         }
     }
 
@@ -280,12 +292,23 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let tables = self.naivetables.borrow();
-        let mut result = vec![];
         if let Some(table) = tables.get(&ts) {
+            let mut result = vec![];
             table.scan_key_vec(key, &mut result).unwrap();
-            Ok(result)
-        } else {
-            Ok(vec![])
+            return Ok(result);
         }
+        let max_ts = tables.keys().max().copied();
+        if let Some(latest_ts) = max_ts {
+            if ts > latest_ts {
+                let mut result = vec![];
+                tables
+                    .get(&latest_ts)
+                    .unwrap()
+                    .scan_key_vec(key, &mut result)
+                    .unwrap();
+                return Ok(result);
+            }
+        }
+        Err(AccessMethodError::InvalidTimestamp)
     }
 }

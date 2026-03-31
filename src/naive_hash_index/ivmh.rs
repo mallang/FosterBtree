@@ -128,9 +128,7 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
             // Recent: read directly from current_table (page-based, O(bucket)).
             self.current_table.get(k, pk).unwrap()
         } else {
-            self.mark_ts(ts);
-            let snaps = self.snapshots.borrow();
-            snaps.get(&ts).and_then(|t| t.get(k, pk).unwrap())
+            None
         }
     }
 
@@ -153,13 +151,7 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
             self.current_table.scan_key_vec(key, &mut result).unwrap();
             Ok(result)
         } else {
-            self.mark_ts(ts);
-            let snaps = self.snapshots.borrow();
-            let mut result = vec![];
-            if let Some(table) = snaps.get(&ts) {
-                table.scan_key_vec(key, &mut result).unwrap();
-            }
-            Ok(result)
+            Err(AccessMethodError::InvalidTimestamp)
         }
     }
 
@@ -180,13 +172,7 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
             let res: Vec<_> = self.current_table.scan().unwrap().collect();
             Ok(Box::new(res.into_iter()))
         } else {
-            self.mark_ts(ts);
-            let snaps = self.snapshots.borrow();
-            let res: Vec<_> = snaps
-                .get(&ts)
-                .map(|t| t.scan().unwrap().collect())
-                .unwrap_or_default();
-            Ok(Box::new(res.into_iter()))
+            Err(AccessMethodError::InvalidTimestamp)
         }
     }
 
@@ -204,11 +190,10 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
     > {
         assert!(from_ts < to_ts, "from_ts must be less than to_ts");
 
-        if !self.snapshots.borrow().contains_key(&from_ts) {
-            self.mark_ts(from_ts);
-        }
-        if !self.snapshots.borrow().contains_key(&to_ts) {
-            self.mark_ts(to_ts);
+        if !self.snapshots.borrow().contains_key(&from_ts)
+            || !self.snapshots.borrow().contains_key(&to_ts)
+        {
+            return Err(AccessMethodError::InvalidTimestamp);
         }
 
         let tables = self.snapshots.borrow();
