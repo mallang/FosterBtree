@@ -4,10 +4,10 @@
 /// How long until the reader receives fresh results?
 ///
 /// Cost breakdown per approach:
-///   SNAP:  [setup O(|R|)] → [rebuild O(|R|)] → [probe O(|L|)]
-///            rebuild is full re-scan of base table, independent of N%
-///   IVMH:  [setup O(|R|)] → [apply O(|Δ|) in-place] → [probe O(|L|)]
-///            no rebuild; updates go directly to current_table; probe reads it
+///   SNAP:  base MVCC exists already; measure only [setup O(|R|)] → [rebuild O(|R|)] → [probe O(|L|)]
+///            rebuild is a full snapshot build from the base table, independent of N%
+///   IVMH:  base MVCC exists already; measure [setup O(|R|)] → [apply O(|Δ|) to latest derived hash] → [probe O(|L|)]
+///            historical snapshots come from the base table; fresh probe reads current_table
 ///   MVHT:  [setup O(|R|+overhead)] → [probe || apply, concurrent via Barrier]
 ///            reader fixes query_ts at build time; writer applies N% updates;
 ///            both start simultaneously; reader never waits for writer.
@@ -24,7 +24,7 @@ use fbtree::naive_hash_index::NaiveMvHashTable;
 use fbtree::prelude::AccessMethodError;
 use fbtree::prelude::*;
 use std::error::Error;
-use std::fs::{metadata, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,7 +158,7 @@ fn n_updates_for(pct: f64, n_parts: usize) -> usize {
 struct RunResult {
     setup_ms:   f64,  // initial hash table build
     rebuild_ms: f64,  // SNAP: mark_ts(1) O(|R|);  IVMH/MVHT: 0
-    update_ms:  f64,  // SNAP: log-append (tiny);   IVMH: in-place O(|Δ|); MVHT: writer elapsed
+    update_ms:  f64,  // SNAP: 0 (base update excluded); IVMH: derived in-place O(|Δ|); MVHT: writer elapsed
     query_ms:   f64,  // probe LINEITEM (reader elapsed for MVHT)
     total_ms:   f64,  // SNAP: setup+rebuild+query; IVMH: setup+update+query; MVHT: setup+max(update,query)
     n_updates:  u64,
@@ -178,9 +178,10 @@ fn get_pool() -> Arc<InMemPool> {
 }
 
 // ---------------------------------------------------------------------------
-// SNAP: setup = insert all parts + mark_ts(0)
-//        rebuild = mark_ts(1) after N% updates are applied to the current table → O(|R|) always
-//        query  = probe at ts=1
+// SNAP: base load / base updates are untimed.
+//        setup   = build initial derived snapshot at ts=0
+//        rebuild = build fresh derived snapshot from base MVCC after updates
+//        query   = probe the rebuilt snapshot
 // ---------------------------------------------------------------------------
 
 fn run_snap(parts: &[PartEntry], probe_rows: &[ProbeRow], update_pct: f64, bucket_num: usize) -> RunResult {
@@ -188,46 +189,49 @@ fn run_snap(parts: &[PartEntry], probe_rows: &[ProbeRow], update_pct: f64, bucke
     let pool = get_pool();
     let c_key = ContainerKey::new(0, 0);
     let snap = NaiveMvHashTable::new_with_bucket_num(c_key, pool, bucket_num);
+    let fresh_ts = n_upd as Timestamp;
 
-    // SETUP: populate the page-based current table + build initial snapshot
+    // Untimed: populate the base MVCC table.
+    for p in parts {
+        snap.add_insert_rec_at_ts(&p.partkey, &p.partkey, &p.ptype, 0);
+    }
+
+    // SETUP: build the initial derived snapshot from base MVCC.
     let setup_start = Instant::now();
-    for p in parts { snap.add_insert_rec_new(&p.partkey, &p.partkey, &p.ptype); }
     snap.mark_ts(0);
     let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
 
-    // Apply N% updates to the current table (O(Δ))
-    let log_start = Instant::now();
-    for p in &parts[..n_upd] {
-        snap.add_update_rec_new(&p.partkey, &p.partkey, UPDATED_PTYPE);
+    // Untimed: apply updates to the base MVCC table.
+    for (idx, p) in parts[..n_upd].iter().enumerate() {
+        snap.add_update_rec_at_ts(&p.partkey, &p.partkey, UPDATED_PTYPE, (idx + 1) as Timestamp);
     }
-    let update_ms = log_start.elapsed().as_secs_f64() * 1000.0;
 
-    // REBUILD: must rebuild full table O(|R|) to serve fresh query
+    // REBUILD: build the fresh snapshot from base MVCC.
     let rebuild_start = Instant::now();
-    snap.mark_ts(1);
+    snap.mark_ts(fresh_ts);
     let rebuild_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
 
-    // QUERY: probe at ts=1 (after rebuild)
+    // QUERY: probe at the retained fresh snapshot.
     let query_start = Instant::now();
     let mut probes = 0u64;
     for row in probe_rows {
-        let _ = snap.scan_key_vec(&row.partkey, 1);
+        let _ = snap.scan_key_vec(&row.partkey, fresh_ts);
         probes += 1;
     }
     let query_ms = query_start.elapsed().as_secs_f64() * 1000.0;
 
     RunResult {
-        setup_ms, rebuild_ms, update_ms, query_ms,
+        setup_ms, rebuild_ms, update_ms: 0.0, query_ms,
         total_ms: setup_ms + rebuild_ms + query_ms,
         n_updates: n_upd as u64, n_probes: probes,
     }
 }
 
 // ---------------------------------------------------------------------------
-// IVMH: setup = insert all parts directly into current_table (in-place, O(|R|))
-//        update = add_update_rec in-place → O(|Δ|), no rebuild
+// IVMH: base load / base updates are untimed.
+//        setup  = build latest derived current_table
+//        update = derived in-place maintenance on current_table → O(|Δ|)
 //        query  = scan_key_vec with recent ts → reads current_table directly
-//                 (is_recent = true since no mark_ts called → no snapshot needed)
 //        rebuild_ms = 0
 // ---------------------------------------------------------------------------
 
@@ -237,23 +241,33 @@ fn run_ivmh(parts: &[PartEntry], probe_rows: &[ProbeRow], update_pct: f64, bucke
     let c_key = ContainerKey::new(0, 0);
     let ivmh = IvmHashTable::new_with_bucket_num(c_key, pool, bucket_num);
 
-    // SETUP: insert all parts into current_table (O(|R|) in-place insertions)
+    // Untimed: populate the base MVCC table.
+    for p in parts {
+        ivmh.prepare_insert_base(&p.partkey, &p.partkey, &p.ptype);
+    }
+
+    // SETUP: build the latest derived current_table.
     let setup_start = Instant::now();
-    for p in parts { ivmh.add_insert_rec(&p.partkey, &p.partkey, &p.ptype); }
+    for p in parts {
+        ivmh.insert_current(&p.partkey, &p.partkey, &p.ptype);
+    }
     let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
 
-    // UPDATE: apply N% updates in-place on current_table (O(|Δ|))
-    // Reader must wait for this to complete (RefCell, not Sync).
+    // Untimed: apply updates to the base MVCC table.
+    for (idx, p) in parts[..n_upd].iter().enumerate() {
+        ivmh.prepare_update_base(&p.partkey, &p.partkey, UPDATED_PTYPE, (idx + 1) as Timestamp);
+    }
+
+    // UPDATE: apply N% updates to the latest derived current_table.
     let update_start = Instant::now();
     for p in &parts[..n_upd] {
-        ivmh.add_update_rec(&p.partkey, &p.partkey, UPDATED_PTYPE);
+        ivmh.update_current(&p.partkey, &p.partkey, UPDATED_PTYPE);
     }
     let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
 
-    // QUERY: probe current_table directly — no mark_ts needed.
-    // latest_mark_ts = None → is_recent(ts) = true for any ts → reads current_table.
+    // QUERY: probe current_table directly — no mark_ts needed for fresh reads.
     let query_start = Instant::now();
-    let fresh_ts: Timestamp = 1; // any value; is_recent = true since no mark_ts called
+    let fresh_ts: Timestamp = n_upd as Timestamp;
     let mut probes = 0u64;
     for row in probe_rows {
         let _ = ivmh.scan_key_vec(&row.partkey, fresh_ts);

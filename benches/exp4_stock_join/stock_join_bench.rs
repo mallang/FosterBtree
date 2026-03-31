@@ -436,6 +436,7 @@ fn run_juj(
             let rebuilt = match create_table(TableType::Naive, cli.bucket_num)? {
                 TableEngine::Snap(t) => t,
                 TableEngine::Mvcc(_) => unreachable!(),
+                TableEngine::Ivmh(_) => unreachable!(),
             };
             for entry in stock_entries {
                 let qty = overrides

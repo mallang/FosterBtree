@@ -5,7 +5,7 @@ use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::hash_join_page::record::RecordRef;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{MvccIndex, VersionsMap};
-use fbtree::naive_hash_index::NaiveHashTable;
+use fbtree::naive_hash_index::{HeapBaseMvccTable, NaiveHashTable};
 use fbtree::prelude::{AccessMethodError, Timestamp};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -205,7 +205,7 @@ struct SnapConcurrent {
     c_key: ContainerKey,
     mem_pool: Arc<InMemPool>,
     bucket_num: usize,
-    base_rows: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+    base_table: HeapBaseMvccTable,
     snapshots: RwLock<SnapshotMap>,
     current_ts: AtomicU64,
     writer_gate: Mutex<()>,
@@ -215,18 +215,18 @@ impl SnapConcurrent {
     fn new(parts: &[PartEntry], bucket_num: usize) -> Self {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
-        let mut base_rows = HashMap::new();
+        let base_table = HeapBaseMvccTable::new();
         for p in parts {
-            base_rows.insert(p.partkey.clone(), p.ptype.clone());
+            base_table.insert_at_ts(&p.partkey, &p.partkey, &p.ptype, 1);
         }
         let mut snapshots = BTreeMap::new();
-        let initial = build_snapshot_from_rows(c_key, mem_pool.clone(), bucket_num, base_rows.iter());
+        let initial = build_snapshot_from_base(c_key, mem_pool.clone(), bucket_num, &base_table, 1);
         snapshots.insert(1, initial);
         Self {
             c_key,
             mem_pool,
             bucket_num,
-            base_rows: Mutex::new(base_rows),
+            base_table,
             snapshots: RwLock::new(snapshots),
             current_ts: AtomicU64::new(1),
             writer_gate: Mutex::new(()),
@@ -260,18 +260,17 @@ impl ConcurrentTable for SnapConcurrent {
         let wait_ms = arrival.elapsed().as_secs_f64() * 1000.0;
         let exec_start = Instant::now();
         let new_ts = self.current_ts.load(Ordering::Acquire) + 1;
-        let snapshot = {
-            let mut base_rows = self.base_rows.lock();
-            for op in updates {
-                base_rows.insert(op.partkey.clone(), op.new_ptype.clone());
-            }
-            build_snapshot_from_rows(
-                self.c_key,
-                self.mem_pool.clone(),
-                self.bucket_num,
-                base_rows.iter(),
-            )
-        };
+        for op in updates {
+            self.base_table
+                .update_at_ts(&op.partkey, &op.partkey, &op.new_ptype, new_ts);
+        }
+        let snapshot = build_snapshot_from_base(
+            self.c_key,
+            self.mem_pool.clone(),
+            self.bucket_num,
+            &self.base_table,
+            new_ts,
+        );
         self.snapshots.write().insert(new_ts, snapshot);
         self.current_ts.store(new_ts, Ordering::Release);
         let exec_ms = exec_start.elapsed().as_secs_f64() * 1000.0;
@@ -288,6 +287,7 @@ struct IvmhConcurrent {
     c_key: ContainerKey,
     mem_pool: Arc<InMemPool>,
     bucket_num: usize,
+    base_table: HeapBaseMvccTable,
     current_table: RwLock<NaiveHashTable<InMemPool>>,
     snapshots: RwLock<SnapshotMap>,
     current_ts: AtomicU64,
@@ -298,8 +298,10 @@ impl IvmhConcurrent {
     fn new(parts: &[PartEntry], bucket_num: usize) -> Self {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
+        let base_table = HeapBaseMvccTable::new();
         let current_table = NaiveHashTable::new_with_bucket_num(c_key, mem_pool.clone(), bucket_num);
         for p in parts {
+            base_table.insert_at_ts(&p.partkey, &p.partkey, &p.ptype, 1);
             current_table
                 .insert(RecordRef::new(&p.partkey, &p.partkey, &p.ptype))
                 .unwrap();
@@ -308,6 +310,7 @@ impl IvmhConcurrent {
             c_key,
             mem_pool,
             bucket_num,
+            base_table,
             current_table: RwLock::new(current_table),
             snapshots: RwLock::new(BTreeMap::new()),
             current_ts: AtomicU64::new(1),
@@ -363,17 +366,20 @@ impl ConcurrentTable for IvmhConcurrent {
         let new_ts = old_ts + 1;
 
         {
-            let mut current = self.current_table.write();
+            let current = self.current_table.write();
             if !self.snapshots.read().contains_key(&old_ts) {
-                let snapshot = build_snapshot_from_table(
+                let snapshot = build_snapshot_from_base(
                     self.c_key,
                     self.mem_pool.clone(),
                     self.bucket_num,
-                    &current,
+                    &self.base_table,
+                    old_ts,
                 );
                 self.snapshots.write().insert(old_ts, snapshot);
             }
             for op in updates {
+                self.base_table
+                    .update_at_ts(&op.partkey, &op.partkey, &op.new_ptype, new_ts);
                 current
                     .update(RecordRef::new(&op.partkey, &op.partkey, &op.new_ptype))
                     .unwrap();
@@ -623,35 +629,20 @@ fn read_updates(path: &str) -> Result<Vec<UpdateOp>, Box<dyn Error>> {
     Ok(ops)
 }
 
-fn build_snapshot_from_rows<'a, I>(
+fn build_snapshot_from_base(
     c_key: ContainerKey,
     mem_pool: Arc<InMemPool>,
     bucket_num: usize,
-    rows: I,
-) -> Arc<NaiveHashTable<InMemPool>>
-where
-    I: IntoIterator<Item = (&'a Vec<u8>, &'a Vec<u8>)>,
-{
+    base_table: &HeapBaseMvccTable,
+    ts: Timestamp,
+) -> Arc<NaiveHashTable<InMemPool>> {
     let table = Arc::new(NaiveHashTable::new_with_bucket_num(c_key, mem_pool, bucket_num));
-    for (key, value) in rows {
+    for (key, pkey, value) in base_table.scan_as_of(ts) {
         table
-            .insert(RecordRef::new(key, key, value))
+            .insert(RecordRef::new(&key, &pkey, &value))
             .unwrap();
     }
     table
-}
-
-fn build_snapshot_from_table(
-    c_key: ContainerKey,
-    mem_pool: Arc<InMemPool>,
-    bucket_num: usize,
-    table: &NaiveHashTable<InMemPool>,
-) -> Arc<NaiveHashTable<InMemPool>> {
-    let snapshot = Arc::new(NaiveHashTable::new_with_bucket_num(c_key, mem_pool, bucket_num));
-    for (k, pk, v) in table.scan().unwrap() {
-        snapshot.insert(RecordRef::new(&k, &pk, &v)).unwrap();
-    }
-    snapshot
 }
 
 fn probe_naive_table<T: MemPool + 'static>(table: &NaiveHashTable<T>, probes: &[ProbeRow]) -> u64 {

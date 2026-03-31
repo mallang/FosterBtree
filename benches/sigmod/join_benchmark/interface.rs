@@ -239,7 +239,7 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn after_mark_ts(&self, _ts: Timestamp) {}
 
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
-        NaiveMvHashTable::add_insert_rec_new(&self, key, pkey, value);
+        NaiveMvHashTable::add_insert_rec_at_ts(&self, key, pkey, value, 0);
     }
 
     fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -251,12 +251,12 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     }
 
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
-        NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
+        NaiveMvHashTable::add_update_rec_at_ts(&self, key, pkey, value, ts);
     }
 
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
         // Naive table doesn't support write repair, just use regular update
-        NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
+        NaiveMvHashTable::add_update_rec_at_ts(&self, key, pkey, value, ts);
     }
 
     fn mark_ts(&self, ts: u64) {

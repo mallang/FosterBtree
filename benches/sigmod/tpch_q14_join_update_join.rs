@@ -7,7 +7,6 @@ use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccIndex};
 use fbtree::naive_hash_index::NaiveMvHashTable;
 use fbtree::naive_hash_index::IvmHashTable;
 use fbtree::prelude::*;
-use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{metadata, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -358,12 +357,15 @@ fn run_juj(
     let table = create_table(cli.table_type, cli.bucket_num)?;
     let j1_alloc_ms = j1_alloc_start.elapsed().as_secs_f64() * 1000.0;
 
-    // -- join1 build: base table population (untimed for SNAP only) --
-    // SNAP now maintains the same page-based current state as IVMH and materialises
-    // snapshots by scanning that state during mark_ts().
+    // -- join1 build: base MVCC population (untimed for SNAP / IVMH only) --
     if let TableEngine::Snap(t) = &table {
         for entry in part_entries {
-            t.add_insert_rec_new(&entry.partkey, &entry.partkey, &entry.ptype);
+            t.add_insert_rec_at_ts(&entry.partkey, &entry.partkey, &entry.ptype, 0);
+        }
+    }
+    if let TableEngine::Ivmh(t) = &table {
+        for entry in part_entries {
+            t.prepare_insert_base(&entry.partkey, &entry.partkey, &entry.ptype);
         }
     }
 
@@ -376,13 +378,13 @@ fn run_juj(
             }
         }
         TableEngine::Snap(t) => {
-            // Base table already populated above; only time the NaiveHashTable build.
+            // Base table already populated above; only time the derived snapshot build.
             t.mark_ts(0);
         }
         TableEngine::Ivmh(t) => {
-            // Insert directly into page-based current_table — no separate mark_ts needed.
+            // Build the latest derived current_table only.
             for entry in part_entries {
-                t.add_insert_rec(&entry.partkey, &entry.partkey, &entry.ptype);
+                t.insert_current(&entry.partkey, &entry.partkey, &entry.ptype);
             }
         }
     }
@@ -402,6 +404,20 @@ fn run_juj(
     // No-op for non-partitioned implementations (Heap, Chain, Rust).
     if let TableEngine::Mvcc(t) = &table {
         t.split_at_ts(1)?;
+    }
+
+    // Base-table updates are untimed for the baseline structures.
+    if let TableEngine::Snap(t) = &table {
+        for (idx, update) in updates.iter().enumerate() {
+            let ts = (idx + 1) as u64;
+            t.add_update_rec_at_ts(&update.partkey, &update.partkey, &update.ptype, ts);
+        }
+    }
+    if let TableEngine::Ivmh(t) = &table {
+        for (idx, update) in updates.iter().enumerate() {
+            let ts = (idx + 1) as u64;
+            t.prepare_update_base(&update.partkey, &update.partkey, &update.ptype, ts);
+        }
     }
 
     let update_start = Instant::now();
@@ -435,13 +451,17 @@ fn run_juj(
         }
         TableEngine::Snap(_) => {}
         TableEngine::Ivmh(t) => {
-            // In-place update on current state (O(|Δ|))
+            // In-place maintenance on the latest derived hash state.
             for update in updates {
-                t.add_update_rec(&update.partkey, &update.partkey, &update.ptype);
+                t.update_current(&update.partkey, &update.partkey, &update.ptype);
             }
         }
     }
-    let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+    let update_ms = if matches!(&table, TableEngine::Snap(_)) {
+        0.0
+    } else {
+        update_start.elapsed().as_secs_f64() * 1000.0
+    };
 
     // ====================================================================
     //  Phase 3: JOIN 2  (after updates)
@@ -450,34 +470,15 @@ fn run_juj(
     let after_update_ts = updates.len() as u64;
 
     let (join2_build_ms, join2_probe_ms, join2_stats) = match &table {
-        TableEngine::Snap(_) => {
-            // -- prepare updated base table (outside timing) --
-            let mut overrides: HashMap<Vec<u8>, Vec<u8>> = HashMap::with_capacity(updates.len());
-            for update in updates {
-                overrides.insert(update.partkey.clone(), update.ptype.clone());
-            }
-            let rebuilt = match create_table(TableType::Naive, cli.bucket_num)? {
-                TableEngine::Snap(t) => t,
-                TableEngine::Mvcc(_) => unreachable!(),
-                TableEngine::Ivmh(_) => unreachable!(),
-            };
-            for entry in part_entries {
-                let ptype = overrides
-                    .get(&entry.partkey)
-                    .cloned()
-                    .unwrap_or_else(|| entry.ptype.clone());
-                rebuilt.add_insert_rec_new(&entry.partkey, &entry.partkey, &ptype);
-            }
-
-            // -- join2 build: hash index construction only (timed) --
+        TableEngine::Snap(t) => {
+            // -- join2 build: rebuild the retained snapshot from base MVCC --
             let j2_build_start = Instant::now();
-            rebuilt.mark_ts(after_update_ts);
+            t.mark_ts(after_update_ts);
             let j2_build = j2_build_start.elapsed().as_secs_f64() * 1000.0;
 
             // -- join2 probe --
-            let rebuilt_engine = TableEngine::Snap(rebuilt);
             let j2_probe_start = Instant::now();
-            let stats = run_probe(&rebuilt_engine, probe_rows, after_update_ts, cli.repair_mode)?;
+            let stats = run_probe(&table, probe_rows, after_update_ts, cli.repair_mode)?;
             let j2_probe = j2_probe_start.elapsed().as_secs_f64() * 1000.0;
 
             (j2_build, j2_probe, stats)

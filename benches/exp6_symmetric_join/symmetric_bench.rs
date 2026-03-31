@@ -3,9 +3,7 @@ use fbtree::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{MvccIndex, VersionsMap};
-use fbtree::mvcc_index::hash_join_page::record::RecordRef;
-use fbtree::naive_hash_index::NaiveHashTable;
-use fbtree::naive_hash_index::IvmHashTable;
+use fbtree::naive_hash_index::{IvmHashTable, NaiveMvHashTable};
 use fbtree::prelude::*;
 use std::collections::HashMap;
 use std::error::Error;
@@ -391,74 +389,67 @@ fn run_symmetric_snap(
     let c_key_r = ContainerKey::new(0, 0);
     let c_key_s = ContainerKey::new(0, 1);
 
-    // Accumulate state for rebuilds
-    let mut r_state: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    let snap_r = NaiveMvHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
     for e in r_entries {
-        r_state.insert(e.key.clone(), e.value.clone());
+        snap_r.add_insert_rec_at_ts(&e.key, &e.key, &e.value, 0);
     }
-    let mut s_accumulated: Vec<SEntry> = s_entries.to_vec();
+    let snap_s = NaiveMvHashTable::new_with_bucket_num(c_key_s, mem_pool.clone(), bucket_num);
+    for e in s_entries {
+        snap_s.add_insert_rec_at_ts(&e.key, &e.key, &e.value, 0);
+    }
 
-    // Phase 0: Build both tables
+    // Build both retained snapshots from the heap base.
     let t0 = Instant::now();
-    let snap_r = NaiveHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
-    for e in r_entries {
-        snap_r.insert(RecordRef::new(&e.key, &e.key, &e.value))?;
-    }
-    let snap_r = Arc::new(snap_r);
+    snap_r.mark_ts(1);
     result.build_r_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let t0 = Instant::now();
-    let snap_s = NaiveHashTable::new_with_bucket_num(c_key_s, mem_pool.clone(), bucket_num);
-    for e in s_entries {
-        snap_s.insert(RecordRef::new(&e.key, &e.key, &e.value))?;
-    }
-    let mut snap_s = Arc::new(snap_s);
+    snap_s.mark_ts(1);
     result.build_s_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let num_rounds = delta_r_batches.len().min(delta_s_batches.len());
-    let mut results_buf = Vec::new();
+    let base_ts: u64 = 10;
 
     for round in 0..num_rounds {
         let mut rr = RoundResult::default();
         let round_start = Instant::now();
+        let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: ΔR → rebuild table_R with updates
+        // Step 1: ΔR -> append versions to the heap base, then rebuild retained snapshot.
         let t1 = Instant::now();
         for op in &delta_r_batches[round] {
-            r_state.insert(op.key.clone(), op.new_value.clone());
+            snap_r.add_update_rec_at_ts(&op.key, &op.key, &op.new_value, ts);
         }
-        let new_snap_r = NaiveHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
-        for (k, v) in &r_state {
-            new_snap_r.insert(RecordRef::new(k, k, v))?;
-        }
-        let snap_r = Arc::new(new_snap_r);
+        snap_r.mark_ts(ts);
         rr.delta_r_update_ms = t1.elapsed().as_secs_f64() * 1000.0;
         rr.delta_r_count = delta_r_batches[round].len();
 
         // Step 1b: probe table_S with ΔR keys
         let t2 = Instant::now();
+        let s_latest_ts = if round == 0 {
+            1
+        } else {
+            base_ts + ((round - 1) as u64) * 2 + 1
+        };
         for op in &delta_r_batches[round] {
-            results_buf.clear();
-            let _ = snap_s.scan_key_vec(&op.key, &mut results_buf);
+            let _ = snap_s.scan_key_vec(&op.key, s_latest_ts);
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: ΔS → rebuild table_S with new rows
+        // Step 2: ΔS -> append new rows to the heap base, then rebuild retained snapshot.
+        let ts_s = ts + 1;
         let t3 = Instant::now();
-        s_accumulated.extend_from_slice(&delta_s_batches[round]);
-        let new_snap_s = NaiveHashTable::new_with_bucket_num(c_key_s, mem_pool.clone(), bucket_num);
-        for e in &s_accumulated {
-            new_snap_s.insert(RecordRef::new(&e.key, &e.key, &e.value))?;
+        for e in &delta_s_batches[round] {
+            snap_s.add_insert_rec_at_ts(&e.key, &e.key, &e.value, ts_s);
         }
-        snap_s = Arc::new(new_snap_s);
+        snap_s.mark_ts(ts_s);
         rr.delta_s_insert_ms = t3.elapsed().as_secs_f64() * 1000.0;
         rr.delta_s_count = delta_s_batches[round].len();
 
         // Step 2b: probe table_R with ΔS keys
         let t4 = Instant::now();
         for e in &delta_s_batches[round] {
-            results_buf.clear();
-            let _ = snap_r.scan_key_vec(&e.key, &mut results_buf);
+            let _ = snap_r.scan_key_vec(&e.key, ts);
         }
         rr.delta_s_probe_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
@@ -487,20 +478,24 @@ fn run_symmetric_ivmh(
     let c_key_r = ContainerKey::new(0, 0);
     let c_key_s = ContainerKey::new(0, 1);
 
-    // Phase 0: Build both IVMH tables (populate current state)
-    let t0 = Instant::now();
     let ivmh_r = IvmHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
     for e in r_entries {
-        ivmh_r.add_insert_rec(&e.key, &e.key, &e.value);
+        ivmh_r.prepare_insert_base(&e.key, &e.key, &e.value);
     }
-    // Materialise initial snapshot for probes
+    let t0 = Instant::now();
+    for e in r_entries {
+        ivmh_r.insert_current(&e.key, &e.key, &e.value);
+    }
     ivmh_r.mark_ts(1);
     result.build_r_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    let t0 = Instant::now();
     let ivmh_s = IvmHashTable::new_with_bucket_num(c_key_s, mem_pool.clone(), bucket_num);
     for e in s_entries {
-        ivmh_s.add_insert_rec(&e.key, &e.key, &e.value);
+        ivmh_s.prepare_insert_base(&e.key, &e.key, &e.value);
+    }
+    let t0 = Instant::now();
+    for e in s_entries {
+        ivmh_s.insert_current(&e.key, &e.key, &e.value);
     }
     ivmh_s.mark_ts(1);
     result.build_s_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -513,10 +508,13 @@ fn run_symmetric_ivmh(
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: ΔR → in-place update on current state + rebuild snapshot
+        // Step 1: ΔR -> untimed base update, timed latest-hash maintenance + snapshot build.
+        for op in &delta_r_batches[round] {
+            ivmh_r.prepare_update_base(&op.key, &op.key, &op.new_value, ts);
+        }
         let t1 = Instant::now();
         for op in &delta_r_batches[round] {
-            ivmh_r.add_update_rec(&op.key, &op.key, &op.new_value);
+            ivmh_r.update_current(&op.key, &op.key, &op.new_value);
         }
         ivmh_r.mark_ts(ts);
         rr.delta_r_update_ms = t1.elapsed().as_secs_f64() * 1000.0;
@@ -530,11 +528,14 @@ fn run_symmetric_ivmh(
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: ΔS → insert into current state + rebuild snapshot
+        // Step 2: ΔS -> untimed base insert, timed latest-hash maintenance + snapshot build.
         let ts_s = ts + 1;
+        for e in &delta_s_batches[round] {
+            ivmh_s.prepare_insert_base_at_ts(&e.key, &e.key, &e.value, ts_s);
+        }
         let t3 = Instant::now();
         for e in &delta_s_batches[round] {
-            ivmh_s.add_insert_rec(&e.key, &e.key, &e.value);
+            ivmh_s.insert_current(&e.key, &e.key, &e.value);
         }
         ivmh_s.mark_ts(ts_s);
         rr.delta_s_insert_ms = t3.elapsed().as_secs_f64() * 1000.0;

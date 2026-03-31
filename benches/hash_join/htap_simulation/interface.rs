@@ -321,10 +321,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn after_mark_ts(&self, ts: Timestamp) {}
     fn prepare_insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
-        NaiveMvHashTable::add_insert_rec_new(&self, key, pkey, value);
+        NaiveMvHashTable::add_insert_rec_at_ts(&self, key, pkey, value, 0);
     }
-    fn prepare_update(&self, key: &[u8], pkey: &[u8], value: &[u8], _ts: Timestamp) {
-        NaiveMvHashTable::add_update_rec_new(&self, key, pkey, value);
+    fn prepare_update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
+        NaiveMvHashTable::add_update_rec_at_ts(&self, key, pkey, value, ts);
     }
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         let _ = (key, pkey, value);
@@ -385,8 +385,16 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
 impl<T: MemPool + 'static> MultiVersionJoinTable for IvmHashTable<T> {
     fn after_mark_ts(&self, _ts: Timestamp) {}
 
+    fn prepare_insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
+        IvmHashTable::prepare_insert_base(self, key, pkey, value);
+    }
+
+    fn prepare_update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp) {
+        IvmHashTable::prepare_update_base(self, key, pkey, value, ts);
+    }
+
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
-        IvmHashTable::add_insert_rec(self, key, pkey, value);
+        IvmHashTable::insert_current(self, key, pkey, value);
     }
 
     fn probe(&self, join_key: &[u8], ts: Timestamp) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -398,13 +406,11 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for IvmHashTable<T> {
     }
 
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], _ts: Timestamp) {
-        // In-place overwrite on current state — O(1) per record
-        IvmHashTable::add_update_rec(self, key, pkey, value);
+        IvmHashTable::update_current(self, key, pkey, value);
     }
 
     fn update_write_repair(&self, key: &[u8], pkey: &[u8], value: &[u8], _ts: Timestamp) {
-        // Same as update — IVMH has no version chains to repair
-        IvmHashTable::add_update_rec(self, key, pkey, value);
+        IvmHashTable::update_current(self, key, pkey, value);
     }
 
     fn mark_ts(&self, ts: u64) {
