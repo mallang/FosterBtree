@@ -151,3 +151,7 @@ path = "benches/exp6_symmetric_join/symmetric_bench.rs"
 [[bin]]
 name = "exp7_bench"
 path = "benches/exp7_fresh_query/exp7_bench.rs"
+
+[[bin]]
+name = "concurrent_tx_bench"
+path = "benches/exp8_concurrent_tx/concurrent_tx_bench.rs"
