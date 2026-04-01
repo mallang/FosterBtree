@@ -388,6 +388,14 @@ fn run_symmetric_snap(
     let mem_pool = get_in_mem_pool();
     let c_key_r = ContainerKey::new(0, 0);
     let c_key_s = ContainerKey::new(0, 1);
+    let mut current_r: HashMap<Vec<u8>, Vec<u8>> = r_entries
+        .iter()
+        .map(|e| (e.key.clone(), e.value.clone()))
+        .collect();
+    let mut current_s: HashMap<Vec<u8>, Vec<u8>> = s_entries
+        .iter()
+        .map(|e| (e.key.clone(), e.value.clone()))
+        .collect();
 
     let snap_r = NaiveMvHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
     for e in r_entries {
@@ -398,13 +406,23 @@ fn run_symmetric_snap(
         snap_s.add_insert_rec_at_ts(&e.key, &e.key, &e.value, 0);
     }
 
-    // Build both retained snapshots from the heap base.
+    // Build both retained snapshots directly from the raw current rows.
     let t0 = Instant::now();
-    snap_r.mark_ts(1);
+    snap_r.build_table_from_iter_and_ts(
+        1,
+        current_r
+            .iter()
+            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+    );
     result.build_r_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let t0 = Instant::now();
-    snap_s.mark_ts(1);
+    snap_s.build_table_from_iter_and_ts(
+        1,
+        current_s
+            .iter()
+            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+    );
     result.build_s_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let num_rounds = delta_r_batches.len().min(delta_s_batches.len());
@@ -415,12 +433,20 @@ fn run_symmetric_snap(
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: ΔR -> append versions to the heap base, then rebuild retained snapshot.
-        let t1 = Instant::now();
+        // Step 1: ΔR -> untimed base/logical update, timed retained-snapshot rebuild.
+        for op in &delta_r_batches[round] {
+            current_r.insert(op.key.clone(), op.new_value.clone());
+        }
         for op in &delta_r_batches[round] {
             snap_r.add_update_rec_at_ts(&op.key, &op.key, &op.new_value, ts);
         }
-        snap_r.mark_ts(ts);
+        let t1 = Instant::now();
+        snap_r.build_table_from_iter_and_ts(
+            ts,
+            current_r
+                .iter()
+                .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+        );
         rr.delta_r_update_ms = t1.elapsed().as_secs_f64() * 1000.0;
         rr.delta_r_count = delta_r_batches[round].len();
 
@@ -436,13 +462,21 @@ fn run_symmetric_snap(
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: ΔS -> append new rows to the heap base, then rebuild retained snapshot.
+        // Step 2: ΔS -> untimed base/logical insert, timed retained-snapshot rebuild.
         let ts_s = ts + 1;
-        let t3 = Instant::now();
+        for e in &delta_s_batches[round] {
+            current_s.insert(e.key.clone(), e.value.clone());
+        }
         for e in &delta_s_batches[round] {
             snap_s.add_insert_rec_at_ts(&e.key, &e.key, &e.value, ts_s);
         }
-        snap_s.mark_ts(ts_s);
+        let t3 = Instant::now();
+        snap_s.build_table_from_iter_and_ts(
+            ts_s,
+            current_s
+                .iter()
+                .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+        );
         rr.delta_s_insert_ms = t3.elapsed().as_secs_f64() * 1000.0;
         rr.delta_s_count = delta_s_batches[round].len();
 
@@ -477,16 +511,31 @@ fn run_symmetric_ivmh(
     let mem_pool = get_in_mem_pool();
     let c_key_r = ContainerKey::new(0, 0);
     let c_key_s = ContainerKey::new(0, 1);
+    let mut current_r: HashMap<Vec<u8>, Vec<u8>> = r_entries
+        .iter()
+        .map(|e| (e.key.clone(), e.value.clone()))
+        .collect();
+    let mut current_s: HashMap<Vec<u8>, Vec<u8>> = s_entries
+        .iter()
+        .map(|e| (e.key.clone(), e.value.clone()))
+        .collect();
 
     let ivmh_r = IvmHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
     for e in r_entries {
         ivmh_r.prepare_insert_base(&e.key, &e.key, &e.value);
     }
     let t0 = Instant::now();
-    for e in r_entries {
-        ivmh_r.insert_current(&e.key, &e.key, &e.value);
-    }
-    ivmh_r.mark_ts(1);
+    ivmh_r.populate_current_from_iter(
+        current_r
+            .iter()
+            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+    );
+    ivmh_r.cache_snapshot_from_iter_and_ts(
+        1,
+        current_r
+            .iter()
+            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+    );
     result.build_r_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let ivmh_s = IvmHashTable::new_with_bucket_num(c_key_s, mem_pool.clone(), bucket_num);
@@ -494,10 +543,17 @@ fn run_symmetric_ivmh(
         ivmh_s.prepare_insert_base(&e.key, &e.key, &e.value);
     }
     let t0 = Instant::now();
-    for e in s_entries {
-        ivmh_s.insert_current(&e.key, &e.key, &e.value);
-    }
-    ivmh_s.mark_ts(1);
+    ivmh_s.populate_current_from_iter(
+        current_s
+            .iter()
+            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+    );
+    ivmh_s.cache_snapshot_from_iter_and_ts(
+        1,
+        current_s
+            .iter()
+            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+    );
     result.build_s_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let num_rounds = delta_r_batches.len().min(delta_s_batches.len());
@@ -508,15 +564,21 @@ fn run_symmetric_ivmh(
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: ΔR -> untimed base update, timed latest-hash maintenance + snapshot build.
+        // Step 1: ΔR -> untimed base/logical update, timed latest-hash maintenance + snapshot build.
         for op in &delta_r_batches[round] {
             ivmh_r.prepare_update_base(&op.key, &op.key, &op.new_value, ts);
+            current_r.insert(op.key.clone(), op.new_value.clone());
         }
         let t1 = Instant::now();
         for op in &delta_r_batches[round] {
             ivmh_r.update_current(&op.key, &op.key, &op.new_value);
         }
-        ivmh_r.mark_ts(ts);
+        ivmh_r.cache_snapshot_from_iter_and_ts(
+            ts,
+            current_r
+                .iter()
+                .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+        );
         rr.delta_r_update_ms = t1.elapsed().as_secs_f64() * 1000.0;
         rr.delta_r_count = delta_r_batches[round].len();
 
@@ -528,16 +590,22 @@ fn run_symmetric_ivmh(
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: ΔS -> untimed base insert, timed latest-hash maintenance + snapshot build.
+        // Step 2: ΔS -> untimed base/logical insert, timed latest-hash maintenance + snapshot build.
         let ts_s = ts + 1;
         for e in &delta_s_batches[round] {
             ivmh_s.prepare_insert_base_at_ts(&e.key, &e.key, &e.value, ts_s);
+            current_s.insert(e.key.clone(), e.value.clone());
         }
         let t3 = Instant::now();
         for e in &delta_s_batches[round] {
             ivmh_s.insert_current(&e.key, &e.key, &e.value);
         }
-        ivmh_s.mark_ts(ts_s);
+        ivmh_s.cache_snapshot_from_iter_and_ts(
+            ts_s,
+            current_s
+                .iter()
+                .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+        );
         rr.delta_s_insert_ms = t3.elapsed().as_secs_f64() * 1000.0;
         rr.delta_s_count = delta_s_batches[round].len();
 

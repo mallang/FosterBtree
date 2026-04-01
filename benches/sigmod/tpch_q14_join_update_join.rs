@@ -7,6 +7,7 @@ use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccIndex};
 use fbtree::naive_hash_index::NaiveMvHashTable;
 use fbtree::naive_hash_index::IvmHashTable;
 use fbtree::prelude::*;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{metadata, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -369,6 +370,11 @@ fn run_juj(
         }
     }
 
+    let updated_ptypes: HashMap<Vec<u8>, Vec<u8>> = updates
+        .iter()
+        .map(|update| (update.partkey.clone(), update.ptype.clone()))
+        .collect();
+
     // -- join1 build: index construction (timed) --
     let j1_build_start = Instant::now();
     match &table {
@@ -378,14 +384,25 @@ fn run_juj(
             }
         }
         TableEngine::Snap(t) => {
-            // Base table already populated above; only time the derived snapshot build.
-            t.mark_ts(0);
+            t.build_table_from_iter_and_ts(
+                0,
+                part_entries.iter().map(|entry| {
+                    (
+                        entry.partkey.as_slice(),
+                        entry.partkey.as_slice(),
+                        entry.ptype.as_slice(),
+                    )
+                }),
+            );
         }
         TableEngine::Ivmh(t) => {
-            // Build the latest derived current_table only.
-            for entry in part_entries {
-                t.insert_current(&entry.partkey, &entry.partkey, &entry.ptype);
-            }
+            t.populate_current_from_iter(part_entries.iter().map(|entry| {
+                (
+                    entry.partkey.as_slice(),
+                    entry.partkey.as_slice(),
+                    entry.ptype.as_slice(),
+                )
+            }));
         }
     }
     let j1_insert_ms = j1_build_start.elapsed().as_secs_f64() * 1000.0;
@@ -471,9 +488,21 @@ fn run_juj(
 
     let (join2_build_ms, join2_probe_ms, join2_stats) = match &table {
         TableEngine::Snap(t) => {
-            // -- join2 build: rebuild the retained snapshot from base MVCC --
+            // -- join2 build: rebuild the derived snapshot from the current raw rows --
             let j2_build_start = Instant::now();
-            t.mark_ts(after_update_ts);
+            t.build_table_from_iter_and_ts(
+                after_update_ts,
+                part_entries.iter().map(|entry| {
+                    let value = updated_ptypes
+                        .get(&entry.partkey)
+                        .map_or(entry.ptype.as_slice(), |v| v.as_slice());
+                    (
+                        entry.partkey.as_slice(),
+                        entry.partkey.as_slice(),
+                        value,
+                    )
+                }),
+            );
             let j2_build = j2_build_start.elapsed().as_secs_f64() * 1000.0;
 
             // -- join2 probe --

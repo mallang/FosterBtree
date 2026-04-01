@@ -185,6 +185,7 @@ struct IterResult {
 type ProbeQueue = Arc<Mutex<VecDeque<Range<usize>>>>;
 type UpdateQueue = Arc<Mutex<VecDeque<Range<usize>>>>;
 type SnapshotMap = BTreeMap<Timestamp, Arc<NaiveHashTable<InMemPool>>>;
+type CurrentRows = BTreeMap<Vec<u8>, Vec<u8>>;
 type ArcMvccIndex = Arc<
     dyn MvccIndex<
             InMemPool,
@@ -206,6 +207,7 @@ struct SnapConcurrent {
     mem_pool: Arc<InMemPool>,
     bucket_num: usize,
     base_table: HeapBaseMvccTable,
+    current_rows: RwLock<CurrentRows>,
     snapshots: RwLock<SnapshotMap>,
     current_ts: AtomicU64,
     writer_gate: Mutex<()>,
@@ -216,17 +218,27 @@ impl SnapConcurrent {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
         let base_table = HeapBaseMvccTable::new();
+        let mut current_rows = BTreeMap::new();
         for p in parts {
             base_table.insert_at_ts(&p.partkey, &p.partkey, &p.ptype, 1);
+            current_rows.insert(p.partkey.clone(), p.ptype.clone());
         }
         let mut snapshots = BTreeMap::new();
-        let initial = build_snapshot_from_base(c_key, mem_pool.clone(), bucket_num, &base_table, 1);
+        let initial = build_snapshot_from_rows(
+            c_key,
+            mem_pool.clone(),
+            bucket_num,
+            current_rows
+                .iter()
+                .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+        );
         snapshots.insert(1, initial);
         Self {
             c_key,
             mem_pool,
             bucket_num,
             base_table,
+            current_rows: RwLock::new(current_rows),
             snapshots: RwLock::new(snapshots),
             current_ts: AtomicU64::new(1),
             writer_gate: Mutex::new(()),
@@ -258,19 +270,28 @@ impl ConcurrentTable for SnapConcurrent {
         let arrival = Instant::now();
         let _writer = self.writer_gate.lock();
         let wait_ms = arrival.elapsed().as_secs_f64() * 1000.0;
-        let exec_start = Instant::now();
         let new_ts = self.current_ts.load(Ordering::Acquire) + 1;
         for op in updates {
             self.base_table
                 .update_at_ts(&op.partkey, &op.partkey, &op.new_ptype, new_ts);
         }
-        let snapshot = build_snapshot_from_base(
-            self.c_key,
-            self.mem_pool.clone(),
-            self.bucket_num,
-            &self.base_table,
-            new_ts,
-        );
+        {
+            let mut rows = self.current_rows.write();
+            for op in updates {
+                rows.insert(op.partkey.clone(), op.new_ptype.clone());
+            }
+        }
+        let exec_start = Instant::now();
+        let snapshot = {
+            let rows = self.current_rows.read();
+            build_snapshot_from_rows(
+                self.c_key,
+                self.mem_pool.clone(),
+                self.bucket_num,
+                rows.iter()
+                    .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+            )
+        };
         self.snapshots.write().insert(new_ts, snapshot);
         self.current_ts.store(new_ts, Ordering::Release);
         let exec_ms = exec_start.elapsed().as_secs_f64() * 1000.0;
@@ -288,6 +309,7 @@ struct IvmhConcurrent {
     mem_pool: Arc<InMemPool>,
     bucket_num: usize,
     base_table: HeapBaseMvccTable,
+    current_rows: RwLock<CurrentRows>,
     current_table: RwLock<NaiveHashTable<InMemPool>>,
     snapshots: RwLock<SnapshotMap>,
     current_ts: AtomicU64,
@@ -300,8 +322,10 @@ impl IvmhConcurrent {
         let c_key = ContainerKey::new(0, 0);
         let base_table = HeapBaseMvccTable::new();
         let current_table = NaiveHashTable::new_with_bucket_num(c_key, mem_pool.clone(), bucket_num);
+        let mut current_rows = BTreeMap::new();
         for p in parts {
             base_table.insert_at_ts(&p.partkey, &p.partkey, &p.ptype, 1);
+            current_rows.insert(p.partkey.clone(), p.ptype.clone());
             current_table
                 .insert(RecordRef::new(&p.partkey, &p.partkey, &p.ptype))
                 .unwrap();
@@ -311,6 +335,7 @@ impl IvmhConcurrent {
             mem_pool,
             bucket_num,
             base_table,
+            current_rows: RwLock::new(current_rows),
             current_table: RwLock::new(current_table),
             snapshots: RwLock::new(BTreeMap::new()),
             current_ts: AtomicU64::new(1),
@@ -361,33 +386,47 @@ impl ConcurrentTable for IvmhConcurrent {
         let arrival = Instant::now();
         let _writer = self.writer_gate.lock();
         let wait_ms = arrival.elapsed().as_secs_f64() * 1000.0;
-        let exec_start = Instant::now();
         let old_ts = self.current_ts.load(Ordering::Acquire);
         let new_ts = old_ts + 1;
+        let mut exec_ms = 0.0;
 
-        {
-            let current = self.current_table.write();
-            if !self.snapshots.read().contains_key(&old_ts) {
-                let snapshot = build_snapshot_from_base(
+        if !self.snapshots.read().contains_key(&old_ts) {
+            let t = Instant::now();
+            let snapshot = {
+                let rows = self.current_rows.read();
+                build_snapshot_from_rows(
                     self.c_key,
                     self.mem_pool.clone(),
                     self.bucket_num,
-                    &self.base_table,
-                    old_ts,
-                );
-                self.snapshots.write().insert(old_ts, snapshot);
-            }
+                    rows.iter()
+                        .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+                )
+            };
+            self.snapshots.write().insert(old_ts, snapshot);
+            exec_ms += t.elapsed().as_secs_f64() * 1000.0;
+        }
+
+        {
+            let mut rows = self.current_rows.write();
             for op in updates {
                 self.base_table
                     .update_at_ts(&op.partkey, &op.partkey, &op.new_ptype, new_ts);
+                rows.insert(op.partkey.clone(), op.new_ptype.clone());
+            }
+        }
+
+        {
+            let t = Instant::now();
+            let current = self.current_table.write();
+            for op in updates {
                 current
                     .update(RecordRef::new(&op.partkey, &op.partkey, &op.new_ptype))
                     .unwrap();
             }
+            exec_ms += t.elapsed().as_secs_f64() * 1000.0;
         }
 
         self.current_ts.store(new_ts, Ordering::Release);
-        let exec_ms = exec_start.elapsed().as_secs_f64() * 1000.0;
         UpdateTxMetrics {
             latency_ms: wait_ms + exec_ms,
             wait_ms,
@@ -629,17 +668,22 @@ fn read_updates(path: &str) -> Result<Vec<UpdateOp>, Box<dyn Error>> {
     Ok(ops)
 }
 
-fn build_snapshot_from_base(
+fn build_snapshot_from_rows<I, K, P, V>(
     c_key: ContainerKey,
     mem_pool: Arc<InMemPool>,
     bucket_num: usize,
-    base_table: &HeapBaseMvccTable,
-    ts: Timestamp,
-) -> Arc<NaiveHashTable<InMemPool>> {
+    rows: I,
+) -> Arc<NaiveHashTable<InMemPool>>
+where
+    I: IntoIterator<Item = (K, P, V)>,
+    K: AsRef<[u8]>,
+    P: AsRef<[u8]>,
+    V: AsRef<[u8]>,
+{
     let table = Arc::new(NaiveHashTable::new_with_bucket_num(c_key, mem_pool, bucket_num));
-    for (key, pkey, value) in base_table.scan_as_of(ts) {
+    for (key, pkey, value) in rows {
         table
-            .insert(RecordRef::new(&key, &pkey, &value))
+            .insert(RecordRef::new(key.as_ref(), pkey.as_ref(), value.as_ref()))
             .unwrap();
     }
     table

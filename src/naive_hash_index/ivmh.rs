@@ -102,6 +102,41 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         self.update_current(k, pk, v);
     }
 
+    pub fn populate_current_from_iter<I, K, P, V>(&self, rows: I) -> Duration
+    where
+        I: IntoIterator<Item = (K, P, V)>,
+        K: AsRef<[u8]>,
+        P: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let start = Instant::now();
+        for (k, pk, v) in rows {
+            self.insert_current(k.as_ref(), pk.as_ref(), v.as_ref());
+        }
+        start.elapsed()
+    }
+
+    fn build_snapshot_from_iter<I, K, P, V>(&self, rows: I) -> (Arc<NaiveHashTable<T>>, Duration)
+    where
+        I: IntoIterator<Item = (K, P, V)>,
+        K: AsRef<[u8]>,
+        P: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let start = Instant::now();
+        let snapshot = Arc::new(NaiveHashTable::new_with_bucket_num(
+            self.c_key,
+            self.mem_pool.clone(),
+            self.bucket_count,
+        ));
+        for (k, pk, v) in rows {
+            snapshot
+                .insert(RecordRef::new(k.as_ref(), pk.as_ref(), v.as_ref()))
+                .unwrap();
+        }
+        (snapshot, start.elapsed())
+    }
+
     fn build_snapshot_from_base(&self, ts: Timestamp) -> Arc<NaiveHashTable<T>> {
         let snapshot = Arc::new(NaiveHashTable::new_with_bucket_num(
             self.c_key,
@@ -118,6 +153,21 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         let start = Instant::now();
         let snapshot = self.build_snapshot_from_base(ts);
         let duration = start.elapsed();
+        self.snapshots.borrow_mut().insert(ts, snapshot);
+        if self.latest_mark_ts.get().map_or(true, |prev| ts > prev) {
+            self.latest_mark_ts.set(Some(ts));
+        }
+        duration
+    }
+
+    pub fn cache_snapshot_from_iter_and_ts<I, K, P, V>(&self, ts: Timestamp, rows: I) -> Duration
+    where
+        I: IntoIterator<Item = (K, P, V)>,
+        K: AsRef<[u8]>,
+        P: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let (snapshot, duration) = self.build_snapshot_from_iter(rows);
         self.snapshots.borrow_mut().insert(ts, snapshot);
         if self.latest_mark_ts.get().map_or(true, |prev| ts > prev) {
             self.latest_mark_ts.set(Some(ts));

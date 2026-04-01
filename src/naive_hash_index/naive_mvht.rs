@@ -81,24 +81,34 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         table
     }
 
-    fn build_table_from_recs(
-        &self,
-        vec_updates: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
-    ) -> (Arc<NaiveHashTable<T>>, Duration) {
+    fn build_table_from_iter<I, K, P, V>(&self, rows: I) -> (Arc<NaiveHashTable<T>>, Duration)
+    where
+        I: IntoIterator<Item = (K, P, V)>,
+        K: AsRef<[u8]>,
+        P: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let start = Instant::now();
         let table = Arc::new(NaiveHashTable::new_with_bucket_num(
             self.c_key,
             self.mem_pool.clone(),
             self.bucket_count,
         ));
 
-        let start = Instant::now();
-        for (k, pk, v) in vec_updates {
-            let rec = Record::new(k.clone(), pk.clone(), v.clone());
+        for (k, pk, v) in rows {
+            let rec = Record::new(k.as_ref().to_vec(), pk.as_ref().to_vec(), v.as_ref().to_vec());
             table
                 .insert(RecordRef::new(rec.key(), rec.pkey(), rec.val()))
                 .unwrap();
         }
         (table, start.elapsed())
+    }
+
+    fn build_table_from_recs(
+        &self,
+        vec_updates: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    ) -> (Arc<NaiveHashTable<T>>, Duration) {
+        self.build_table_from_iter(vec_updates)
     }
 
     pub fn mark_ts(&self, ts: Timestamp) {
@@ -115,6 +125,19 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         vec_updates: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     ) -> Duration {
         let (cur_table, duration) = self.build_table_from_recs(vec_updates);
+        self.naivetables.borrow_mut().insert(ts, cur_table);
+        self.build_table_stats.borrow_mut().insert(ts, duration);
+        duration
+    }
+
+    pub fn build_table_from_iter_and_ts<I, K, P, V>(&self, ts: Timestamp, rows: I) -> Duration
+    where
+        I: IntoIterator<Item = (K, P, V)>,
+        K: AsRef<[u8]>,
+        P: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let (cur_table, duration) = self.build_table_from_iter(rows);
         self.naivetables.borrow_mut().insert(ts, cur_table);
         self.build_table_stats.borrow_mut().insert(ts, duration);
         duration

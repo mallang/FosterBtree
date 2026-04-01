@@ -179,8 +179,8 @@ fn get_pool() -> Arc<InMemPool> {
 
 // ---------------------------------------------------------------------------
 // SNAP: base load / base updates are untimed.
-//        setup   = build initial derived snapshot at ts=0
-//        rebuild = build fresh derived snapshot from base MVCC after updates
+//        setup   = build initial derived snapshot from raw current rows at ts=0
+//        rebuild = rebuild the fresh derived snapshot from raw current rows after updates
 //        query   = probe the rebuilt snapshot
 // ---------------------------------------------------------------------------
 
@@ -196,9 +196,18 @@ fn run_snap(parts: &[PartEntry], probe_rows: &[ProbeRow], update_pct: f64, bucke
         snap.add_insert_rec_at_ts(&p.partkey, &p.partkey, &p.ptype, 0);
     }
 
-    // SETUP: build the initial derived snapshot from base MVCC.
+    // SETUP: build the initial derived snapshot from the raw current rows.
     let setup_start = Instant::now();
-    snap.mark_ts(0);
+    snap.build_table_from_iter_and_ts(
+        0,
+        parts.iter().map(|p| {
+            (
+                p.partkey.as_slice(),
+                p.partkey.as_slice(),
+                p.ptype.as_slice(),
+            )
+        }),
+    );
     let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
 
     // Untimed: apply updates to the base MVCC table.
@@ -206,9 +215,19 @@ fn run_snap(parts: &[PartEntry], probe_rows: &[ProbeRow], update_pct: f64, bucke
         snap.add_update_rec_at_ts(&p.partkey, &p.partkey, UPDATED_PTYPE, (idx + 1) as Timestamp);
     }
 
-    // REBUILD: build the fresh snapshot from base MVCC.
+    // REBUILD: rebuild the fresh snapshot from the updated raw current rows.
     let rebuild_start = Instant::now();
-    snap.mark_ts(fresh_ts);
+    snap.build_table_from_iter_and_ts(
+        fresh_ts,
+        parts.iter().enumerate().map(|(idx, p)| {
+            let value = if idx < n_upd {
+                UPDATED_PTYPE.as_ref()
+            } else {
+                p.ptype.as_slice()
+            };
+            (p.partkey.as_slice(), p.partkey.as_slice(), value)
+        }),
+    );
     let rebuild_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
 
     // QUERY: probe at the retained fresh snapshot.
@@ -246,11 +265,15 @@ fn run_ivmh(parts: &[PartEntry], probe_rows: &[ProbeRow], update_pct: f64, bucke
         ivmh.prepare_insert_base(&p.partkey, &p.partkey, &p.ptype);
     }
 
-    // SETUP: build the latest derived current_table.
+    // SETUP: build the latest derived current_table from the raw current rows.
     let setup_start = Instant::now();
-    for p in parts {
-        ivmh.insert_current(&p.partkey, &p.partkey, &p.ptype);
-    }
+    ivmh.populate_current_from_iter(parts.iter().map(|p| {
+        (
+            p.partkey.as_slice(),
+            p.partkey.as_slice(),
+            p.ptype.as_slice(),
+        )
+    }));
     let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
 
     // Untimed: apply updates to the base MVCC table.
