@@ -126,6 +126,23 @@ def _sigmod_dir_from_tpch(tpch_dir: Path) -> Path:
     return tpch_dir.parent
 
 
+def _generated_tpch_dir(sigmod_dir: Path) -> Path:
+    out = sigmod_dir / ".generated_tpch"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _readable_file(path: Path) -> bool:
+    return path.exists() and path.is_file() and os.access(path, os.R_OK)
+
+
+def _pick_readable_candidate(candidates: list[Path]) -> Path | None:
+    for path in candidates:
+        if _readable_file(path):
+            return path
+    return None
+
+
 def _ensure_dbgen(sigmod_dir: Path) -> Path:
     dbgen_dir = sigmod_dir / "dbgen"
     dbgen_bin = dbgen_dir / "dbgen"
@@ -151,19 +168,35 @@ def _generate_tpch_table(tpch_dir: Path, prefix: str, sf) -> Path:
     raw_path = dbgen_bin.parent / raw_name
     if not raw_path.exists():
         raise FileNotFoundError(f"dbgen did not produce {raw_path}")
-    raw_path.replace(out_path)
-    return out_path
+    try:
+        raw_path.replace(out_path)
+        return out_path
+    except PermissionError:
+        fallback = _generated_tpch_dir(sigmod_dir) / out_path.name
+        raw_path.replace(fallback)
+        return fallback
+
+
+def _resolve_or_generate_readable_table(tpch_dir: Path, prefix: str, sf) -> Path:
+    candidates = [tpch_dir / f"{prefix}_sf{token}.tbl" for token in sf_tokens(sf)]
+    readable = _pick_readable_candidate(candidates)
+    if readable is not None:
+        return readable
+    return _generate_tpch_table(tpch_dir, prefix, sf)
 
 
 def _generate_lineitem_probe(tpch_dir: Path, sf, suffix: str) -> Path:
     if suffix != "_1995-09-01_1995-10-01.tbl":
         raise FileNotFoundError(f"Automatic generation is only supported for Q14 probe suffix {suffix}")
 
-    raw_lineitem = resolve_tpch_file(tpch_dir, "lineitem", sf, ".tbl")
+    sigmod_dir = _sigmod_dir_from_tpch(tpch_dir)
+    raw_lineitem = _resolve_or_generate_readable_table(tpch_dir, "lineitem", sf)
     sf_token = _canonical_sf_token(sf)
     out_path = tpch_dir / f"lineitem_probe_sf{sf_token}{suffix}"
+    if not os.access(tpch_dir, os.W_OK):
+        out_path = _generated_tpch_dir(sigmod_dir) / out_path.name
 
-    with open(raw_lineitem) as fin, open(out_path, "w") as fout:
+    with open(raw_lineitem, "r") as fin, open(out_path, "w") as fout:
         for line in fin:
             fields = line.rstrip("\n").split("|")
             if len(fields) < 11:
@@ -176,9 +209,9 @@ def _generate_lineitem_probe(tpch_dir: Path, sf, suffix: str) -> Path:
 
 def resolve_tpch_file(tpch_dir: Path, prefix: str, sf, suffix: str = ".tbl") -> Path:
     candidates = [tpch_dir / f"{prefix}_sf{token}{suffix}" for token in sf_tokens(sf)]
-    for path in candidates:
-        if path.exists():
-            return path
+    readable = _pick_readable_candidate(candidates)
+    if readable is not None:
+        return readable
     if prefix in {"part", "lineitem"} and suffix == ".tbl":
         return _generate_tpch_table(tpch_dir, prefix, sf)
     if prefix == "lineitem_probe":
