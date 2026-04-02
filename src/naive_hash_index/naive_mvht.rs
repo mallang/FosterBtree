@@ -9,7 +9,7 @@ use crate::{
     bp::{ContainerKey, MemPool},
     mvcc_index::{
         hash_common::{KVWithTs, StatCollector},
-        hash_join_page::record::{Record, RecordRef},
+        hash_join_page::record::RecordRef,
         Delta,
     },
     naive_hash_index::{
@@ -96,9 +96,8 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         ));
 
         for (k, pk, v) in rows {
-            let rec = Record::new(k.as_ref().to_vec(), pk.as_ref().to_vec(), v.as_ref().to_vec());
             table
-                .insert(RecordRef::new(rec.key(), rec.pkey(), rec.val()))
+                .insert(RecordRef::new(k.as_ref(), pk.as_ref(), v.as_ref()))
                 .unwrap();
         }
         (table, start.elapsed())
