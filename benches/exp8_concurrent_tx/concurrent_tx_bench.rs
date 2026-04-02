@@ -442,6 +442,7 @@ struct MvhtConcurrent {
     repair_mode: RepairMode,
     committed_ts: AtomicU64,
     writer_gate: Mutex<()>,
+    partition_guard: RwLock<()>,
 }
 
 impl MvhtConcurrent {
@@ -486,6 +487,7 @@ impl MvhtConcurrent {
             repair_mode,
             committed_ts: AtomicU64::new(1),
             writer_gate: Mutex::new(()),
+            partition_guard: RwLock::new(()),
         }
     }
 }
@@ -494,6 +496,14 @@ impl ConcurrentTable for MvhtConcurrent {
     fn run_read_tx(&self, probes: &[ProbeRow]) -> ReadTxMetrics {
         let arrival = Instant::now();
         let read_ts = self.committed_ts.load(Ordering::Acquire);
+        // TsPartitionedTable mutates partition metadata during split_at_ts().
+        // Keep a shared guard for the duration of a read tx so splits cannot
+        // race with scans.
+        let _partition_read_guard = if matches!(self.table_type, TableType::Par) {
+            Some(self.partition_guard.read())
+        } else {
+            None
+        };
         let wait_ms = arrival.elapsed().as_secs_f64() * 1000.0;
         let exec_start = Instant::now();
         let mut probes_done = 0u64;
@@ -567,6 +577,9 @@ impl ConcurrentTable for MvhtConcurrent {
             }
         }
         if matches!(self.table_type, TableType::Par) {
+            // split_at_ts mutates partition metadata and is not safe to run
+            // concurrently with readers. Serialize it against read txs only.
+            let _partition_write_guard = self.partition_guard.write();
             self.table.split_at_ts(new_ts + 1).unwrap();
         }
         self.committed_ts.store(new_ts, Ordering::Release);
