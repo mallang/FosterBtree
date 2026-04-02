@@ -4,8 +4,7 @@ use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::rust_hash_map::rust_hash_map::MvccRustHashMap;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
 use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccIndex};
-use fbtree::naive_hash_index::NaiveMvHashTable;
-use fbtree::naive_hash_index::IvmHashTable;
+use fbtree::naive_hash_index::{HeapBaseMvccTable, IvmHashTable, NaiveMvHashTable};
 use fbtree::prelude::*;
 use std::error::Error;
 use std::fs::{metadata, OpenOptions};
@@ -358,6 +357,11 @@ fn run_juj(
     let j1_alloc_ms = j1_alloc_start.elapsed().as_secs_f64() * 1000.0;
 
     // -- join1 build: base MVCC population (untimed for SNAP / IVMH only) --
+    let shared_base = HeapBaseMvccTable::new();
+    for entry in part_entries {
+        shared_base.insert_at_ts(&entry.partkey, &entry.partkey, &entry.ptype, 0);
+    }
+
     if let TableEngine::Snap(t) = &table {
         for entry in part_entries {
             t.add_insert_rec_at_ts(&entry.partkey, &entry.partkey, &entry.ptype, 0);
@@ -373,8 +377,8 @@ fn run_juj(
     let j1_build_start = Instant::now();
     match &table {
         TableEngine::Mvcc(t) => {
-            for entry in part_entries {
-                t.insert_ref(&entry.partkey, &entry.partkey, 0, 0, &entry.ptype)?;
+            for (key, pkey, value) in shared_base.scan_as_of(0) {
+                t.insert_ref(&key, &pkey, 0, 0, &value)?;
             }
         }
         TableEngine::Snap(t) => {
