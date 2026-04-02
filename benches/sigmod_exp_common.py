@@ -17,6 +17,25 @@ TOL = {
     "darkgreen": "#8C9916",
 }
 
+SIGMOD_TPCH_SF = "1.0"
+SIGMOD_BUCKET_NUM = 4096
+SIGMOD_WARMUP = 1
+SIGMOD_REPEAT = 5
+SIGMOD_TRIM = 1
+
+# Fixed update point for SIGMOD paper plots: 0.01%.
+SIGMOD_FIXED_UPDATE_PCT = 0.01
+
+# Update-volume sweep for TPC-H-based SIGMOD experiments: 0.01% .. 0.10%.
+SIGMOD_UPDATE_SWEEP_PCTS = [round(0.01 * i, 2) for i in range(1, 11)]
+
+# Equivalent fraction sweep for exp7_bench, whose CLI takes update ratio as a fraction.
+SIGMOD_UPDATE_SWEEP_FRACS = [pct / 100.0 for pct in SIGMOD_UPDATE_SWEEP_PCTS]
+
+# HTAP microbench scale aligned to TPC-H PART SF1 (~200k rows).
+SIGMOD_HTAP_WAREHOUSE_COUNT = 7
+SIGMOD_HTAP_TXN_COUNT = 100
+
 TABLE_DISPLAY = {
     "naive": "SNAP",
     "snap": "SNAP",
