@@ -116,6 +116,14 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         start.elapsed()
     }
 
+    pub fn populate_current_from_base(&self, ts: Timestamp) -> Duration {
+        let rows = self.base_table.scan_as_of(ts);
+        self.populate_current_from_iter(
+            rows.iter()
+                .map(|(k, pk, v)| (k.as_slice(), pk.as_slice(), v.as_slice())),
+        )
+    }
+
     fn build_snapshot_from_iter<I, K, P, V>(&self, rows: I) -> (Arc<NaiveHashTable<T>>, Duration)
     where
         I: IntoIterator<Item = (K, P, V)>,

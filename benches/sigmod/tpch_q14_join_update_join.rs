@@ -7,7 +7,6 @@ use fbtree::mvcc_index::{BoxMvccIndexMemPool, MvccIndex};
 use fbtree::naive_hash_index::NaiveMvHashTable;
 use fbtree::naive_hash_index::IvmHashTable;
 use fbtree::prelude::*;
-use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{metadata, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -370,11 +369,6 @@ fn run_juj(
         }
     }
 
-    let updated_ptypes: HashMap<Vec<u8>, Vec<u8>> = updates
-        .iter()
-        .map(|update| (update.partkey.clone(), update.ptype.clone()))
-        .collect();
-
     // -- join1 build: index construction (timed) --
     let j1_build_start = Instant::now();
     match &table {
@@ -384,25 +378,10 @@ fn run_juj(
             }
         }
         TableEngine::Snap(t) => {
-            t.build_table_from_iter_and_ts(
-                0,
-                part_entries.iter().map(|entry| {
-                    (
-                        entry.partkey.as_slice(),
-                        entry.partkey.as_slice(),
-                        entry.ptype.as_slice(),
-                    )
-                }),
-            );
+            t.build_table_from_base_and_ts(0);
         }
         TableEngine::Ivmh(t) => {
-            t.populate_current_from_iter(part_entries.iter().map(|entry| {
-                (
-                    entry.partkey.as_slice(),
-                    entry.partkey.as_slice(),
-                    entry.ptype.as_slice(),
-                )
-            }));
+            t.populate_current_from_base(0);
         }
     }
     let j1_insert_ms = j1_build_start.elapsed().as_secs_f64() * 1000.0;
@@ -488,21 +467,9 @@ fn run_juj(
 
     let (join2_build_ms, join2_probe_ms, join2_stats) = match &table {
         TableEngine::Snap(t) => {
-            // -- join2 build: rebuild the derived snapshot from the current raw rows --
+            // -- join2 build: rebuild the derived snapshot from the current base snapshot --
             let j2_build_start = Instant::now();
-            t.build_table_from_iter_and_ts(
-                after_update_ts,
-                part_entries.iter().map(|entry| {
-                    let value = updated_ptypes
-                        .get(&entry.partkey)
-                        .map_or(entry.ptype.as_slice(), |v| v.as_slice());
-                    (
-                        entry.partkey.as_slice(),
-                        entry.partkey.as_slice(),
-                        value,
-                    )
-                }),
-            );
+            t.build_table_from_base_and_ts(after_update_ts);
             let j2_build = j2_build_start.elapsed().as_secs_f64() * 1000.0;
 
             // -- join2 probe --

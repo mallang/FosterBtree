@@ -110,12 +110,17 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         self.build_table_from_iter(vec_updates)
     }
 
-    pub fn mark_ts(&self, ts: Timestamp) {
+    pub fn build_table_from_base_and_ts(&self, ts: Timestamp) -> Duration {
         let start = Instant::now();
         let cur_table = self.build_table_at_ts(ts);
         let duration = start.elapsed();
         self.naivetables.borrow_mut().insert(ts, cur_table);
         self.build_table_stats.borrow_mut().insert(ts, duration);
+        duration
+    }
+
+    pub fn mark_ts(&self, ts: Timestamp) -> Duration {
+        self.build_table_from_base_and_ts(ts)
     }
 
     pub fn build_table_from_recs_and_ts(
