@@ -1,14 +1,15 @@
 use clap::{Parser, ValueEnum};
 use fbtree::bp::{get_in_mem_pool, ContainerKey, InMemPool, MemPool};
+use fbtree::mvcc_index::hash_common::{KVWithTs, RowDelta};
 use fbtree::mvcc_index::dual_heap_hash::chained_hash_table::ChainedHashTable;
 use fbtree::mvcc_index::hash_heap::hash_heap_table::HeapHashTable;
 use fbtree::mvcc_index::hash_join_page::record::RecordRef;
 use fbtree::mvcc_index::ts_partitioned::ts_partitioned_table::TsPartitionedTable;
-use fbtree::mvcc_index::{MvccIndex, VersionsMap};
-use fbtree::naive_hash_index::{HeapBaseMvccTable, NaiveHashTable};
+use fbtree::mvcc_index::{Delta, MvccIndex, VersionsMap};
+use fbtree::naive_hash_index::{HeapBaseMvccTable, HeapHashChain, NaiveHashTable};
 use fbtree::prelude::{AccessMethodError, Timestamp};
 use parking_lot::{Condvar, Mutex, RwLock};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fs::{metadata, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -60,14 +61,20 @@ struct Cli {
     #[arg(long, default_value_t = 5)]
     worker_threads: usize,
 
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 12)]
     join_txs: usize,
 
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 6)]
     scan_txs: usize,
 
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 4)]
+    delta_txs: usize,
+
+    #[arg(long, default_value_t = 12)]
     update_waves: usize,
+
+    #[arg(long, default_value_t = 2)]
+    readable_every: usize,
 
     #[arg(long, default_value_t = 0.3)]
     historical_ratio: f64,
@@ -117,6 +124,10 @@ enum TraceTx {
         shape: ReadShape,
         target_ts: Timestamp,
     },
+    Delta {
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    },
     Update {
         wave_idx: usize,
         commit_ts: Timestamp,
@@ -132,6 +143,7 @@ struct TxMetrics {
 struct WorkerStats {
     join_latencies: Vec<f64>,
     scan_latencies: Vec<f64>,
+    delta_latencies: Vec<f64>,
     update_latencies: Vec<f64>,
 }
 
@@ -139,6 +151,7 @@ impl WorkerStats {
     fn merge(&mut self, other: WorkerStats) {
         self.join_latencies.extend(other.join_latencies);
         self.scan_latencies.extend(other.scan_latencies);
+        self.delta_latencies.extend(other.delta_latencies);
         self.update_latencies.extend(other.update_latencies);
     }
 }
@@ -150,6 +163,7 @@ struct TraceResult {
     p95_join_latency_ms: f64,
     avg_scan_latency_ms: f64,
     p95_scan_latency_ms: f64,
+    avg_delta_latency_ms: f64,
     avg_update_latency_ms: f64,
 }
 
@@ -210,6 +224,7 @@ impl CommitTracker {
 trait HtapTraceTable: Send + Sync {
     fn run_join_tx(&self, target_ts: Timestamp, probes: &[ProbeRow]) -> TxMetrics;
     fn run_scan_tx(&self, target_ts: Timestamp) -> TxMetrics;
+    fn run_delta_tx(&self, from_ts: Timestamp, to_ts: Timestamp) -> TxMetrics;
     fn run_update_tx(&self, wave_idx: usize, commit_ts: Timestamp) -> TxMetrics;
 }
 
@@ -418,20 +433,120 @@ fn spread_marks(total: usize, marked: usize) -> Vec<bool> {
     marks
 }
 
-fn historical_target(current_ts: Timestamp, hist_idx: usize) -> Timestamp {
-    if current_ts <= INITIAL_TS {
-        return INITIAL_TS;
-    }
-    let available = (current_ts - INITIAL_TS) as usize;
-    let lag = 1 + (hist_idx % available);
-    current_ts.saturating_sub(lag as u64).max(INITIAL_TS)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingReadShape {
+    Join,
+    Scan,
+    Delta,
 }
 
-fn build_trace(join_txs: usize, scan_txs: usize, update_waves: usize, historical_ratio: f64) -> Vec<TraceTx> {
-    let total_reads = join_txs + scan_txs;
-    let scan_marks = spread_marks(total_reads, scan_txs);
-    let historical_count = ((total_reads as f64) * historical_ratio).round() as usize;
-    let historical_marks = spread_marks(total_reads, historical_count.min(total_reads));
+fn build_read_queue(join_txs: usize, scan_txs: usize, delta_txs: usize) -> VecDeque<PendingReadShape> {
+    let total_reads = join_txs + scan_txs + delta_txs;
+    let delta_marks = spread_marks(total_reads, delta_txs.min(total_reads));
+    let non_delta_total = total_reads.saturating_sub(delta_txs.min(total_reads));
+    let scan_marks = spread_marks(non_delta_total, scan_txs.min(non_delta_total));
+
+    let mut queue = VecDeque::with_capacity(total_reads);
+    let mut non_delta_idx = 0usize;
+    for pos in 0..total_reads {
+        if delta_marks[pos] {
+            queue.push_back(PendingReadShape::Delta);
+        } else {
+            let shape = if scan_marks.get(non_delta_idx).copied().unwrap_or(false) {
+                PendingReadShape::Scan
+            } else {
+                PendingReadShape::Join
+            };
+            non_delta_idx += 1;
+            queue.push_back(shape);
+        }
+    }
+    queue
+}
+
+fn pop_next_read_shape(
+    queue: &mut VecDeque<PendingReadShape>,
+    delta_available: bool,
+) -> Option<PendingReadShape> {
+    if queue.is_empty() {
+        return None;
+    }
+
+    let attempts = queue.len();
+    for _ in 0..attempts {
+        let shape = queue.pop_front().unwrap();
+        if shape != PendingReadShape::Delta || delta_available {
+            return Some(shape);
+        }
+        queue.push_back(shape);
+    }
+
+    queue.pop_front()
+}
+
+fn readable_epochs(update_waves: usize, readable_every: usize) -> Vec<Timestamp> {
+    let readable_every = readable_every.max(1);
+    let mut epochs = vec![INITIAL_TS];
+    for wave_idx in 0..update_waves {
+        let wave_no = wave_idx + 1;
+        let commit_ts = INITIAL_TS + wave_no as u64;
+        if wave_no % readable_every == 0 || wave_no == update_waves {
+            epochs.push(commit_ts);
+        }
+    }
+    epochs
+}
+
+fn historical_target(current_ts: Timestamp, readable_ts: &[Timestamp], hist_idx: usize) -> Timestamp {
+    let eligible: Vec<_> = readable_ts
+        .iter()
+        .copied()
+        .filter(|ts| *ts < current_ts)
+        .collect();
+    if eligible.is_empty() {
+        INITIAL_TS
+    } else {
+        eligible[hist_idx % eligible.len()]
+    }
+}
+
+fn delta_target(
+    current_ts: Timestamp,
+    readable_ts: &[Timestamp],
+    delta_idx: usize,
+) -> Option<(Timestamp, Timestamp)> {
+    let all_pairs: Vec<_> = readable_ts.windows(2).map(|w| (w[0], w[1])).collect();
+    if all_pairs.is_empty() {
+        return None;
+    }
+
+    let available: Vec<_> = all_pairs
+        .iter()
+        .copied()
+        .filter(|(_, to_ts)| *to_ts <= current_ts)
+        .collect();
+    if available.is_empty() {
+        Some(all_pairs[0])
+    } else {
+        Some(available[delta_idx % available.len()])
+    }
+}
+
+fn build_trace(
+    join_txs: usize,
+    scan_txs: usize,
+    delta_txs: usize,
+    update_waves: usize,
+    readable_every: usize,
+    historical_ratio: f64,
+) -> (Vec<TraceTx>, Vec<Timestamp>) {
+    let total_reads = join_txs + scan_txs + delta_txs;
+    let non_delta_reads = join_txs + scan_txs;
+    let readable_ts = readable_epochs(update_waves, readable_every);
+    let mut read_queue = build_read_queue(join_txs, scan_txs, delta_txs);
+    let historical_count = ((non_delta_reads as f64) * historical_ratio).round() as usize;
+    let mut historical_marks =
+        VecDeque::from(spread_marks(non_delta_reads, historical_count.min(non_delta_reads)));
     let reads_per_wave = if update_waves == 0 {
         total_reads.max(1)
     } else {
@@ -442,24 +557,46 @@ fn build_trace(join_txs: usize, scan_txs: usize, update_waves: usize, historical
     let mut current_ts = INITIAL_TS;
     let mut emitted_updates = 0usize;
     let mut hist_idx = 0usize;
+    let mut delta_idx = 0usize;
 
-    for read_idx in 0..total_reads {
-        let shape = if scan_marks[read_idx] {
-            ReadShape::Scan
-        } else {
-            ReadShape::Join
-        };
-        let target_ts = if historical_marks[read_idx] {
-            let ts = historical_target(current_ts, hist_idx);
-            hist_idx += 1;
-            ts
-        } else {
-            current_ts
-        };
-        trace.push(TraceTx::Read { shape, target_ts });
+    for read_slot in 0..total_reads {
+        let delta_available = readable_ts
+            .windows(2)
+            .any(|pair| pair[1] <= current_ts);
+        let shape = pop_next_read_shape(&mut read_queue, delta_available)
+            .expect("read queue should not underflow");
+        match shape {
+            PendingReadShape::Join | PendingReadShape::Scan => {
+                let is_historical = historical_marks.pop_front().unwrap_or(false);
+                let target_ts = if is_historical {
+                    let ts = historical_target(current_ts, &readable_ts, hist_idx);
+                    hist_idx += 1;
+                    ts
+                } else {
+                    current_ts
+                };
+                let shape = match shape {
+                    PendingReadShape::Join => ReadShape::Join,
+                    PendingReadShape::Scan => ReadShape::Scan,
+                    PendingReadShape::Delta => unreachable!(),
+                };
+                trace.push(TraceTx::Read { shape, target_ts });
+            }
+            PendingReadShape::Delta => {
+                if let Some((from_ts, to_ts)) = delta_target(current_ts, &readable_ts, delta_idx) {
+                    delta_idx += 1;
+                    trace.push(TraceTx::Delta { from_ts, to_ts });
+                } else {
+                    trace.push(TraceTx::Read {
+                        shape: ReadShape::Join,
+                        target_ts: current_ts,
+                    });
+                }
+            }
+        }
 
         while emitted_updates < update_waves
-            && (read_idx + 1) >= ((emitted_updates + 1) * reads_per_wave).min(total_reads)
+            && (read_slot + 1) >= ((emitted_updates + 1) * reads_per_wave).min(total_reads)
         {
             emitted_updates += 1;
             current_ts = INITIAL_TS + emitted_updates as u64;
@@ -479,7 +616,7 @@ fn build_trace(join_txs: usize, scan_txs: usize, update_waves: usize, historical
         });
     }
 
-    trace
+    (trace, readable_ts)
 }
 
 fn probe_naive_table<T: MemPool + 'static>(table: &NaiveHashTable<T>, probes: &[ProbeRow]) {
@@ -492,6 +629,35 @@ fn probe_naive_table<T: MemPool + 'static>(table: &NaiveHashTable<T>, probes: &[
 
 fn scan_naive_table<T: MemPool + 'static>(table: &NaiveHashTable<T>) {
     let _count = table.scan().unwrap().count();
+}
+
+fn scan_naive_delta_tables(
+    from: &NaiveHashTable<InMemPool>,
+    to: &NaiveHashTable<InMemPool>,
+    bucket_num: usize,
+) {
+    let mut delta_map = HashMap::<Vec<u8>, RowDelta>::new();
+    for bucket_idx in 0..bucket_num {
+        let from_bucket = from.get_chain(bucket_idx);
+        let to_bucket = to.get_chain(bucket_idx);
+        HeapHashChain::scan_deltas(&from_bucket, &to_bucket, &mut delta_map).unwrap();
+    }
+
+    let _count = delta_map
+        .into_iter()
+        .filter_map(|(pk, from_to_delta)| {
+            let (from_kv, to_kv) = from_to_delta.split();
+            if to_kv == KVWithTs::default() {
+                None
+            } else if from_kv == KVWithTs::default() {
+                Some((to_kv.get_k().to_vec(), pk, Delta::Inserted(to_kv.get_v().to_vec())))
+            } else if from_kv.get_v() == to_kv.get_v() {
+                None
+            } else {
+                Some((to_kv.get_k().to_vec(), pk, Delta::Updated(to_kv.get_v().to_vec())))
+            }
+        })
+        .count();
 }
 
 struct SnapTrace {
@@ -567,6 +733,17 @@ impl HtapTraceTable for SnapTrace {
         self.commit_tracker.wait_until_visible(target_ts);
         let snapshot = self.get_or_build_snapshot(target_ts);
         scan_naive_table(snapshot.as_ref());
+        TxMetrics {
+            latency_ms: start.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+
+    fn run_delta_tx(&self, from_ts: Timestamp, to_ts: Timestamp) -> TxMetrics {
+        let start = Instant::now();
+        self.commit_tracker.wait_until_visible(to_ts);
+        let from = self.get_or_build_snapshot(from_ts);
+        let to = self.get_or_build_snapshot(to_ts);
+        scan_naive_delta_tables(from.as_ref(), to.as_ref(), self.bucket_num);
         TxMetrics {
             latency_ms: start.elapsed().as_secs_f64() * 1000.0,
         }
@@ -684,6 +861,17 @@ impl HtapTraceTable for IvmhTrace {
         }
     }
 
+    fn run_delta_tx(&self, from_ts: Timestamp, to_ts: Timestamp) -> TxMetrics {
+        let start = Instant::now();
+        self.commit_tracker.wait_until_visible(to_ts);
+        let from = self.get_or_build_snapshot(from_ts);
+        let to = self.get_or_build_snapshot(to_ts);
+        scan_naive_delta_tables(from.as_ref(), to.as_ref(), self.bucket_num);
+        TxMetrics {
+            latency_ms: start.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+
     fn run_update_tx(&self, wave_idx: usize, commit_ts: Timestamp) -> TxMetrics {
         let start = Instant::now();
         self.commit_tracker.wait_for_turn(commit_ts);
@@ -707,6 +895,7 @@ struct MvhtTrace {
     table_type: TableType,
     repair_mode: RepairMode,
     update_waves: Vec<Vec<UpdateOp>>,
+    readable_commits: HashSet<Timestamp>,
     commit_tracker: CommitTracker,
     partition_guard: RwLock<()>,
 }
@@ -718,6 +907,7 @@ impl MvhtTrace {
         repair_mode: RepairMode,
         bucket_num: usize,
         update_waves: &[Vec<UpdateOp>],
+        readable_ts: &[Timestamp],
     ) -> Self {
         let mem_pool = get_in_mem_pool();
         let c_key = ContainerKey::new(0, 0);
@@ -752,6 +942,7 @@ impl MvhtTrace {
             table_type,
             repair_mode,
             update_waves: update_waves.to_vec(),
+            readable_commits: readable_ts.iter().copied().collect(),
             commit_tracker: CommitTracker::new(),
             partition_guard: RwLock::new(()),
         }
@@ -821,6 +1012,35 @@ impl HtapTraceTable for MvhtTrace {
         }
     }
 
+    fn run_delta_tx(&self, from_ts: Timestamp, to_ts: Timestamp) -> TxMetrics {
+        let start = Instant::now();
+        self.commit_tracker.wait_until_visible(to_ts);
+        let _partition_read_guard = if matches!(self.table_type, TableType::Par) {
+            Some(self.partition_guard.read())
+        } else {
+            None
+        };
+        loop {
+            let result = match self.repair_mode {
+                RepairMode::Rr => self.table.delta_scan_read_repair(from_ts, to_ts),
+                _ => self.table.delta_scan(from_ts, to_ts),
+            };
+            match result {
+                Ok(iter) => {
+                    let _count = iter.count();
+                    break;
+                }
+                Err(AccessMethodError::PageReadLatchFailed | AccessMethodError::PageWriteLatchFailed) => {
+                    thread::yield_now();
+                }
+                Err(err) => panic!("MVHT delta scan failed: {}", err),
+            }
+        }
+        TxMetrics {
+            latency_ms: start.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+
     fn run_update_tx(&self, wave_idx: usize, commit_ts: Timestamp) -> TxMetrics {
         let start = Instant::now();
         self.commit_tracker.wait_for_turn(commit_ts);
@@ -851,7 +1071,7 @@ impl HtapTraceTable for MvhtTrace {
                 }
             }
         }
-        if matches!(self.table_type, TableType::Par) {
+        if matches!(self.table_type, TableType::Par) && self.readable_commits.contains(&commit_ts) {
             let _partition_write_guard = self.partition_guard.write();
             self.table.split_at_ts(commit_ts + 1).unwrap();
         }
@@ -887,6 +1107,7 @@ fn aggregate_trace(total_ms: f64, stats: WorkerStats) -> TraceResult {
         p95_join_latency_ms: percentile(&stats.join_latencies, 0.95),
         avg_scan_latency_ms: mean(&stats.scan_latencies),
         p95_scan_latency_ms: percentile(&stats.scan_latencies, 0.95),
+        avg_delta_latency_ms: mean(&stats.delta_latencies),
         avg_update_latency_ms: mean(&stats.update_latencies),
     }
 }
@@ -895,6 +1116,7 @@ fn create_trace_backend(
     cli: &Cli,
     parts: &[PartEntry],
     update_waves: &[Vec<UpdateOp>],
+    readable_ts: &[Timestamp],
 ) -> Arc<dyn HtapTraceTable> {
     match cli.table_type {
         TableType::Snap => Arc::new(SnapTrace::new(parts, update_waves, cli.bucket_num)),
@@ -905,6 +1127,7 @@ fn create_trace_backend(
             cli.repair_mode,
             cli.bucket_num,
             update_waves,
+            readable_ts,
         )),
     }
 }
@@ -915,9 +1138,10 @@ fn run_trace_once(
     probes: &[ProbeRow],
     base_updates: &[UpdateOp],
     trace: &[TraceTx],
+    readable_ts: &[Timestamp],
 ) -> TraceResult {
     let update_waves = build_update_waves(base_updates, cli.update_waves);
-    let backend = create_trace_backend(cli, parts, &update_waves);
+    let backend = create_trace_backend(cli, parts, &update_waves, readable_ts);
     let trace = Arc::new(trace.to_vec());
     let probes = Arc::new(probes.to_vec());
     let barrier = Arc::new(Barrier::new(cli.worker_threads + 1));
@@ -949,6 +1173,10 @@ fn run_trace_once(
                             ReadShape::Scan => stats.scan_latencies.push(metrics.latency_ms),
                         }
                     }
+                    TraceTx::Delta { from_ts, to_ts } => {
+                        let metrics = backend.run_delta_tx(*from_ts, *to_ts);
+                        stats.delta_latencies.push(metrics.latency_ms);
+                    }
                     TraceTx::Update { wave_idx, commit_ts } => {
                         let metrics = backend.run_update_tx(*wave_idx, *commit_ts);
                         stats.update_latencies.push(metrics.latency_ms);
@@ -977,6 +1205,7 @@ fn average_results(results: &[TraceResult]) -> TraceResult {
         p95_join_latency_ms: results.iter().map(|r| r.p95_join_latency_ms).sum::<f64>() / n,
         avg_scan_latency_ms: results.iter().map(|r| r.avg_scan_latency_ms).sum::<f64>() / n,
         p95_scan_latency_ms: results.iter().map(|r| r.p95_scan_latency_ms).sum::<f64>() / n,
+        avg_delta_latency_ms: results.iter().map(|r| r.avg_delta_latency_ms).sum::<f64>() / n,
         avg_update_latency_ms: results.iter().map(|r| r.avg_update_latency_ms).sum::<f64>() / n,
     }
 }
@@ -992,18 +1221,20 @@ fn write_csv(
     if !exists {
         writeln!(
             file,
-            "table_type,repair_mode,worker_threads,join_txs,scan_txs,update_waves,historical_ratio,update_pct,bucket_num,update_ops,total_ms,avg_join_latency_ms,p95_join_latency_ms,avg_scan_latency_ms,p95_scan_latency_ms,avg_update_latency_ms"
+            "table_type,repair_mode,worker_threads,join_txs,scan_txs,delta_txs,update_waves,readable_every,historical_ratio,update_pct,bucket_num,update_ops,total_ms,avg_join_latency_ms,p95_join_latency_ms,avg_scan_latency_ms,p95_scan_latency_ms,avg_delta_latency_ms,avg_update_latency_ms"
         )?;
     }
     writeln!(
         file,
-        "{:?},{:?},{},{},{},{},{:.4},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+        "{:?},{:?},{},{},{},{},{},{},{:.4},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
         cli.table_type,
         cli.repair_mode,
         cli.worker_threads,
         cli.join_txs,
         cli.scan_txs,
+        cli.delta_txs,
         cli.update_waves,
+        cli.readable_every,
         cli.historical_ratio,
         cli.update_pct,
         cli.bucket_num,
@@ -1013,6 +1244,7 @@ fn write_csv(
         result.p95_join_latency_ms,
         result.avg_scan_latency_ms,
         result.p95_scan_latency_ms,
+        result.avg_delta_latency_ms,
         result.avg_update_latency_ms,
     )?;
     Ok(())
@@ -1023,42 +1255,53 @@ fn main() -> Result<(), Box<dyn Error>> {
     let parts = read_part_table(&cli.part_file)?;
     let probes = read_probe_rows(&cli.lineitem_file)?;
     let updates = read_updates(&cli.updates_file)?;
-    let trace = build_trace(cli.join_txs, cli.scan_txs, cli.update_waves, cli.historical_ratio);
+    let (trace, readable_ts) = build_trace(
+        cli.join_txs,
+        cli.scan_txs,
+        cli.delta_txs,
+        cli.update_waves,
+        cli.readable_every,
+        cli.historical_ratio,
+    );
 
     eprintln!("=== htap_trace_bench ===");
     eprintln!(
-        "table={:?} repair={:?} workers={} join_txs={} scan_txs={} update_waves={} hist_ratio={:.2}",
+        "table={:?} repair={:?} workers={} join_txs={} scan_txs={} delta_txs={} update_waves={} readable_every={} hist_ratio={:.2}",
         cli.table_type,
         cli.repair_mode,
         cli.worker_threads,
         cli.join_txs,
         cli.scan_txs,
+        cli.delta_txs,
         cli.update_waves,
+        cli.readable_every,
         cli.historical_ratio,
     );
     eprintln!(
-        "loaded: part_rows={} probe_rows={} update_ops_per_wave={} trace_len={}",
+        "loaded: part_rows={} probe_rows={} update_ops_per_wave={} trace_len={} readable_ts={}",
         parts.len(),
         probes.len(),
         updates.len(),
         trace.len(),
+        readable_ts.len(),
     );
 
     for w in 0..cli.warmup {
-        let _ = run_trace_once(&cli, &parts, &probes, &updates, &trace);
+        let _ = run_trace_once(&cli, &parts, &probes, &updates, &trace, &readable_ts);
         eprintln!("  [warmup {} / {}] done", w + 1, cli.warmup);
     }
 
     let measured = cli.repeat.max(1);
     let mut results = Vec::with_capacity(measured);
     for i in 0..measured {
-        let result = run_trace_once(&cli, &parts, &probes, &updates, &trace);
+        let result = run_trace_once(&cli, &parts, &probes, &updates, &trace, &readable_ts);
         eprintln!(
-            "  [iter {}] total={:.2}ms join_avg={:.2}ms scan_avg={:.2}ms update_avg={:.2}ms",
+            "  [iter {}] total={:.2}ms join_avg={:.2}ms scan_avg={:.2}ms delta_avg={:.2}ms update_avg={:.2}ms",
             i + 1,
             result.total_ms,
             result.avg_join_latency_ms,
             result.avg_scan_latency_ms,
+            result.avg_delta_latency_ms,
             result.avg_update_latency_ms,
         );
         results.push(result);
@@ -1076,6 +1319,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("  total_ms: {:.3}", avg.total_ms);
     eprintln!("  avg_join_latency_ms: {:.3}", avg.avg_join_latency_ms);
     eprintln!("  avg_scan_latency_ms: {:.3}", avg.avg_scan_latency_ms);
+    eprintln!("  avg_delta_latency_ms: {:.3}", avg.avg_delta_latency_ms);
     eprintln!("  avg_update_latency_ms: {:.3}", avg.avg_update_latency_ms);
 
     if let Some(ref path) = cli.output_csv {
