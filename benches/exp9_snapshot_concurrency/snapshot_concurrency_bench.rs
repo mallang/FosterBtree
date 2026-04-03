@@ -174,10 +174,17 @@ struct IterResult {
     fresh_p95_read_wait_ms: f64,
     fresh_avg_read_exec_ms: f64,
     fresh_avg_update_latency_ms: f64,
+    mixed_total_ms: f64,
 }
 
 #[derive(Clone, Copy)]
 enum ScenarioKind {
+    Historical,
+    Fresh,
+}
+
+#[derive(Clone, Copy)]
+enum MixedReadKind {
     Historical,
     Fresh,
 }
@@ -913,9 +920,77 @@ fn run_case(
     aggregate_case(total_ms, merged)
 }
 
+fn run_mixed_case(
+    cli: &Cli,
+    parts: &[PartEntry],
+    probe_rows: &[ProbeRow],
+    updates: &[UpdateOp],
+) -> CaseResult {
+    let bench = create_benchmark(cli, parts, updates);
+    let ranges = build_reader_ranges(probe_rows.len(), cli.read_tx_size, cli.reader_threads * 2);
+    let barrier = Arc::new(Barrier::new(cli.reader_threads + 2));
+    let probe_rows = Arc::new(probe_rows.to_vec());
+    let updates = Arc::new(updates.to_vec());
+    let mut handles = Vec::new();
+
+    for worker_idx in 0..cli.reader_threads {
+        let bench = Arc::clone(&bench);
+        let barrier = Arc::clone(&barrier);
+        let probe_rows = Arc::clone(&probe_rows);
+        let first = ranges[2 * worker_idx].clone();
+        let second = ranges[2 * worker_idx + 1].clone();
+        let schedule = if worker_idx % 2 == 0 {
+            [
+                (MixedReadKind::Historical, first),
+                (MixedReadKind::Fresh, second),
+            ]
+        } else {
+            [
+                (MixedReadKind::Fresh, first),
+                (MixedReadKind::Historical, second),
+            ]
+        };
+        handles.push(thread::spawn(move || {
+            let mut stats = WorkerStats::default();
+            barrier.wait();
+            for (kind, range) in schedule {
+                let metrics = match kind {
+                    MixedReadKind::Historical => bench.run_historical_read_tx(&probe_rows[range]),
+                    MixedReadKind::Fresh => bench.run_fresh_read_tx(&probe_rows[range]),
+                };
+                stats.record_read(metrics);
+            }
+            stats
+        }));
+    }
+
+    {
+        let bench = Arc::clone(&bench);
+        let barrier = Arc::clone(&barrier);
+        let updates = Arc::clone(&updates);
+        handles.push(thread::spawn(move || {
+            let mut stats = WorkerStats::default();
+            barrier.wait();
+            let metrics = bench.run_update_tx(&updates);
+            stats.record_update(metrics);
+            stats
+        }));
+    }
+
+    let start = Instant::now();
+    barrier.wait();
+    let mut merged = WorkerStats::default();
+    for handle in handles {
+        merged.merge(handle.join().unwrap());
+    }
+    let total_ms = start.elapsed().as_secs_f64() * 1000.0;
+    aggregate_case(total_ms, merged)
+}
+
 fn run_once(cli: &Cli, parts: &[PartEntry], probes: &[ProbeRow], updates: &[UpdateOp]) -> IterResult {
     let history = run_case(cli, parts, probes, updates, ScenarioKind::Historical);
     let fresh = run_case(cli, parts, probes, updates, ScenarioKind::Fresh);
+    let mixed = run_mixed_case(cli, parts, probes, updates);
     IterResult {
         history_total_ms: history.total_ms,
         history_avg_read_latency_ms: history.avg_read_latency_ms,
@@ -931,6 +1006,7 @@ fn run_once(cli: &Cli, parts: &[PartEntry], probes: &[ProbeRow], updates: &[Upda
         fresh_p95_read_wait_ms: fresh.p95_read_wait_ms,
         fresh_avg_read_exec_ms: fresh.avg_read_exec_ms,
         fresh_avg_update_latency_ms: fresh.avg_update_latency_ms,
+        mixed_total_ms: mixed.total_ms,
     }
 }
 
@@ -951,6 +1027,7 @@ fn average_results(results: &[IterResult]) -> IterResult {
         fresh_p95_read_wait_ms: results.iter().map(|r| r.fresh_p95_read_wait_ms).sum::<f64>() / n,
         fresh_avg_read_exec_ms: results.iter().map(|r| r.fresh_avg_read_exec_ms).sum::<f64>() / n,
         fresh_avg_update_latency_ms: results.iter().map(|r| r.fresh_avg_update_latency_ms).sum::<f64>() / n,
+        mixed_total_ms: results.iter().map(|r| r.mixed_total_ms).sum::<f64>() / n,
     }
 }
 
@@ -964,12 +1041,12 @@ fn write_csv(path: &str, cli: &Cli, update_ops: usize, result: &IterResult) -> R
 history_total_ms,history_avg_read_latency_ms,history_p95_read_latency_ms,history_avg_read_wait_ms,\
 history_p95_read_wait_ms,history_avg_read_exec_ms,history_avg_update_latency_ms,\
 fresh_total_ms,fresh_avg_read_latency_ms,fresh_p95_read_latency_ms,fresh_avg_read_wait_ms,\
-fresh_p95_read_wait_ms,fresh_avg_read_exec_ms,fresh_avg_update_latency_ms"
+fresh_p95_read_wait_ms,fresh_avg_read_exec_ms,fresh_avg_update_latency_ms,mixed_total_ms"
         )?;
     }
     writeln!(
         file,
-        "{:?},{:?},{},{},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+        "{:?},{:?},{},{},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
         cli.table_type,
         cli.repair_mode,
         cli.reader_threads,
@@ -991,6 +1068,7 @@ fresh_p95_read_wait_ms,fresh_avg_read_exec_ms,fresh_avg_update_latency_ms"
         result.fresh_p95_read_wait_ms,
         result.fresh_avg_read_exec_ms,
         result.fresh_avg_update_latency_ms,
+        result.mixed_total_ms,
     )?;
     Ok(())
 }
@@ -1029,19 +1107,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     for i in 0..measured {
         let result = run_once(&cli, &parts, &probes, &updates);
         eprintln!(
-            "  [iter {}] hist_wait={:.2}ms hist_lat={:.2}ms fresh_wait={:.2}ms fresh_lat={:.2}ms",
+            "  [iter {}] hist_wait={:.2}ms hist_lat={:.2}ms fresh_wait={:.2}ms fresh_lat={:.2}ms mixed_total={:.2}ms",
             i + 1,
             result.history_avg_read_wait_ms,
             result.history_avg_read_latency_ms,
             result.fresh_avg_read_wait_ms,
             result.fresh_avg_read_latency_ms,
+            result.mixed_total_ms,
         );
         results.push(result);
     }
 
     results.sort_by(|a, b| {
-        let ta = a.history_total_ms + a.fresh_total_ms;
-        let tb = b.history_total_ms + b.fresh_total_ms;
+        let ta = a.history_total_ms + a.fresh_total_ms + a.mixed_total_ms;
+        let tb = b.history_total_ms + b.fresh_total_ms + b.mixed_total_ms;
         ta.partial_cmp(&tb).unwrap()
     });
     let trim = cli.trim.min(results.len() / 2);
@@ -1056,6 +1135,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("  history_avg_read_latency_ms: {:.3}", avg.history_avg_read_latency_ms);
     eprintln!("  fresh_avg_read_wait_ms: {:.3}", avg.fresh_avg_read_wait_ms);
     eprintln!("  fresh_avg_read_latency_ms: {:.3}", avg.fresh_avg_read_latency_ms);
+    eprintln!("  mixed_total_ms: {:.3}", avg.mixed_total_ms);
 
     if let Some(ref path) = cli.output_csv {
         write_csv(path, &cli, updates.len(), &avg)?;
