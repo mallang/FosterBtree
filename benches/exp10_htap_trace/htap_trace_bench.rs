@@ -60,13 +60,13 @@ struct Cli {
     #[arg(long, default_value_t = 5)]
     worker_threads: usize,
 
-    #[arg(long, default_value_t = 6)]
+    #[arg(long, default_value_t = 10)]
     join_txs: usize,
 
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 5)]
     scan_txs: usize,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 8)]
     update_waves: usize,
 
     #[arg(long, default_value_t = 0.3)]
@@ -423,7 +423,7 @@ fn historical_target(current_ts: Timestamp, hist_idx: usize) -> Timestamp {
         return INITIAL_TS;
     }
     let available = (current_ts - INITIAL_TS) as usize;
-    let lag = 1 + (hist_idx % available.min(3));
+    let lag = 1 + (hist_idx % available);
     current_ts.saturating_sub(lag as u64).max(INITIAL_TS)
 }
 
