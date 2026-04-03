@@ -159,3 +159,7 @@ path = "benches/exp8_concurrent_tx/concurrent_tx_bench.rs"
 [[bin]]
 name = "snapshot_concurrency_bench"
 path = "benches/exp9_snapshot_concurrency/snapshot_concurrency_bench.rs"
+
+[[bin]]
+name = "htap_trace_bench"
+path = "benches/exp10_htap_trace/htap_trace_bench.rs"
