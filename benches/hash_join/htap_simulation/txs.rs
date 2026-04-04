@@ -174,6 +174,7 @@ pub struct TxBench {
     pub rng: SmallRng,
 
     pub data_source: DataSource,
+    pub updates_since_mark: usize,
 }
 
 impl TxBench {
@@ -192,6 +193,7 @@ impl TxBench {
             rng,
 
             data_source: DataSource::new(cli),
+            updates_since_mark: 0,
         }
     }
 
@@ -247,6 +249,8 @@ impl TxBench {
         }
         self.txs
             .push(Tx::new(OperationType::Update, tx_id, tx_ts, ops));
+        self.updates_since_mark += 1;
+        self.maybe_publish_readable_ts(false);
     }
 
     pub fn gen_probe_tx(&mut self, probe_count: usize, probe_ts: Timestamp) {
@@ -295,7 +299,11 @@ impl TxBench {
 
     pub fn gen_scan_txs_latest(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
-        let scan_ts = tx_ts;
+        let scan_ts = if let Some(ts) = self.recent_ts_candidates.last() {
+            *ts
+        } else {
+            *self.read_ts_candidates.last().unwrap()
+        };
         let mut ops = Vec::new();
 
         let op = TxOperation::new(
@@ -316,10 +324,9 @@ impl TxBench {
 
     pub fn gen_mark_ts_txs(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
-        // assert_eq!(tx_ts, mark_ts, "tx_ts must be equal to mark_ts");
-        // add to candidates
         self.read_ts_candidates.push(tx_ts);
         self.recent_ts_candidates.push(tx_ts);
+        self.updates_since_mark = 0;
         let mut ops = Vec::new();
 
         let op = TxOperation::new(
@@ -336,6 +343,15 @@ impl TxBench {
 
         let tx = Tx::new(OperationType::MarkTs, tx_id, tx_ts, ops);
         self.txs.push(tx);
+    }
+
+    fn maybe_publish_readable_ts(&mut self, force: bool) {
+        if (*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() <= 1e-6 {
+            return;
+        }
+        if force || self.updates_since_mark >= self.cli.readable_every.max(1) {
+            self.gen_mark_ts_txs();
+        }
     }
 
     pub fn gen_delta_scan_tx(&mut self, start_idx: usize) -> bool {
@@ -475,14 +491,12 @@ impl TxBench {
             (self.cli.update_ratio * self.data_source.get_custoemr_vec().len() as f64) as usize;
         self.gen_update_tx(update_count);
 
-        if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6)
-        // not W-ONLY
-        {
-            self.gen_mark_ts_txs();
+        if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6) {
+            // Seed at least two readable timestamps before the randomized phase.
+            self.maybe_publish_readable_ts(true);
             if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.02
                 && self.cli.scan_reuse_ratio < 0.999
             {
-                // not 100% HISTORY SCAN
                 self.gen_scan_txs_latest();
             } else {
                 self.gen_scan_txs_history();
@@ -495,14 +509,11 @@ impl TxBench {
                 (self.cli.update_ratio * self.data_source.get_custoemr_vec().len() as f64) as usize;
             self.gen_update_tx(update_count);
 
-            if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6)
-            // not W-ONLY
-            {
-                self.gen_mark_ts_txs();
+            if ((*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6) {
+                self.maybe_publish_readable_ts(false);
                 if self.cli.txn_scan_ratio.as_ref().unwrap().to_owned() > 0.02
                     && self.cli.scan_reuse_ratio < 0.999
                 {
-                    // not 100% HISTORY SCAN
                     self.gen_scan_txs_latest();
                 } else {
                     self.gen_scan_txs_history();
@@ -545,7 +556,6 @@ impl TxBench {
                     self.gen_delta_scan_tx(0);
                 }
                 OperationType::RecentScan => {
-                    self.gen_mark_ts_txs();
                     self.gen_scan_txs_latest();
                 }
                 OperationType::HistoryScan => {
@@ -1015,6 +1025,7 @@ impl TxBench {
         println!("Transactions Delta Scan ratio: {:?}", cli.txn_delta_ratio);
         println!("Transactions GC ratio: {:?}", cli.txn_gc_ratio);
         println!("Transactions Scan Reuse ratio: {:?}", cli.scan_reuse_ratio);
+        println!("Readable timestamp cadence: every {} update txs", cli.readable_every);
         println!("-----------------------------------------------------------------------");
         println!();
         println!();

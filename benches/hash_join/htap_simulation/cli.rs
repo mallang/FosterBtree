@@ -67,4 +67,7 @@ pub struct Cli {
 
     #[arg(long = "analytical-uniform")]
     pub analytical_uniform: Option<String>,
+
+    #[arg(long = "readable-every", default_value = "1")]
+    pub readable_every: usize,
 }
