@@ -61,16 +61,16 @@ struct Cli {
     #[arg(long, default_value_t = 5)]
     worker_threads: usize,
 
-    #[arg(long, default_value_t = 18)]
+    #[arg(long, default_value_t = 40)]
     join_txs: usize,
 
-    #[arg(long, default_value_t = 9)]
+    #[arg(long, default_value_t = 20)]
     scan_txs: usize,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 10)]
     delta_txs: usize,
 
-    #[arg(long, default_value_t = 24)]
+    #[arg(long, default_value_t = 30)]
     update_waves: usize,
 
     #[arg(long, default_value_t = 2)]
