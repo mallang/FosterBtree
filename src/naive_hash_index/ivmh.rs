@@ -168,6 +168,24 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         duration
     }
 
+    pub fn cache_current_as_snapshot(&self, ts: Timestamp) -> Duration {
+        let start = Instant::now();
+        let snapshot = Arc::new(NaiveHashTable::new_with_bucket_num(
+            self.c_key,
+            self.mem_pool.clone(),
+            self.bucket_count,
+        ));
+        for (k, pk, v) in self.current_table.scan().unwrap() {
+            snapshot.insert(RecordRef::new(&k, &pk, &v)).unwrap();
+        }
+        let duration = start.elapsed();
+        self.snapshots.borrow_mut().insert(ts, snapshot);
+        if self.latest_mark_ts.get().map_or(true, |prev| ts > prev) {
+            self.latest_mark_ts.set(Some(ts));
+        }
+        duration
+    }
+
     pub fn cache_snapshot_from_iter_and_ts<I, K, P, V>(&self, ts: Timestamp, rows: I) -> Duration
     where
         I: IntoIterator<Item = (K, P, V)>,
@@ -251,6 +269,49 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         for i in 0..self.bucket_count {
             let from_bucket = from.get_chain(i);
             let to_bucket = to.get_chain(i);
+            HeapHashChain::scan_deltas(&from_bucket, &to_bucket, &mut delta_map)?;
+        }
+
+        let result: Vec<_> = delta_map
+            .into_iter()
+            .filter_map(|(pk, from_to_delta)| {
+                let (from_kv, to_kv) = from_to_delta.split();
+                if to_kv == KVWithTs::default() {
+                    None
+                } else if from_kv == KVWithTs::default() {
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Inserted(to_kv.get_v().to_vec()),
+                    ))
+                } else if from_kv.get_v() == to_kv.get_v() {
+                    None
+                } else {
+                    Some((
+                        to_kv.get_k().to_vec(),
+                        pk,
+                        Delta::Updated(to_kv.get_v().to_vec()),
+                    ))
+                }
+            })
+            .collect();
+        Ok(Box::new(result.into_iter()))
+    }
+
+    pub fn delta_scan_from_snapshot_to_current(
+        &self,
+        from_ts: Timestamp,
+    ) -> Result<
+        Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)> + Send>,
+        AccessMethodError,
+    > {
+        let tables = self.snapshots.borrow();
+        let from = tables.get(&from_ts).ok_or(AccessMethodError::InvalidTimestamp)?;
+
+        let mut delta_map = HashMap::new();
+        for i in 0..self.bucket_count {
+            let from_bucket = from.get_chain(i);
+            let to_bucket = self.current_table.get_chain(i);
             HeapHashChain::scan_deltas(&from_bucket, &to_bucket, &mut delta_map)?;
         }
 

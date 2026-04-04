@@ -115,9 +115,9 @@ struct UpdateOp {
 
 #[derive(Clone, Default)]
 struct RoundResult {
-    delta_r_update_ms: f64,
+    delta_r_extract_ms: f64,
     delta_r_probe_ms: f64,
-    delta_s_insert_ms: f64,
+    delta_s_extract_ms: f64,
     delta_s_probe_ms: f64,
     total_round_ms: f64,
     delta_r_count: usize,
@@ -291,14 +291,16 @@ fn run_symmetric_mvcc(
     let mut rr_versions_s: VersionsMap = HashMap::new();
 
     let base_ts: u64 = 10;
+    let mut latest_r_ts: u64 = 1;
+    let mut latest_s_ts: u64 = 1;
 
     for round in 0..num_rounds {
         let mut rr = RoundResult::default();
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
+        let ts_s = ts + 1;
 
-        // Step 1: ΔR → update table_R
-        let t1 = Instant::now();
+        // Step 1: apply ΔR untimed, then extract the delta from the structure.
         for op in &delta_r_batches[round] {
             match repair_mode {
                 RepairMode::Wr => {
@@ -313,58 +315,84 @@ fn run_symmetric_mvcc(
                 }
             }
         }
-        rr.delta_r_update_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        rr.delta_r_count = delta_r_batches[round].len();
+        if matches!(table_type, TableType::Par)
+            && split_every > 0
+            && (round + 1) % split_every == 0
+        {
+            let _ = table_r.split_at_ts(ts + 1);
+        }
+
+        let t1 = Instant::now();
+        let delta_r_keys: Vec<Vec<u8>> = match repair_mode {
+            RepairMode::Rr => table_r
+                .delta_scan_read_repair(latest_r_ts, ts)?
+                .map(|(key, _, _)| key)
+                .collect(),
+            _ => table_r
+                .delta_scan(latest_r_ts, ts)?
+                .map(|(key, _, _)| key)
+                .collect(),
+        };
+        rr.delta_r_extract_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        rr.delta_r_count = delta_r_keys.len();
 
         // Step 1b: probe table_S with ΔR keys
         let t2 = Instant::now();
-        for op in &delta_r_batches[round] {
+        for key in &delta_r_keys {
             let _ = match repair_mode {
-                RepairMode::Nr => table_s.scan_key_vec_nr(&op.key, ts, &mut nr_buf_s),
+                RepairMode::Nr => table_s.scan_key_vec_nr(key, latest_s_ts, &mut nr_buf_s),
                 RepairMode::Rr => table_s.scan_key_vec_rr(
-                    &op.key, ts, &mut rr_dedup_s, &mut rr_versions_s,
+                    key, latest_s_ts, &mut rr_dedup_s, &mut rr_versions_s,
                 ),
-                RepairMode::Wr => table_s.scan_key_vec(&op.key, ts),
+                RepairMode::Wr => table_s.scan_key_vec(key, latest_s_ts),
             };
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: ΔS → insert into table_S
-        let ts_s = ts + 1;
-        let t3 = Instant::now();
+        // Step 2: apply ΔS untimed, then extract the delta from the structure.
         let s_base_id = (s_entries.len() + round * delta_s_batches[round].len()) as u64;
         for (i, e) in delta_s_batches[round].iter().enumerate() {
             let _ = table_s.insert(
                 e.key.clone(), e.key.clone(), ts_s, s_base_id + i as u64, e.value.clone(),
             );
         }
-        rr.delta_s_insert_ms = t3.elapsed().as_secs_f64() * 1000.0;
-        rr.delta_s_count = delta_s_batches[round].len();
+        if matches!(table_type, TableType::Par)
+            && split_every > 0
+            && (round + 1) % split_every == 0
+        {
+            let _ = table_s.split_at_ts(ts_s + 1);
+        }
+
+        let t3 = Instant::now();
+        let delta_s_keys: Vec<Vec<u8>> = match repair_mode {
+            RepairMode::Rr => table_s
+                .delta_scan_read_repair(latest_s_ts, ts_s)?
+                .map(|(key, _, _)| key)
+                .collect(),
+            _ => table_s
+                .delta_scan(latest_s_ts, ts_s)?
+                .map(|(key, _, _)| key)
+                .collect(),
+        };
+        rr.delta_s_extract_ms = t3.elapsed().as_secs_f64() * 1000.0;
+        rr.delta_s_count = delta_s_keys.len();
 
         // Step 2b: probe table_R with ΔS keys
         let t4 = Instant::now();
-        for e in &delta_s_batches[round] {
+        for key in &delta_s_keys {
             let _ = match repair_mode {
-                RepairMode::Nr => table_r.scan_key_vec_nr(&e.key, ts_s, &mut nr_buf_r),
+                RepairMode::Nr => table_r.scan_key_vec_nr(key, ts, &mut nr_buf_r),
                 RepairMode::Rr => table_r.scan_key_vec_rr(
-                    &e.key, ts_s, &mut rr_dedup_r, &mut rr_versions_r,
+                    key, ts, &mut rr_dedup_r, &mut rr_versions_r,
                 ),
-                RepairMode::Wr => table_r.scan_key_vec(&e.key, ts_s),
+                RepairMode::Wr => table_r.scan_key_vec(key, ts),
             };
         }
         rr.delta_s_probe_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
         rr.total_round_ms = round_start.elapsed().as_secs_f64() * 1000.0;
-
-        // EPOCH: split periodically if split_every > 0
-        if matches!(table_type, TableType::Par)
-            && split_every > 0
-            && (round + 1) % split_every == 0
-            && round + 1 < num_rounds
-        {
-            let _ = table_r.split_at_ts(ts_s + 1);
-            let _ = table_s.split_at_ts(ts_s + 1);
-        }
+        latest_r_ts = ts;
+        latest_s_ts = ts_s;
 
         result.rounds.push(rr);
     }
@@ -389,14 +417,6 @@ fn run_symmetric_snap(
     let mem_pool = get_in_mem_pool();
     let c_key_r = ContainerKey::new(0, 0);
     let c_key_s = ContainerKey::new(0, 1);
-    let mut current_r: HashMap<Vec<u8>, Vec<u8>> = r_entries
-        .iter()
-        .map(|e| (e.key.clone(), e.value.clone()))
-        .collect();
-    let mut current_s: HashMap<Vec<u8>, Vec<u8>> = s_entries
-        .iter()
-        .map(|e| (e.key.clone(), e.value.clone()))
-        .collect();
 
     let snap_r = NaiveMvHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
     for e in r_entries {
@@ -407,88 +427,69 @@ fn run_symmetric_snap(
         snap_s.add_insert_rec_at_ts(&e.key, &e.key, &e.value, 0);
     }
 
-    // Build both retained snapshots directly from the raw current rows.
+    // Build initial retained snapshots.
     let t0 = Instant::now();
-    snap_r.build_table_from_iter_and_ts(
-        1,
-        current_r
-            .iter()
-            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
-    );
+    snap_r.build_table_from_base_and_ts(1);
     result.build_r_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let t0 = Instant::now();
-    snap_s.build_table_from_iter_and_ts(
-        1,
-        current_s
-            .iter()
-            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
-    );
+    snap_s.build_table_from_base_and_ts(1);
     result.build_s_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let num_rounds = delta_r_batches.len().min(delta_s_batches.len());
     let base_ts: u64 = 10;
+    let mut latest_r_ts: u64 = 1;
+    let mut latest_s_ts: u64 = 1;
 
     for round in 0..num_rounds {
         let mut rr = RoundResult::default();
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: ΔR -> untimed base/logical update, timed retained-snapshot rebuild.
-        for op in &delta_r_batches[round] {
-            current_r.insert(op.key.clone(), op.new_value.clone());
-        }
+        // Step 1: apply ΔR untimed, then build/extract the retained delta.
         for op in &delta_r_batches[round] {
             snap_r.add_update_rec_at_ts(&op.key, &op.key, &op.new_value, ts);
         }
         let t1 = Instant::now();
-        snap_r.build_table_from_iter_and_ts(
-            ts,
-            current_r
-                .iter()
-                .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
-        );
-        rr.delta_r_update_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        rr.delta_r_count = delta_r_batches[round].len();
+        snap_r.build_table_from_base_and_ts(ts);
+        let delta_r_keys: Vec<Vec<u8>> = snap_r
+            .delta_scan(latest_r_ts, ts)?
+            .map(|(key, _, _)| key)
+            .collect();
+        rr.delta_r_extract_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        rr.delta_r_count = delta_r_keys.len();
 
         // Step 1b: probe table_S with ΔR keys
         let t2 = Instant::now();
-        let s_latest_ts = if round == 0 {
-            1
-        } else {
-            base_ts + ((round - 1) as u64) * 2 + 1
-        };
-        for op in &delta_r_batches[round] {
-            let _ = snap_s.scan_key_vec(&op.key, s_latest_ts);
+        for key in &delta_r_keys {
+            let _ = snap_s.scan_key_vec(key, latest_s_ts);
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: ΔS -> untimed base/logical insert, timed retained-snapshot rebuild.
+        // Step 2: apply ΔS untimed, then build/extract the retained delta.
         let ts_s = ts + 1;
-        for e in &delta_s_batches[round] {
-            current_s.insert(e.key.clone(), e.value.clone());
-        }
         for e in &delta_s_batches[round] {
             snap_s.add_insert_rec_at_ts(&e.key, &e.key, &e.value, ts_s);
         }
         let t3 = Instant::now();
-        snap_s.build_table_from_iter_and_ts(
-            ts_s,
-            current_s
-                .iter()
-                .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
-        );
-        rr.delta_s_insert_ms = t3.elapsed().as_secs_f64() * 1000.0;
-        rr.delta_s_count = delta_s_batches[round].len();
+        snap_s.build_table_from_base_and_ts(ts_s);
+        let delta_s_keys: Vec<Vec<u8>> = snap_s
+            .delta_scan(latest_s_ts, ts_s)?
+            .map(|(key, _, _)| key)
+            .collect();
+        rr.delta_s_extract_ms = t3.elapsed().as_secs_f64() * 1000.0;
+        rr.delta_s_count = delta_s_keys.len();
 
         // Step 2b: probe table_R with ΔS keys
         let t4 = Instant::now();
-        for e in &delta_s_batches[round] {
-            let _ = snap_r.scan_key_vec(&e.key, ts);
+        for key in &delta_s_keys {
+            let _ = snap_r.scan_key_vec(key, ts);
         }
         rr.delta_s_probe_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
         rr.total_round_ms = round_start.elapsed().as_secs_f64() * 1000.0;
+        latest_r_ts = ts;
+        latest_s_ts = ts_s;
         result.rounds.push(rr);
     }
 
@@ -512,14 +513,6 @@ fn run_symmetric_ivmh(
     let mem_pool = get_in_mem_pool();
     let c_key_r = ContainerKey::new(0, 0);
     let c_key_s = ContainerKey::new(0, 1);
-    let mut current_r: HashMap<Vec<u8>, Vec<u8>> = r_entries
-        .iter()
-        .map(|e| (e.key.clone(), e.value.clone()))
-        .collect();
-    let mut current_s: HashMap<Vec<u8>, Vec<u8>> = s_entries
-        .iter()
-        .map(|e| (e.key.clone(), e.value.clone()))
-        .collect();
 
     let ivmh_r = IvmHashTable::new_with_bucket_num(c_key_r, mem_pool.clone(), bucket_num);
     for e in r_entries {
@@ -527,10 +520,11 @@ fn run_symmetric_ivmh(
     }
     let t0 = Instant::now();
     ivmh_r.populate_current_from_iter(
-        current_r
+        r_entries
             .iter()
-            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+            .map(|e| (e.key.as_slice(), e.key.as_slice(), e.value.as_slice())),
     );
+    ivmh_r.cache_current_as_snapshot(1);
     result.build_r_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let ivmh_s = IvmHashTable::new_with_bucket_num(c_key_s, mem_pool.clone(), bucket_num);
@@ -539,60 +533,69 @@ fn run_symmetric_ivmh(
     }
     let t0 = Instant::now();
     ivmh_s.populate_current_from_iter(
-        current_s
+        s_entries
             .iter()
-            .map(|(k, v)| (k.as_slice(), k.as_slice(), v.as_slice())),
+            .map(|e| (e.key.as_slice(), e.key.as_slice(), e.value.as_slice())),
     );
+    ivmh_s.cache_current_as_snapshot(1);
     result.build_s_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let num_rounds = delta_r_batches.len().min(delta_s_batches.len());
     let base_ts: u64 = 10;
+    let mut latest_r_ts: u64 = 1;
+    let mut latest_s_ts: u64 = 1;
 
     for round in 0..num_rounds {
         let mut rr = RoundResult::default();
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: ΔR -> untimed base/logical update, timed latest-hash maintenance.
+        // Step 1: apply ΔR untimed, then extract delta against the latest table.
         for op in &delta_r_batches[round] {
             ivmh_r.prepare_update_base(&op.key, &op.key, &op.new_value, ts);
-            current_r.insert(op.key.clone(), op.new_value.clone());
-        }
-        let t1 = Instant::now();
-        for op in &delta_r_batches[round] {
             ivmh_r.update_current(&op.key, &op.key, &op.new_value);
         }
-        rr.delta_r_update_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        rr.delta_r_count = delta_r_batches[round].len();
+        let t1 = Instant::now();
+        let delta_r_keys: Vec<Vec<u8>> = ivmh_r
+            .delta_scan_from_snapshot_to_current(latest_r_ts)?
+            .map(|(key, _, _)| key)
+            .collect();
+        rr.delta_r_extract_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        rr.delta_r_count = delta_r_keys.len();
 
         // Step 1b: probe table_S with ΔR keys using the latest maintained hash.
         let t2 = Instant::now();
-        for op in &delta_r_batches[round] {
-            let _ = ivmh_s.scan_key_vec(&op.key, u64::MAX);
+        for key in &delta_r_keys {
+            let _ = ivmh_s.scan_key_vec(key, u64::MAX);
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
+        ivmh_r.cache_current_as_snapshot(ts);
 
-        // Step 2: ΔS -> untimed base/logical insert, timed latest-hash maintenance.
+        // Step 2: apply ΔS untimed, then extract delta against the latest table.
         let ts_s = ts + 1;
         for e in &delta_s_batches[round] {
             ivmh_s.prepare_insert_base_at_ts(&e.key, &e.key, &e.value, ts_s);
-            current_s.insert(e.key.clone(), e.value.clone());
-        }
-        let t3 = Instant::now();
-        for e in &delta_s_batches[round] {
             ivmh_s.insert_current(&e.key, &e.key, &e.value);
         }
-        rr.delta_s_insert_ms = t3.elapsed().as_secs_f64() * 1000.0;
-        rr.delta_s_count = delta_s_batches[round].len();
+        let t3 = Instant::now();
+        let delta_s_keys: Vec<Vec<u8>> = ivmh_s
+            .delta_scan_from_snapshot_to_current(latest_s_ts)?
+            .map(|(key, _, _)| key)
+            .collect();
+        rr.delta_s_extract_ms = t3.elapsed().as_secs_f64() * 1000.0;
+        rr.delta_s_count = delta_s_keys.len();
 
         // Step 2b: probe table_R with ΔS keys using the latest maintained hash.
         let t4 = Instant::now();
-        for e in &delta_s_batches[round] {
-            let _ = ivmh_r.scan_key_vec(&e.key, u64::MAX);
+        for key in &delta_s_keys {
+            let _ = ivmh_r.scan_key_vec(key, u64::MAX);
         }
         rr.delta_s_probe_ms = t4.elapsed().as_secs_f64() * 1000.0;
+        ivmh_s.cache_current_as_snapshot(ts_s);
 
         rr.total_round_ms = round_start.elapsed().as_secs_f64() * 1000.0;
+        latest_r_ts = ts;
+        latest_s_ts = ts_s;
         result.rounds.push(rr);
     }
 
@@ -618,8 +621,8 @@ fn write_csv(
             "table_type,repair_mode,round,rounds_total,bucket_num,\
              delta_r_count,delta_s_count,\
              build_r_ms,build_s_ms,\
-             delta_r_update_ms,delta_r_probe_ms,\
-             delta_s_insert_ms,delta_s_probe_ms,\
+             delta_r_extract_ms,delta_r_probe_ms,\
+             delta_s_extract_ms,delta_s_probe_ms,\
              total_round_ms,total_ms"
         )?;
     }
@@ -637,9 +640,9 @@ fn write_csv(
             rr.delta_s_count,
             result.build_r_ms,
             result.build_s_ms,
-            rr.delta_r_update_ms,
+            rr.delta_r_extract_ms,
             rr.delta_r_probe_ms,
-            rr.delta_s_insert_ms,
+            rr.delta_s_extract_ms,
             rr.delta_s_probe_ms,
             rr.total_round_ms,
             result.total_ms,
@@ -663,8 +666,8 @@ fn write_csv_avg(
             file,
             "table_type,repair_mode,num_rounds,bucket_num,\
              build_r_ms,build_s_ms,\
-             avg_delta_r_update_ms,avg_delta_r_probe_ms,\
-             avg_delta_s_insert_ms,avg_delta_s_probe_ms,\
+             avg_delta_r_extract_ms,avg_delta_r_probe_ms,\
+             avg_delta_s_extract_ms,avg_delta_s_probe_ms,\
              avg_total_round_ms,total_ms"
         )?;
     }
@@ -672,9 +675,9 @@ fn write_csv_avg(
     let n = avg.rounds.len() as f64;
     if n > 0.0 {
         let avg_rr = RoundResult {
-            delta_r_update_ms: avg.rounds.iter().map(|r| r.delta_r_update_ms).sum::<f64>() / n,
+            delta_r_extract_ms: avg.rounds.iter().map(|r| r.delta_r_extract_ms).sum::<f64>() / n,
             delta_r_probe_ms: avg.rounds.iter().map(|r| r.delta_r_probe_ms).sum::<f64>() / n,
-            delta_s_insert_ms: avg.rounds.iter().map(|r| r.delta_s_insert_ms).sum::<f64>() / n,
+            delta_s_extract_ms: avg.rounds.iter().map(|r| r.delta_s_extract_ms).sum::<f64>() / n,
             delta_s_probe_ms: avg.rounds.iter().map(|r| r.delta_s_probe_ms).sum::<f64>() / n,
             total_round_ms: avg.rounds.iter().map(|r| r.total_round_ms).sum::<f64>() / n,
             ..Default::default()
@@ -689,9 +692,9 @@ fn write_csv_avg(
             cli.bucket_num,
             avg.build_r_ms,
             avg.build_s_ms,
-            avg_rr.delta_r_update_ms,
+            avg_rr.delta_r_extract_ms,
             avg_rr.delta_r_probe_ms,
-            avg_rr.delta_s_insert_ms,
+            avg_rr.delta_s_extract_ms,
             avg_rr.delta_s_probe_ms,
             avg_rr.total_round_ms,
             avg.total_ms,
@@ -819,18 +822,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut rr = RoundResult::default();
         for fr in trimmed {
             if round_idx < fr.rounds.len() {
-                rr.delta_r_update_ms += fr.rounds[round_idx].delta_r_update_ms;
+                rr.delta_r_extract_ms += fr.rounds[round_idx].delta_r_extract_ms;
                 rr.delta_r_probe_ms += fr.rounds[round_idx].delta_r_probe_ms;
-                rr.delta_s_insert_ms += fr.rounds[round_idx].delta_s_insert_ms;
+                rr.delta_s_extract_ms += fr.rounds[round_idx].delta_s_extract_ms;
                 rr.delta_s_probe_ms += fr.rounds[round_idx].delta_s_probe_ms;
                 rr.total_round_ms += fr.rounds[round_idx].total_round_ms;
                 rr.delta_r_count = fr.rounds[round_idx].delta_r_count;
                 rr.delta_s_count = fr.rounds[round_idx].delta_s_count;
             }
         }
-        rr.delta_r_update_ms /= n_iter;
+        rr.delta_r_extract_ms /= n_iter;
         rr.delta_r_probe_ms /= n_iter;
-        rr.delta_s_insert_ms /= n_iter;
+        rr.delta_s_extract_ms /= n_iter;
         rr.delta_s_probe_ms /= n_iter;
         rr.total_round_ms /= n_iter;
         avg.rounds.push(rr);
@@ -842,9 +845,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("  build_s:   {:.1}ms", avg.build_s_ms);
     for (i, rr) in avg.rounds.iter().enumerate() {
         eprintln!(
-            "  round {}: ΔR_upd={:.2}ms ΔR_probe={:.2}ms ΔS_ins={:.2}ms ΔS_probe={:.2}ms total={:.2}ms",
-            i, rr.delta_r_update_ms, rr.delta_r_probe_ms,
-            rr.delta_s_insert_ms, rr.delta_s_probe_ms, rr.total_round_ms,
+            "  round {}: ΔR_ext={:.2}ms ΔR_probe={:.2}ms ΔS_ext={:.2}ms ΔS_probe={:.2}ms total={:.2}ms",
+            i, rr.delta_r_extract_ms, rr.delta_r_probe_ms,
+            rr.delta_s_extract_ms, rr.delta_s_probe_ms, rr.total_round_ms,
         );
     }
 
