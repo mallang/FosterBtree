@@ -522,7 +522,7 @@ fn run_symmetric_ivmh(
             .iter()
             .map(|e| (e.key.as_slice(), e.key.as_slice(), e.value.as_slice())),
     );
-    ivmh_r.cache_current_as_snapshot(1);
+    ivmh_r.mark_ts(1);
     result.build_r_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let ivmh_s = IvmHashTable::new_with_bucket_num(c_key_s, mem_pool.clone(), bucket_num);
@@ -535,7 +535,7 @@ fn run_symmetric_ivmh(
             .iter()
             .map(|e| (e.key.as_slice(), e.key.as_slice(), e.value.as_slice())),
     );
-    ivmh_s.cache_current_as_snapshot(1);
+    ivmh_s.mark_ts(1);
     result.build_s_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let num_rounds = delta_r_batches.len().min(delta_s_batches.len());

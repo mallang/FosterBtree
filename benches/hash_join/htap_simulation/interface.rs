@@ -414,7 +414,8 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for IvmHashTable<T> {
     }
 
     fn mark_ts(&self, ts: u64) {
-        // Rebuild snapshot from current state — O(|R|)
+        // Publish a readable timestamp. Historical reads materialize snapshots
+        // lazily from the base heap when they are first requested.
         IvmHashTable::mark_ts(self, ts);
     }
 

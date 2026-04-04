@@ -527,7 +527,9 @@ fn run_ivm_snap(
 }
 
 // ---------------------------------------------------------------------------
-// IVMH baseline: in-place update + rebuild for probe
+// IVMH baseline: in-place update on the latest derived hash state.
+// Historical snapshots would rebuild from the base heap on demand, but this
+// benchmark probes only the latest state.
 // ---------------------------------------------------------------------------
 
 fn run_ivm_ivmh(
@@ -540,9 +542,7 @@ fn run_ivm_ivmh(
     let mem_pool = get_in_mem_pool();
     let c_key = ContainerKey::new(0, 0);
 
-    // Phase 1: In-place update current state, then rebuild snapshot.
-    // IVMH advantage: update is O(|Δ|) in-place, then rebuild O(|R|).
-    // SNAP: must also rebuild O(|R|), but update is merged into rebuild.
+    // Phase 1: In-place update current state.
     let ivmh = IvmHashTable::new_with_bucket_num(c_key, mem_pool.clone(), bucket_num);
 
     // Populate current state
@@ -555,8 +555,6 @@ fn run_ivm_ivmh(
     for op in update_ops {
         ivmh.add_update_rec(&op.partkey, &op.partkey, &op.new_ptype);
     }
-    // Materialise snapshot for readers
-    let _build_duration = ivmh.mark_ts(1);
     let rebuild_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
 
     // Phase 2: Multi-thread probe on the materialised snapshot.
@@ -568,14 +566,12 @@ fn run_ivm_ivmh(
         .map(|c| c.to_vec())
         .collect();
 
-    // IVMH's snapshots are RefCell-based (not Sync), so we extract the snapshot
-    // and wrap it for multi-threaded probe. For now, do single-threaded probe
-    // since IVMH shares the same rebuild-then-probe model as SNAP.
+    let latest_ts = update_ops.len() as Timestamp;
     let probe_start = Instant::now();
     let mut total_probes = 0u64;
     for chunk in &probe_chunks {
         for row in chunk {
-            let _ = ivmh.scan_key_vec(&row.partkey, 1);
+            let _ = ivmh.scan_key_vec(&row.partkey, latest_ts);
             total_probes += 1;
         }
     }

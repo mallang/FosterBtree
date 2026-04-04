@@ -6,10 +6,12 @@
 ///
 /// This matches the paper's intended semantics: the base table exists
 /// independently, while the derived hash state keeps only the latest state.
+/// Old readable snapshots are materialized lazily from the base heap when a
+/// historical scan/join/delta first needs them.
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -35,15 +37,17 @@ pub struct IvmHashTable<T: MemPool + 'static> {
 
     base_table: HeapBaseMvccTable,
     next_auto_ts: Cell<Timestamp>,
+    current_ts: Cell<Timestamp>,
 
     /// Latest derived hash state.
     current_table: NaiveHashTable<T>,
 
-    /// Materialized snapshots for retained historical timestamps.
+    /// Materialized historical snapshots, built lazily from the base heap.
     snapshots: RefCell<HashMap<Timestamp, Arc<NaiveHashTable<T>>>>,
 
-    /// The most recent timestamp passed to mark_ts().
-    latest_mark_ts: Cell<Option<Timestamp>>,
+    /// Readable timestamps published by the benchmark. Historical accesses may
+    /// materialize these on demand from the base heap.
+    readable_timestamps: RefCell<HashSet<Timestamp>>,
 }
 
 impl<T: MemPool + 'static> IvmHashTable<T> {
@@ -56,22 +60,26 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
             bucket_count,
             base_table: HeapBaseMvccTable::new(),
             next_auto_ts: Cell::new(1),
+            current_ts: Cell::new(0),
             current_table,
             snapshots: RefCell::new(HashMap::new()),
-            latest_mark_ts: Cell::new(None),
+            readable_timestamps: RefCell::new(HashSet::new()),
         }
     }
 
     pub fn prepare_insert_base(&self, k: &[u8], pk: &[u8], v: &[u8]) {
         self.base_table.insert_at_ts(k, pk, v, 0);
+        self.current_ts.set(self.current_ts.get().max(0));
     }
 
     pub fn prepare_insert_base_at_ts(&self, k: &[u8], pk: &[u8], v: &[u8], ts: Timestamp) {
         self.base_table.insert_at_ts(k, pk, v, ts);
+        self.current_ts.set(self.current_ts.get().max(ts));
     }
 
     pub fn prepare_update_base(&self, k: &[u8], pk: &[u8], v: &[u8], ts: Timestamp) {
         self.base_table.update_at_ts(k, pk, v, ts);
+        self.current_ts.set(self.current_ts.get().max(ts));
     }
 
     pub fn insert_current(&self, k: &[u8], pk: &[u8], v: &[u8]) {
@@ -157,15 +165,33 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         snapshot
     }
 
+    fn is_current_or_future(&self, ts: Timestamp) -> bool {
+        ts >= self.current_ts.get()
+    }
+
+    fn is_readable_historical(&self, ts: Timestamp) -> bool {
+        self.readable_timestamps.borrow().contains(&ts)
+    }
+
+    fn get_or_build_snapshot(
+        &self,
+        ts: Timestamp,
+    ) -> Result<Arc<NaiveHashTable<T>>, AccessMethodError> {
+        if let Some(table) = self.snapshots.borrow().get(&ts) {
+            return Ok(table.clone());
+        }
+        if !self.is_readable_historical(ts) {
+            return Err(AccessMethodError::InvalidTimestamp);
+        }
+        let snapshot = self.build_snapshot_from_base(ts);
+        self.snapshots.borrow_mut().insert(ts, snapshot.clone());
+        Ok(snapshot)
+    }
+
     pub fn mark_ts(&self, ts: Timestamp) -> Duration {
         let start = Instant::now();
-        let snapshot = self.build_snapshot_from_base(ts);
-        let duration = start.elapsed();
-        self.snapshots.borrow_mut().insert(ts, snapshot);
-        if self.latest_mark_ts.get().map_or(true, |prev| ts > prev) {
-            self.latest_mark_ts.set(Some(ts));
-        }
-        duration
+        self.readable_timestamps.borrow_mut().insert(ts);
+        start.elapsed()
     }
 
     pub fn cache_current_as_snapshot(&self, ts: Timestamp) -> Duration {
@@ -180,9 +206,7 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         }
         let duration = start.elapsed();
         self.snapshots.borrow_mut().insert(ts, snapshot);
-        if self.latest_mark_ts.get().map_or(true, |prev| ts > prev) {
-            self.latest_mark_ts.set(Some(ts));
-        }
+        self.readable_timestamps.borrow_mut().insert(ts);
         duration
     }
 
@@ -195,24 +219,17 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
     {
         let (snapshot, duration) = self.build_snapshot_from_iter(rows);
         self.snapshots.borrow_mut().insert(ts, snapshot);
-        if self.latest_mark_ts.get().map_or(true, |prev| ts > prev) {
-            self.latest_mark_ts.set(Some(ts));
-        }
+        self.readable_timestamps.borrow_mut().insert(ts);
         duration
     }
 
-    fn is_recent(&self, ts: Timestamp) -> bool {
-        self.latest_mark_ts.get().map_or(true, |lts| ts > lts)
-    }
-
     pub fn get_key(&self, k: &[u8], pk: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
-        if let Some(table) = self.snapshots.borrow().get(&ts) {
-            return table.get(k, pk).unwrap();
-        }
-        if self.is_recent(ts) {
+        if self.is_current_or_future(ts) {
             self.current_table.get(k, pk).unwrap()
         } else {
-            None
+            self.get_or_build_snapshot(ts)
+                .ok()
+                .and_then(|table| table.get(k, pk).unwrap())
         }
     }
 
@@ -221,18 +238,15 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         key: &[u8],
         ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
-        if let Some(table) = self.snapshots.borrow().get(&ts) {
-            let mut result = vec![];
-            table.scan_key_vec(key, &mut result).unwrap();
-            return Ok(result);
-        }
-        if self.is_recent(ts) {
+        if self.is_current_or_future(ts) {
             let mut result = vec![];
             self.current_table.scan_key_vec(key, &mut result).unwrap();
-            Ok(result)
-        } else {
-            Err(AccessMethodError::InvalidTimestamp)
+            return Ok(result);
         }
+        let table = self.get_or_build_snapshot(ts)?;
+        let mut result = vec![];
+        table.scan_key_vec(key, &mut result).unwrap();
+        Ok(result)
     }
 
     pub fn scan(
@@ -240,16 +254,13 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         ts: Timestamp,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
     {
-        if let Some(table) = self.snapshots.borrow().get(&ts) {
-            let res: Vec<_> = table.scan().unwrap().collect();
+        if self.is_current_or_future(ts) {
+            let res: Vec<_> = self.current_table.scan().unwrap().collect();
             return Ok(Box::new(res.into_iter()));
         }
-        if self.is_recent(ts) {
-            let res: Vec<_> = self.current_table.scan().unwrap().collect();
-            Ok(Box::new(res.into_iter()))
-        } else {
-            Err(AccessMethodError::InvalidTimestamp)
-        }
+        let table = self.get_or_build_snapshot(ts)?;
+        let res: Vec<_> = table.scan().unwrap().collect();
+        Ok(Box::new(res.into_iter()))
     }
 
     pub fn delta_scan(
@@ -261,15 +272,21 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         AccessMethodError,
     > {
         assert!(from_ts < to_ts, "from_ts must be less than to_ts");
-        let tables = self.snapshots.borrow();
-        let from = tables.get(&from_ts).ok_or(AccessMethodError::InvalidTimestamp)?;
-        let to = tables.get(&to_ts).ok_or(AccessMethodError::InvalidTimestamp)?;
-
+        let from = self.get_or_build_snapshot(from_ts)?;
         let mut delta_map = HashMap::new();
-        for i in 0..self.bucket_count {
-            let from_bucket = from.get_chain(i);
-            let to_bucket = to.get_chain(i);
-            HeapHashChain::scan_deltas(&from_bucket, &to_bucket, &mut delta_map)?;
+        if self.is_current_or_future(to_ts) {
+            for i in 0..self.bucket_count {
+                let from_bucket = from.get_chain(i);
+                let to_bucket = self.current_table.get_chain(i);
+                HeapHashChain::scan_deltas(&from_bucket, &to_bucket, &mut delta_map)?;
+            }
+        } else {
+            let to = self.get_or_build_snapshot(to_ts)?;
+            for i in 0..self.bucket_count {
+                let from_bucket = from.get_chain(i);
+                let to_bucket = to.get_chain(i);
+                HeapHashChain::scan_deltas(&from_bucket, &to_bucket, &mut delta_map)?;
+            }
         }
 
         let result: Vec<_> = delta_map
@@ -305,8 +322,7 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Delta<Vec<u8>>)> + Send>,
         AccessMethodError,
     > {
-        let tables = self.snapshots.borrow();
-        let from = tables.get(&from_ts).ok_or(AccessMethodError::InvalidTimestamp)?;
+        let from = self.get_or_build_snapshot(from_ts)?;
 
         let mut delta_map = HashMap::new();
         for i in 0..self.bucket_count {
@@ -346,13 +362,14 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         from_ts: Timestamp,
         to_ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>, AccessMethodError> {
+        self.mark_ts(to_ts);
         let deltas: Vec<_> = self.delta_scan_from_snapshot_to_current(from_ts)?.collect();
-        self.cache_current_as_snapshot(to_ts);
         Ok(deltas)
     }
 
     pub fn garbage_collect(&self, ts: Timestamp) {
         self.snapshots.borrow_mut().retain(|&k, _| k > ts);
+        self.readable_timestamps.borrow_mut().retain(|&k| k > ts);
     }
 
     pub fn collect_space_stat_into_collector(&self) -> StatCollector {
