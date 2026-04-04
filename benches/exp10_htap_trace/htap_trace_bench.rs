@@ -61,16 +61,16 @@ struct Cli {
     #[arg(long, default_value_t = 5)]
     worker_threads: usize,
 
-    #[arg(long, default_value_t = 12)]
+    #[arg(long, default_value_t = 18)]
     join_txs: usize,
 
-    #[arg(long, default_value_t = 6)]
+    #[arg(long, default_value_t = 9)]
     scan_txs: usize,
 
     #[arg(long, default_value_t = 4)]
     delta_txs: usize,
 
-    #[arg(long, default_value_t = 12)]
+    #[arg(long, default_value_t = 24)]
     update_waves: usize,
 
     #[arg(long, default_value_t = 2)]
@@ -752,8 +752,6 @@ impl HtapTraceTable for SnapTrace {
     fn run_update_tx(&self, _wave_idx: usize, commit_ts: Timestamp) -> TxMetrics {
         let start = Instant::now();
         self.commit_tracker.wait_for_turn(commit_ts);
-        let snapshot = self.build_snapshot_from_base(commit_ts);
-        self.snapshots.write().insert(commit_ts, snapshot);
         self.commit_tracker.publish(commit_ts);
         TxMetrics {
             latency_ms: start.elapsed().as_secs_f64() * 1000.0,
