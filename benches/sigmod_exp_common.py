@@ -23,6 +23,10 @@ SIGMOD_WARMUP = 1
 SIGMOD_REPEAT = 5
 SIGMOD_TRIM = 1
 
+# Backward-compatible alias for a typo that may still exist in older notebook
+# cells on remote servers.
+SIGMOD_REP0EAT = SIGMOD_REPEAT
+
 # Fixed update point for SIGMOD paper plots: 0.01%.
 SIGMOD_FIXED_UPDATE_PCT = 0.01
 
