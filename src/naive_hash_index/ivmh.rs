@@ -341,6 +341,16 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         Ok(Box::new(result.into_iter()))
     }
 
+    pub fn advance_readable_epoch_and_collect_delta(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>, AccessMethodError> {
+        let deltas: Vec<_> = self.delta_scan_from_snapshot_to_current(from_ts)?.collect();
+        self.cache_current_as_snapshot(to_ts);
+        Ok(deltas)
+    }
+
     pub fn garbage_collect(&self, ts: Timestamp) {
         self.snapshots.borrow_mut().retain(|&k, _| k > ts);
     }

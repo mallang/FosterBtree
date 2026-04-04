@@ -194,6 +194,15 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         Ok(Box::new(result.into_iter()))
     }
 
+    pub fn advance_readable_epoch_and_collect_delta(
+        &self,
+        from_ts: Timestamp,
+        to_ts: Timestamp,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>, Delta<Vec<u8>>)>, AccessMethodError> {
+        self.build_table_from_base_and_ts(to_ts);
+        self.delta_scan(from_ts, to_ts).map(|iter| iter.collect())
+    }
+
     fn collect_space_stats(&self) {
         let tables = self.naivetables.borrow();
         for (ts, table) in tables.iter() {

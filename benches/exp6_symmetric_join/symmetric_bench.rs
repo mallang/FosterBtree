@@ -300,7 +300,7 @@ fn run_symmetric_mvcc(
         let ts = base_ts + (round as u64) * 2;
         let ts_s = ts + 1;
 
-        // Step 1: apply ΔR untimed, then extract the delta from the structure.
+        // Step 1: apply ΔR untimed, then publish/extract the delta from the structure.
         for op in &delta_r_batches[round] {
             match repair_mode {
                 RepairMode::Wr => {
@@ -315,14 +315,13 @@ fn run_symmetric_mvcc(
                 }
             }
         }
+        let t1 = Instant::now();
         if matches!(table_type, TableType::Par)
             && split_every > 0
             && (round + 1) % split_every == 0
         {
             let _ = table_r.split_at_ts(ts + 1);
         }
-
-        let t1 = Instant::now();
         let delta_r_keys: Vec<Vec<u8>> = match repair_mode {
             RepairMode::Rr => table_r
                 .delta_scan_read_repair(latest_r_ts, ts)?
@@ -349,21 +348,20 @@ fn run_symmetric_mvcc(
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: apply ΔS untimed, then extract the delta from the structure.
+        // Step 2: apply ΔS untimed, then publish/extract the delta from the structure.
         let s_base_id = (s_entries.len() + round * delta_s_batches[round].len()) as u64;
         for (i, e) in delta_s_batches[round].iter().enumerate() {
             let _ = table_s.insert(
                 e.key.clone(), e.key.clone(), ts_s, s_base_id + i as u64, e.value.clone(),
             );
         }
+        let t3 = Instant::now();
         if matches!(table_type, TableType::Par)
             && split_every > 0
             && (round + 1) % split_every == 0
         {
             let _ = table_s.split_at_ts(ts_s + 1);
         }
-
-        let t3 = Instant::now();
         let delta_s_keys: Vec<Vec<u8>> = match repair_mode {
             RepairMode::Rr => table_s
                 .delta_scan_read_repair(latest_s_ts, ts_s)?
@@ -446,14 +444,14 @@ fn run_symmetric_snap(
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: apply ΔR untimed, then build/extract the retained delta.
+        // Step 1: apply ΔR untimed, then publish/extract the retained delta.
         for op in &delta_r_batches[round] {
             snap_r.add_update_rec_at_ts(&op.key, &op.key, &op.new_value, ts);
         }
         let t1 = Instant::now();
-        snap_r.build_table_from_base_and_ts(ts);
         let delta_r_keys: Vec<Vec<u8>> = snap_r
-            .delta_scan(latest_r_ts, ts)?
+            .advance_readable_epoch_and_collect_delta(latest_r_ts, ts)?
+            .into_iter()
             .map(|(key, _, _)| key)
             .collect();
         rr.delta_r_extract_ms = t1.elapsed().as_secs_f64() * 1000.0;
@@ -466,15 +464,15 @@ fn run_symmetric_snap(
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: apply ΔS untimed, then build/extract the retained delta.
+        // Step 2: apply ΔS untimed, then publish/extract the retained delta.
         let ts_s = ts + 1;
         for e in &delta_s_batches[round] {
             snap_s.add_insert_rec_at_ts(&e.key, &e.key, &e.value, ts_s);
         }
         let t3 = Instant::now();
-        snap_s.build_table_from_base_and_ts(ts_s);
         let delta_s_keys: Vec<Vec<u8>> = snap_s
-            .delta_scan(latest_s_ts, ts_s)?
+            .advance_readable_epoch_and_collect_delta(latest_s_ts, ts_s)?
+            .into_iter()
             .map(|(key, _, _)| key)
             .collect();
         rr.delta_s_extract_ms = t3.elapsed().as_secs_f64() * 1000.0;
@@ -550,14 +548,15 @@ fn run_symmetric_ivmh(
         let round_start = Instant::now();
         let ts = base_ts + (round as u64) * 2;
 
-        // Step 1: apply ΔR untimed, then extract delta against the latest table.
+        // Step 1: apply ΔR untimed, then publish/extract delta against the latest table.
         for op in &delta_r_batches[round] {
             ivmh_r.prepare_update_base(&op.key, &op.key, &op.new_value, ts);
             ivmh_r.update_current(&op.key, &op.key, &op.new_value);
         }
         let t1 = Instant::now();
         let delta_r_keys: Vec<Vec<u8>> = ivmh_r
-            .delta_scan_from_snapshot_to_current(latest_r_ts)?
+            .advance_readable_epoch_and_collect_delta(latest_r_ts, ts)?
+            .into_iter()
             .map(|(key, _, _)| key)
             .collect();
         rr.delta_r_extract_ms = t1.elapsed().as_secs_f64() * 1000.0;
@@ -569,9 +568,8 @@ fn run_symmetric_ivmh(
             let _ = ivmh_s.scan_key_vec(key, u64::MAX);
         }
         rr.delta_r_probe_ms = t2.elapsed().as_secs_f64() * 1000.0;
-        ivmh_r.cache_current_as_snapshot(ts);
 
-        // Step 2: apply ΔS untimed, then extract delta against the latest table.
+        // Step 2: apply ΔS untimed, then publish/extract delta against the latest table.
         let ts_s = ts + 1;
         for e in &delta_s_batches[round] {
             ivmh_s.prepare_insert_base_at_ts(&e.key, &e.key, &e.value, ts_s);
@@ -579,7 +577,8 @@ fn run_symmetric_ivmh(
         }
         let t3 = Instant::now();
         let delta_s_keys: Vec<Vec<u8>> = ivmh_s
-            .delta_scan_from_snapshot_to_current(latest_s_ts)?
+            .advance_readable_epoch_and_collect_delta(latest_s_ts, ts_s)?
+            .into_iter()
             .map(|(key, _, _)| key)
             .collect();
         rr.delta_s_extract_ms = t3.elapsed().as_secs_f64() * 1000.0;
@@ -591,7 +590,6 @@ fn run_symmetric_ivmh(
             let _ = ivmh_r.scan_key_vec(key, u64::MAX);
         }
         rr.delta_s_probe_ms = t4.elapsed().as_secs_f64() * 1000.0;
-        ivmh_s.cache_current_as_snapshot(ts_s);
 
         rr.total_round_ms = round_start.elapsed().as_secs_f64() * 1000.0;
         latest_r_ts = ts;
