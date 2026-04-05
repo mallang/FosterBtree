@@ -56,6 +56,30 @@ impl StatCollector {
     pub fn inc_valid_space(&mut self, delta: usize) {
         self.valid_space += delta;
     }
+
+    pub fn total_space(&self) -> usize {
+        self.total_space
+    }
+
+    pub fn all_versions_space(&self) -> usize {
+        self.all_versions_space
+    }
+
+    pub fn valid_space(&self) -> usize {
+        self.valid_space
+    }
+
+    pub fn header_space(&self) -> usize {
+        self.header_space
+    }
+
+    pub fn history_space(&self) -> usize {
+        self.all_versions_space.saturating_sub(self.valid_space)
+    }
+
+    pub fn metadata_space(&self) -> usize {
+        self.total_space.saturating_sub(self.all_versions_space)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

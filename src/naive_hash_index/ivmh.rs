@@ -378,6 +378,13 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         for table in self.snapshots.borrow().values() {
             table.collect_space_stat(&mut stat);
         }
+        let current_valid_space = self
+            .current_table
+            .scan()
+            .unwrap()
+            .map(|entry| entry.0.len() + entry.1.len() + entry.2.len())
+            .sum::<usize>();
+        stat.inc_valid_space(current_valid_space);
         stat
     }
 
