@@ -123,6 +123,14 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         self.build_table_from_base_and_ts(ts)
     }
 
+    pub fn ensure_snapshot_materialized(&self, ts: Timestamp) -> Duration {
+        if self.naivetables.borrow().contains_key(&ts) {
+            Duration::default()
+        } else {
+            self.build_table_from_base_and_ts(ts)
+        }
+    }
+
     pub fn build_table_from_recs_and_ts(
         &self,
         ts: Timestamp,

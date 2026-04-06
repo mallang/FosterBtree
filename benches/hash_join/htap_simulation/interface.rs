@@ -28,6 +28,9 @@ pub enum OperationType {
 pub trait MultiVersionJoinTable {
     fn prepare_insert(&self, _key: &[u8], _pkey: &[u8], _value: &[u8]) {}
     fn prepare_update(&self, _key: &[u8], _pkey: &[u8], _value: &[u8], _ts: Timestamp) {}
+    fn ensure_snapshot_materialized(&self, _ts: Timestamp) -> std::time::Duration {
+        std::time::Duration::default()
+    }
     fn insert(&self, key: &[u8], pkey: &[u8], value: &[u8]);
     fn update(&self, key: &[u8], pkey: &[u8], value: &[u8], ts: Timestamp);
     fn get(&self, key: &[u8], pkey: &[u8], ts: Timestamp) -> Option<Vec<u8>>;
@@ -320,6 +323,9 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
 // NAIVE
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn after_mark_ts(&self, ts: Timestamp) {}
+    fn ensure_snapshot_materialized(&self, ts: Timestamp) -> std::time::Duration {
+        NaiveMvHashTable::ensure_snapshot_materialized(self, ts)
+    }
     fn prepare_insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         NaiveMvHashTable::add_insert_rec_at_ts(&self, key, pkey, value, 0);
     }
@@ -384,6 +390,9 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
 // IVMH — IVM-style baseline: in-place update + rebuild for snapshot
 impl<T: MemPool + 'static> MultiVersionJoinTable for IvmHashTable<T> {
     fn after_mark_ts(&self, _ts: Timestamp) {}
+    fn ensure_snapshot_materialized(&self, ts: Timestamp) -> std::time::Duration {
+        IvmHashTable::ensure_snapshot_materialized(self, ts)
+    }
 
     fn prepare_insert(&self, key: &[u8], pkey: &[u8], value: &[u8]) {
         IvmHashTable::prepare_insert_base(self, key, pkey, value);

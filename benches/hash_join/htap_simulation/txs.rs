@@ -620,6 +620,47 @@ impl TxBench {
         }
     }
 
+    fn emit_build_snap_if_needed(
+        &self,
+        phase: &str,
+        txs_idx: TxId,
+        tx: &Tx,
+        hash_join_table: &BoxMVIndex,
+    ) {
+        let mut targets = Vec::new();
+        match tx.tx_type {
+            OperationType::Probe | OperationType::Scan | OperationType::HistoryScan | OperationType::RecentScan => {
+                if let Some(op) = tx.ops.first() {
+                    targets.push(op.read_ts);
+                }
+            }
+            OperationType::DeltaScan => {
+                if let Some(op) = tx.ops.first() {
+                    targets.push(op.delta_scan_ts.0);
+                    targets.push(op.delta_scan_ts.1);
+                }
+            }
+            _ => {}
+        }
+
+        targets.sort_unstable();
+        targets.dedup();
+        for ts in targets {
+            let duration = hash_join_table.ensure_snapshot_materialized(ts);
+            if duration > Duration::default() {
+                print!(
+                    "[{}] idx: {:>3}, tx_id: {:>3}, tx_type: {:>10}, duration: {:?}, ",
+                    phase,
+                    txs_idx,
+                    tx.tx_id,
+                    "MarkTs",
+                    duration
+                );
+                println!("MarkTs at read_ts: {:?}", ts);
+            }
+        }
+    }
+
     pub fn run_tx_no_repair(
         &self,
         txs_idx: TxId,
@@ -627,6 +668,7 @@ impl TxBench {
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
         self.prepare_tx_untimed(tx, hash_join_table);
+        self.emit_build_snap_if_needed("No Repair", txs_idx, tx, hash_join_table);
         let start = Instant::now();
         let mut is_need_scan_warpup = false;
         match tx.tx_type {
@@ -742,6 +784,7 @@ impl TxBench {
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
         self.prepare_tx_untimed(tx, hash_join_table);
+        self.emit_build_snap_if_needed("Read Repair", txs_idx, tx, hash_join_table);
         let start = Instant::now();
         let mut is_need_scan_warpup = false;
 
@@ -856,6 +899,7 @@ impl TxBench {
     ) -> Result<Duration, Error> {
         let tx = &self.txs[txs_idx as usize];
         self.prepare_tx_untimed(tx, hash_join_table);
+        self.emit_build_snap_if_needed("Write Repair", txs_idx, tx, hash_join_table);
         let start = Instant::now();
         let mut is_need_scan_warmup = false;
         match tx.tx_type {

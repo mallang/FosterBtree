@@ -194,6 +194,22 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         start.elapsed()
     }
 
+    pub fn ensure_snapshot_materialized(&self, ts: Timestamp) -> Duration {
+        if self.is_current_or_future(ts) {
+            return Duration::default();
+        }
+        if self.snapshots.borrow().contains_key(&ts) {
+            return Duration::default();
+        }
+        if !self.is_readable_historical(ts) {
+            return Duration::default();
+        }
+        let start = Instant::now();
+        let snapshot = self.build_snapshot_from_base(ts);
+        self.snapshots.borrow_mut().insert(ts, snapshot);
+        start.elapsed()
+    }
+
     pub fn cache_current_as_snapshot(&self, ts: Timestamp) -> Duration {
         let start = Instant::now();
         let snapshot = Arc::new(NaiveHashTable::new_with_bucket_num(
