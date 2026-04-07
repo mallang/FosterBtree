@@ -65,6 +65,9 @@ pub struct Cli {
     #[arg(long = "scan-reuse-ratio", default_value = "0.5")]
     pub scan_reuse_ratio: f64,
 
+    #[arg(long = "probe-history-ratio")]
+    pub probe_history_ratio: Option<f64>,
+
     #[arg(long = "analytical-uniform")]
     pub analytical_uniform: Option<String>,
 

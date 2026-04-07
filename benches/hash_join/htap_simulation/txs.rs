@@ -545,11 +545,23 @@ impl TxBench {
                     let probe_count = (self.cli.probe_ratio
                         * self.data_source.get_custoemr_vec().len() as f64)
                         as usize;
-                    let probe_ts = self
-                        .read_ts_candidates
-                        .choose(&mut self.rng)
-                        .unwrap()
-                        .to_owned();
+                    let probe_ts = if let Some(history_ratio) = self.cli.probe_history_ratio {
+                        let use_history = history_ratio > 0.0
+                            && !self.history_ts_candidates.is_empty()
+                            && self.rng.gen::<f64>() < history_ratio;
+                        if use_history {
+                            *self.history_ts_candidates.choose(&mut self.rng).unwrap()
+                        } else if let Some(ts) = self.recent_ts_candidates.last() {
+                            *ts
+                        } else {
+                            *self.read_ts_candidates.last().unwrap()
+                        }
+                    } else {
+                        self.read_ts_candidates
+                            .choose(&mut self.rng)
+                            .unwrap()
+                            .to_owned()
+                    };
                     self.gen_probe_tx(probe_count, probe_ts);
                 }
                 OperationType::DeltaScan => {
