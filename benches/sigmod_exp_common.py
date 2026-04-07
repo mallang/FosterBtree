@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import sys
 
@@ -45,6 +46,17 @@ SIGMOD_READABLE_EVERY = 2
 
 def current_run_stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M")
+
+
+def append_csv_rows(csv_path: Path, df) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    header = not csv_path.exists()
+    df.to_csv(csv_path, mode="a", header=header, index=False)
+
+
+def snapshot_csv(progress_path: Path, stamped_path: Path) -> None:
+    stamped_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(progress_path, stamped_path)
 
 TABLE_DISPLAY = {
     "naive": "SNAP",
