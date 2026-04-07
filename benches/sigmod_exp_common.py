@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import os
 import subprocess
@@ -40,6 +41,10 @@ SIGMOD_UPDATE_SWEEP_FRACS = [pct / 100.0 for pct in SIGMOD_UPDATE_SWEEP_PCTS]
 SIGMOD_HTAP_WAREHOUSE_COUNT = 7
 SIGMOD_HTAP_TXN_COUNT = 100
 SIGMOD_READABLE_EVERY = 2
+
+
+def current_run_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M")
 
 TABLE_DISPLAY = {
     "naive": "SNAP",
