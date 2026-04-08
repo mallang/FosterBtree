@@ -253,8 +253,13 @@ impl TxBench {
         self.maybe_publish_readable_ts(false);
     }
 
-    pub fn gen_probe_tx(&mut self, probe_count: usize, probe_ts: Timestamp) {
+    fn gen_probe_tx_with_read_ts(
+        &mut self,
+        probe_count: usize,
+        read_ts_override: Option<Timestamp>,
+    ) {
         let (tx_id, tx_ts) = self.gen_new_tx();
+        let read_ts = read_ts_override.unwrap_or(tx_ts);
         let mut ops = Vec::new();
         for _ in 0..probe_count {
             // remove duplicate
@@ -265,11 +270,19 @@ impl TxBench {
                 tx_id,
                 tx_ts,
                 join_key.to_vec(),
-                probe_ts,
+                read_ts,
             ));
         }
         self.txs
             .push(Tx::new(OperationType::Probe, tx_id, tx_ts, ops));
+    }
+
+    pub fn gen_probe_tx(&mut self, probe_count: usize, probe_ts: Timestamp) {
+        self.gen_probe_tx_with_read_ts(probe_count, Some(probe_ts));
+    }
+
+    pub fn gen_probe_tx_latest(&mut self, probe_count: usize) {
+        self.gen_probe_tx_with_read_ts(probe_count, None);
     }
 
     pub fn gen_scan_txs_history(&mut self) {
@@ -299,18 +312,13 @@ impl TxBench {
 
     pub fn gen_scan_txs_latest(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
-        let scan_ts = if let Some(ts) = self.recent_ts_candidates.last() {
-            *ts
-        } else {
-            *self.read_ts_candidates.last().unwrap()
-        };
         let mut ops = Vec::new();
 
         let op = TxOperation::new(
             tx_id,
             tx_ts,
             OperationType::RecentScan,
-            scan_ts,
+            tx_ts,
             vec![],
             vec![],
             vec![],
@@ -550,19 +558,22 @@ impl TxBench {
                             && !self.history_ts_candidates.is_empty()
                             && self.rng.gen::<f64>() < history_ratio;
                         if use_history {
-                            *self.history_ts_candidates.choose(&mut self.rng).unwrap()
-                        } else if let Some(ts) = self.recent_ts_candidates.last() {
-                            *ts
+                            Some(*self.history_ts_candidates.choose(&mut self.rng).unwrap())
                         } else {
-                            *self.read_ts_candidates.last().unwrap()
+                            None
                         }
                     } else {
-                        self.read_ts_candidates
+                        Some(
+                            self.read_ts_candidates
                             .choose(&mut self.rng)
                             .unwrap()
-                            .to_owned()
+                            .to_owned(),
+                        )
                     };
-                    self.gen_probe_tx(probe_count, probe_ts);
+                    match probe_ts {
+                        Some(probe_ts) => self.gen_probe_tx(probe_count, probe_ts),
+                        None => self.gen_probe_tx_latest(probe_count),
+                    }
                 }
                 OperationType::DeltaScan => {
                     self.gen_delta_scan_tx(0);
