@@ -679,8 +679,23 @@ impl TxBench {
                     "MarkTs",
                     duration
                 );
-                println!("MarkTs at read_ts: {:?}", ts);
+                println!(
+                    "MarkTs at read_ts: {:?}, build_for: {}",
+                    ts,
+                    Self::build_snap_reason(&tx.tx_type)
+                );
             }
+        }
+    }
+
+    fn build_snap_reason(tx_type: &OperationType) -> &'static str {
+        match tx_type {
+            OperationType::Probe => "Probe",
+            OperationType::DeltaScan => "DeltaScan",
+            OperationType::HistoryScan => "HistoryScan",
+            OperationType::RecentScan => "RecentScan",
+            OperationType::Scan => "Scan",
+            _ => "Other",
         }
     }
 

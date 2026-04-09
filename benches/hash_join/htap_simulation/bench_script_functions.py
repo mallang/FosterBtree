@@ -45,6 +45,7 @@ def parse_result(log_text, table_type):
             read_ts = None
             from_ts = None
             to_ts = None
+            build_reason = None
             if 'InitialLoad count' in rest or 'Update count' in rest or 'Probe count' in rest:
                 count_match = re.search(r'count:\s*(\d+)', rest)
                 if count_match:
@@ -61,6 +62,9 @@ def parse_result(log_text, table_type):
                 read_ts_match = re.search(r'read_ts:\s*(\d+)', rest)
                 if read_ts_match:
                     read_ts = int(read_ts_match.group(1))
+            build_reason_match = re.search(r'build_for:\s*([A-Za-z]+)', rest)
+            if build_reason_match:
+                build_reason = build_reason_match.group(1)
             data.append({
                 'table_type': table_type,
                 'repair_type': repair_type,
@@ -71,7 +75,8 @@ def parse_result(log_text, table_type):
                 'count': count,
                 'read_ts': read_ts,
                 'from_ts': from_ts,
-                'to_ts': to_ts
+                'to_ts': to_ts,
+                'build_reason': build_reason,
             })
     return pd.DataFrame(data)
 
@@ -378,4 +383,3 @@ def plot_stack_bar_chart(df, title):
 
     agg.to_csv(f'output/{title}_wkld.csv', index=False)
     result.to_csv(f'output/{title}_result.csv', index=False)
-
