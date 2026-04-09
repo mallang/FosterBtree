@@ -25,7 +25,7 @@ use crate::{
     },
     naive_hash_index::{
         naive_hash_table::{hash_join_table::NaiveHashTable, SingleTsHashTable},
-        HeapBaseMvccTable, HeapHashChain,
+        HeapBaseMvccTable, HeapHashChain, SnapshotStat,
     },
     prelude::{AccessMethodError, Timestamp},
 };
@@ -48,6 +48,13 @@ pub struct IvmHashTable<T: MemPool + 'static> {
     /// Readable timestamps published by the benchmark. Historical accesses may
     /// materialize these on demand from the base heap.
     readable_timestamps: RefCell<HashSet<Timestamp>>,
+
+    snapshots_built_total: Cell<usize>,
+    snapshot_reads_total: Cell<usize>,
+    snapshot_cache_hits_total: Cell<usize>,
+    snapshot_cache_misses_total: Cell<usize>,
+    current_reads_total: Cell<usize>,
+    readable_timestamps_published: Cell<usize>,
 }
 
 impl<T: MemPool + 'static> IvmHashTable<T> {
@@ -64,6 +71,12 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
             current_table,
             snapshots: RefCell::new(HashMap::new()),
             readable_timestamps: RefCell::new(HashSet::new()),
+            snapshots_built_total: Cell::new(0),
+            snapshot_reads_total: Cell::new(0),
+            snapshot_cache_hits_total: Cell::new(0),
+            snapshot_cache_misses_total: Cell::new(0),
+            current_reads_total: Cell::new(0),
+            readable_timestamps_published: Cell::new(0),
         }
     }
 
@@ -178,12 +191,22 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         ts: Timestamp,
     ) -> Result<Arc<NaiveHashTable<T>>, AccessMethodError> {
         if let Some(table) = self.snapshots.borrow().get(&ts) {
+            self.snapshot_cache_hits_total
+                .set(self.snapshot_cache_hits_total.get() + 1);
+            self.snapshot_reads_total
+                .set(self.snapshot_reads_total.get() + 1);
             return Ok(table.clone());
         }
         if !self.is_readable_historical(ts) {
             return Err(AccessMethodError::InvalidTimestamp);
         }
+        self.snapshot_cache_misses_total
+            .set(self.snapshot_cache_misses_total.get() + 1);
         let snapshot = self.build_snapshot_from_base(ts);
+        self.snapshots_built_total
+            .set(self.snapshots_built_total.get() + 1);
+        self.snapshot_reads_total
+            .set(self.snapshot_reads_total.get() + 1);
         self.snapshots.borrow_mut().insert(ts, snapshot.clone());
         Ok(snapshot)
     }
@@ -191,6 +214,8 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
     pub fn mark_ts(&self, ts: Timestamp) -> Duration {
         let start = Instant::now();
         self.readable_timestamps.borrow_mut().insert(ts);
+        self.readable_timestamps_published
+            .set(self.readable_timestamps_published.get() + 1);
         start.elapsed()
     }
 
@@ -199,13 +224,19 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
             return Duration::default();
         }
         if self.snapshots.borrow().contains_key(&ts) {
+            self.snapshot_cache_hits_total
+                .set(self.snapshot_cache_hits_total.get() + 1);
             return Duration::default();
         }
         if !self.is_readable_historical(ts) {
             return Duration::default();
         }
+        self.snapshot_cache_misses_total
+            .set(self.snapshot_cache_misses_total.get() + 1);
         let start = Instant::now();
         let snapshot = self.build_snapshot_from_base(ts);
+        self.snapshots_built_total
+            .set(self.snapshots_built_total.get() + 1);
         self.snapshots.borrow_mut().insert(ts, snapshot);
         start.elapsed()
     }
@@ -221,6 +252,8 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
             snapshot.insert(RecordRef::new(&k, &pk, &v)).unwrap();
         }
         let duration = start.elapsed();
+        self.snapshots_built_total
+            .set(self.snapshots_built_total.get() + 1);
         self.snapshots.borrow_mut().insert(ts, snapshot);
         self.readable_timestamps.borrow_mut().insert(ts);
         duration
@@ -234,6 +267,8 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         V: AsRef<[u8]>,
     {
         let (snapshot, duration) = self.build_snapshot_from_iter(rows);
+        self.snapshots_built_total
+            .set(self.snapshots_built_total.get() + 1);
         self.snapshots.borrow_mut().insert(ts, snapshot);
         self.readable_timestamps.borrow_mut().insert(ts);
         duration
@@ -241,6 +276,8 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
 
     pub fn get_key(&self, k: &[u8], pk: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
         if self.is_current_or_future(ts) {
+            self.current_reads_total
+                .set(self.current_reads_total.get() + 1);
             self.current_table.get(k, pk).unwrap()
         } else {
             self.get_or_build_snapshot(ts)
@@ -255,6 +292,8 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         if self.is_current_or_future(ts) {
+            self.current_reads_total
+                .set(self.current_reads_total.get() + 1);
             let mut result = vec![];
             self.current_table.scan_key_vec(key, &mut result).unwrap();
             return Ok(result);
@@ -271,6 +310,8 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>, Vec<u8>)> + Send>, AccessMethodError>
     {
         if self.is_current_or_future(ts) {
+            self.current_reads_total
+                .set(self.current_reads_total.get() + 1);
             let res: Vec<_> = self.current_table.scan().unwrap().collect();
             return Ok(Box::new(res.into_iter()));
         }
@@ -408,5 +449,17 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         let snaps = self.snapshots.borrow();
         println!("IVMH current_table bucket count: {}", self.bucket_count);
         println!("IVMH materialised snapshots: {}", snaps.len());
+    }
+
+    pub fn collect_snapshot_stat(&self) -> SnapshotStat {
+        SnapshotStat {
+            readable_timestamps_published: self.readable_timestamps_published.get(),
+            retained_snapshots: self.snapshots.borrow().len(),
+            snapshots_built_total: self.snapshots_built_total.get(),
+            snapshot_reads_total: self.snapshot_reads_total.get(),
+            snapshot_cache_hits_total: self.snapshot_cache_hits_total.get(),
+            snapshot_cache_misses_total: self.snapshot_cache_misses_total.get(),
+            current_reads_total: self.current_reads_total.get(),
+        }
     }
 }

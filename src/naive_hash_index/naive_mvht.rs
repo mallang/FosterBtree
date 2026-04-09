@@ -14,7 +14,7 @@ use crate::{
     },
     naive_hash_index::{
         naive_hash_table::{hash_join_table::NaiveHashTable, SingleTsHashTable},
-        HeapBaseMvccTable, HeapHashChain,
+        HeapBaseMvccTable, HeapHashChain, SnapshotStat,
     },
     prelude::{AccessMethodError, Timestamp},
 };
@@ -34,6 +34,11 @@ pub struct NaiveMvHashTable<T: MemPool + 'static> {
     build_table_stats: RefCell<BTreeMap<Timestamp, Duration>>,
     scan_delta_stats: RefCell<BTreeMap<(Timestamp, Timestamp), Duration>>,
     table_space_stats: RefCell<BTreeMap<Timestamp, usize>>,
+    snapshots_built_total: Cell<usize>,
+    snapshot_reads_total: Cell<usize>,
+    snapshot_cache_hits_total: Cell<usize>,
+    snapshot_cache_misses_total: Cell<usize>,
+    readable_timestamps_published: Cell<usize>,
 }
 
 impl<T: MemPool + 'static> NaiveMvHashTable<T> {
@@ -48,6 +53,11 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
             build_table_stats: RefCell::new(BTreeMap::new()),
             scan_delta_stats: RefCell::new(BTreeMap::new()),
             table_space_stats: RefCell::new(BTreeMap::new()),
+            snapshots_built_total: Cell::new(0),
+            snapshot_reads_total: Cell::new(0),
+            snapshot_cache_hits_total: Cell::new(0),
+            snapshot_cache_misses_total: Cell::new(0),
+            readable_timestamps_published: Cell::new(0),
         }
     }
 
@@ -116,17 +126,25 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         let duration = start.elapsed();
         self.naivetables.borrow_mut().insert(ts, cur_table);
         self.build_table_stats.borrow_mut().insert(ts, duration);
+        self.snapshots_built_total
+            .set(self.snapshots_built_total.get() + 1);
         duration
     }
 
     pub fn mark_ts(&self, ts: Timestamp) -> Duration {
+        self.readable_timestamps_published
+            .set(self.readable_timestamps_published.get() + 1);
         self.build_table_from_base_and_ts(ts)
     }
 
     pub fn ensure_snapshot_materialized(&self, ts: Timestamp) -> Duration {
         if self.naivetables.borrow().contains_key(&ts) {
+            self.snapshot_cache_hits_total
+                .set(self.snapshot_cache_hits_total.get() + 1);
             Duration::default()
         } else {
+            self.snapshot_cache_misses_total
+                .set(self.snapshot_cache_misses_total.get() + 1);
             self.build_table_from_base_and_ts(ts)
         }
     }
@@ -170,6 +188,10 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         let tables = self.naivetables.borrow();
         let from = tables.get(&from_ts).ok_or(AccessMethodError::InvalidTimestamp)?;
         let to = tables.get(&to_ts).ok_or(AccessMethodError::InvalidTimestamp)?;
+        self.snapshot_reads_total
+            .set(self.snapshot_reads_total.get() + 2);
+        self.snapshot_cache_hits_total
+            .set(self.snapshot_cache_hits_total.get() + 2);
         for i in 0..self.bucket_count {
             let from_bucket = from.get_chain(i);
             let to_bucket = to.get_chain(i);
@@ -227,9 +249,13 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     {
         let tables = self.naivetables.borrow();
         let entry = if let Some(entry) = tables.get(&ts) {
+            self.snapshot_cache_hits_total
+                .set(self.snapshot_cache_hits_total.get() + 1);
             entry
         } else if let Some(latest_ts) = tables.keys().max().copied() {
             if ts > latest_ts {
+                self.snapshot_cache_hits_total
+                    .set(self.snapshot_cache_hits_total.get() + 1);
                 tables.get(&latest_ts).unwrap()
             } else {
                 return Err(AccessMethodError::InvalidTimestamp);
@@ -237,6 +263,8 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         } else {
             return Err(AccessMethodError::InvalidTimestamp);
         };
+        self.snapshot_reads_total
+            .set(self.snapshot_reads_total.get() + 1);
         let res: Vec<_> = entry.scan().unwrap().collect();
         Ok(Box::new(res.into_iter()))
     }
@@ -293,10 +321,18 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     pub fn get_key(&self, k: &[u8], pk: &[u8], ts: Timestamp) -> Option<Vec<u8>> {
         let tables = self.naivetables.borrow();
         if let Some(table) = tables.get(&ts) {
+            self.snapshot_reads_total
+                .set(self.snapshot_reads_total.get() + 1);
+            self.snapshot_cache_hits_total
+                .set(self.snapshot_cache_hits_total.get() + 1);
             return table.get(k, pk).unwrap();
         }
         if let Some(latest_ts) = tables.keys().max().copied() {
             if ts > latest_ts {
+                self.snapshot_reads_total
+                    .set(self.snapshot_reads_total.get() + 1);
+                self.snapshot_cache_hits_total
+                    .set(self.snapshot_cache_hits_total.get() + 1);
                 return tables.get(&latest_ts).and_then(|table| table.get(k, pk).unwrap());
             }
         }
@@ -310,9 +346,13 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, AccessMethodError> {
         let tables = self.naivetables.borrow();
         let table = if let Some(table) = tables.get(&ts) {
+            self.snapshot_cache_hits_total
+                .set(self.snapshot_cache_hits_total.get() + 1);
             table
         } else if let Some(latest_ts) = tables.keys().max().copied() {
             if ts > latest_ts {
+                self.snapshot_cache_hits_total
+                    .set(self.snapshot_cache_hits_total.get() + 1);
                 tables.get(&latest_ts).unwrap()
             } else {
                 return Err(AccessMethodError::InvalidTimestamp);
@@ -320,8 +360,22 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         } else {
             return Err(AccessMethodError::InvalidTimestamp);
         };
+        self.snapshot_reads_total
+            .set(self.snapshot_reads_total.get() + 1);
         let mut result = vec![];
         table.scan_key_vec(key, &mut result).unwrap();
         Ok(result)
+    }
+
+    pub fn collect_snapshot_stat(&self) -> SnapshotStat {
+        SnapshotStat {
+            readable_timestamps_published: self.readable_timestamps_published.get(),
+            retained_snapshots: self.naivetables.borrow().len(),
+            snapshots_built_total: self.snapshots_built_total.get(),
+            snapshot_reads_total: self.snapshot_reads_total.get(),
+            snapshot_cache_hits_total: self.snapshot_cache_hits_total.get(),
+            snapshot_cache_misses_total: self.snapshot_cache_misses_total.get(),
+            current_reads_total: 0,
+        }
     }
 }

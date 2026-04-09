@@ -47,6 +47,9 @@ pub struct Cli {
     #[arg(long = "space-stat")]
     pub space_stat: Option<String>,
 
+    #[arg(long = "snapshot-stat")]
+    pub snapshot_stat: Option<String>,
+
     #[arg(long = "txn-scan-ratio")]
     pub txn_scan_ratio: Option<f64>,
 

@@ -15,6 +15,7 @@ use fbtree::{
         hash_heap::hash_heap_table::HeapHashTable,
         ts_partitioned::ts_partitioned_table::TsPartitionedTable,
     },
+    naive_hash_index::SnapshotStat,
 };
 use interface::BoxMVIndex;
 
@@ -48,6 +49,18 @@ struct SpaceStatRow {
     metadata_space: usize,
 }
 
+struct SnapshotStatRow {
+    table_type: String,
+    repair_type: String,
+    readable_timestamps_published: usize,
+    retained_snapshots: usize,
+    snapshots_built_total: usize,
+    snapshot_reads_total: usize,
+    snapshot_cache_hits_total: usize,
+    snapshot_cache_misses_total: usize,
+    current_reads_total: usize,
+}
+
 fn build_table(cli: &Cli, c_key: ContainerKey) -> BoxMVIndex {
     let mem_pool = get_in_mem_pool();
     match cli.table_type {
@@ -78,7 +91,12 @@ fn build_table(cli: &Cli, c_key: ContainerKey) -> BoxMVIndex {
     }
 }
 
-fn run_repair(bench: &TxBench, cli: &Cli, repair: RepairType, c_key: ContainerKey) -> StatCollector {
+fn run_repair(
+    bench: &TxBench,
+    cli: &Cli,
+    repair: RepairType,
+    c_key: ContainerKey,
+) -> (StatCollector, Option<SnapshotStat>) {
     println!();
     println!("{}", repair.label());
     let table = build_table(cli, c_key);
@@ -87,7 +105,7 @@ fn run_repair(bench: &TxBench, cli: &Cli, repair: RepairType, c_key: ContainerKe
         RepairType::ReadRepair => bench.run_all_txs_read_repair(&table),
         RepairType::WriteRepair => bench.run_all_txs_write_repair(&table),
     }
-    table.collect_space_stat()
+    (table.collect_space_stat(), table.collect_snapshot_stat())
 }
 
 fn run_no_repair(bench: &TxBench, cli: &Cli) {
@@ -137,6 +155,45 @@ fn write_space_stats(path: &Path, rows: &[SpaceStatRow]) {
     }
 }
 
+fn snapshot_stat_row(cli: &Cli, repair: RepairType, stat: SnapshotStat) -> SnapshotStatRow {
+    SnapshotStatRow {
+        table_type: format!("{:?}", cli.table_type),
+        repair_type: repair.label().to_string(),
+        readable_timestamps_published: stat.readable_timestamps_published,
+        retained_snapshots: stat.retained_snapshots,
+        snapshots_built_total: stat.snapshots_built_total,
+        snapshot_reads_total: stat.snapshot_reads_total,
+        snapshot_cache_hits_total: stat.snapshot_cache_hits_total,
+        snapshot_cache_misses_total: stat.snapshot_cache_misses_total,
+        current_reads_total: stat.current_reads_total,
+    }
+}
+
+fn write_snapshot_stats(path: &Path, rows: &[SnapshotStatRow]) {
+    let mut file = File::create(path).expect("failed to create snapshot-stat CSV");
+    writeln!(
+        file,
+        "table_type,repair_type,readable_timestamps_published,retained_snapshots,snapshots_built_total,snapshot_reads_total,snapshot_cache_hits_total,snapshot_cache_misses_total,current_reads_total"
+    )
+    .expect("failed to write snapshot-stat header");
+    for row in rows {
+        writeln!(
+            file,
+            "{},{},{},{},{},{},{},{},{}",
+            row.table_type,
+            row.repair_type,
+            row.readable_timestamps_published,
+            row.retained_snapshots,
+            row.snapshots_built_total,
+            row.snapshot_reads_total,
+            row.snapshot_cache_hits_total,
+            row.snapshot_cache_misses_total,
+            row.current_reads_total
+        )
+        .expect("failed to write snapshot-stat row");
+    }
+}
+
 fn run_and_collect_stat(bench: &TxBench, cli: &Cli, output_path: &Path) {
     let repairs: &[RepairType] = match cli.table_type {
         TableType::Naive | TableType::Ivmh => &[RepairType::NoRepair],
@@ -148,10 +205,29 @@ fn run_and_collect_stat(bench: &TxBench, cli: &Cli, output_path: &Path) {
     };
     let mut rows = Vec::new();
     for (idx, repair) in repairs.iter().copied().enumerate() {
-        let stat = run_repair(bench, cli, repair, ContainerKey::new(0, idx as u16));
+        let (stat, _) = run_repair(bench, cli, repair, ContainerKey::new(0, idx as u16));
         rows.push(stat_row(cli, repair, stat));
     }
     write_space_stats(output_path, &rows);
+}
+
+fn run_and_collect_snapshot_stat(bench: &TxBench, cli: &Cli, output_path: &Path) {
+    let repairs: &[RepairType] = match cli.table_type {
+        TableType::Naive | TableType::Ivmh => &[RepairType::NoRepair],
+        TableType::Heap | TableType::Chain | TableType::Par => &[
+            RepairType::NoRepair,
+            RepairType::ReadRepair,
+            RepairType::WriteRepair,
+        ],
+    };
+    let mut rows = Vec::new();
+    for (idx, repair) in repairs.iter().copied().enumerate() {
+        let (_, stat) = run_repair(bench, cli, repair, ContainerKey::new(0, idx as u16));
+        if let Some(stat) = stat {
+            rows.push(snapshot_stat_row(cli, repair, stat));
+        }
+    }
+    write_snapshot_stats(output_path, &rows);
 }
 
 fn main() {
@@ -218,6 +294,8 @@ fn main() {
 
     if let Some(path) = cli.space_stat.as_ref() {
         run_and_collect_stat(&bench, &cli, Path::new(path));
+    } else if let Some(path) = cli.snapshot_stat.as_ref() {
+        run_and_collect_snapshot_stat(&bench, &cli, Path::new(path));
     } else {
         run_no_repair(&bench, &cli);
         run_three_repairs(&bench, &cli);

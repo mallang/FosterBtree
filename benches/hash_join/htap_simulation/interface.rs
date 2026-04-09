@@ -5,7 +5,7 @@ use fbtree::{
         hash_heap::hash_heap_table::HeapHashTable,
         ts_partitioned::ts_partitioned_table::TsPartitionedTable, Delta, MvccIndex,
     },
-    naive_hash_index::{NaiveMvHashTable, IvmHashTable},
+    naive_hash_index::{IvmHashTable, NaiveMvHashTable, SnapshotStat},
     prelude::{AccessMethodError, Timestamp},
 };
 
@@ -55,6 +55,9 @@ pub trait MultiVersionJoinTable {
     fn after_mark_ts(&self, ts: Timestamp);
 
     fn collect_space_stat(&self) -> StatCollector;
+    fn collect_snapshot_stat(&self) -> Option<SnapshotStat> {
+        None
+    }
 }
 
 /*
@@ -385,6 +388,10 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
     fn collect_space_stat(&self) -> StatCollector {
         NaiveMvHashTable::collect_space_stat_into_collector(&self)
     }
+
+    fn collect_snapshot_stat(&self) -> Option<SnapshotStat> {
+        Some(NaiveMvHashTable::collect_snapshot_stat(self))
+    }
 }
 
 // IVMH — IVM-style baseline: in-place update + rebuild for snapshot
@@ -460,5 +467,9 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for IvmHashTable<T> {
 
     fn collect_space_stat(&self) -> StatCollector {
         IvmHashTable::collect_space_stat_into_collector(self)
+    }
+
+    fn collect_snapshot_stat(&self) -> Option<SnapshotStat> {
+        Some(IvmHashTable::collect_snapshot_stat(self))
     }
 }
