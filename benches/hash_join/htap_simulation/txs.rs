@@ -177,6 +177,8 @@ pub struct TxBench {
     pub updates_since_mark: usize,
     pub next_history_target_idx: usize,
     pub next_delta_target_idx: usize,
+    pub remaining_probe_ops: usize,
+    pub remaining_history_probe_ops: usize,
 }
 
 impl TxBench {
@@ -198,6 +200,18 @@ impl TxBench {
             updates_since_mark: 0,
             next_history_target_idx: 0,
             next_delta_target_idx: 0,
+            remaining_probe_ops: 0,
+            remaining_history_probe_ops: 0,
+        }
+    }
+
+    fn next_distinct_history_ts(&mut self) -> Timestamp {
+        if !self.history_ts_candidates.is_empty() {
+            let idx = self.next_history_target_idx % self.history_ts_candidates.len();
+            self.next_history_target_idx += 1;
+            self.history_ts_candidates[idx]
+        } else {
+            *self.read_ts_candidates.choose(&mut self.rng).unwrap()
         }
     }
 
@@ -292,9 +306,7 @@ impl TxBench {
     pub fn gen_scan_txs_history(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
         let scan_ts = if self.cli.distinct_history_targets && !self.history_ts_candidates.is_empty() {
-            let idx = self.next_history_target_idx % self.history_ts_candidates.len();
-            self.next_history_target_idx += 1;
-            self.history_ts_candidates[idx]
+            self.next_distinct_history_ts()
         } else if let Some(ts) = self.history_ts_candidates.choose(&mut self.rng) {
             *ts
         } else {
@@ -551,6 +563,19 @@ impl TxBench {
             &mut self.rng,
             self.cli.scan_reuse_ratio.to_owned(),
         );
+        self.remaining_probe_ops = ops
+            .iter()
+            .filter(|op| matches!(op, OperationType::Probe))
+            .count();
+        self.remaining_history_probe_ops = if self.cli.distinct_history_targets {
+            self.cli
+                .probe_history_ratio
+                .map(|r| (self.remaining_probe_ops as f64 * r).round() as usize)
+                .unwrap_or(0)
+                .min(self.remaining_probe_ops)
+        } else {
+            0
+        };
         for i in 0..ops.len() {
             let tx_type = &ops[i];
 
@@ -566,11 +591,29 @@ impl TxBench {
                         * self.data_source.get_custoemr_vec().len() as f64)
                         as usize;
                     let probe_ts = if let Some(history_ratio) = self.cli.probe_history_ratio {
-                        let use_history = history_ratio > 0.0
-                            && !self.history_ts_candidates.is_empty()
-                            && self.rng.gen::<f64>() < history_ratio;
+                        let use_history = if self.cli.distinct_history_targets {
+                            let use_history = self.remaining_history_probe_ops > 0
+                                && !self.history_ts_candidates.is_empty()
+                                && (self.remaining_probe_ops == self.remaining_history_probe_ops
+                                    || self.rng.gen_range(0..self.remaining_probe_ops)
+                                        < self.remaining_history_probe_ops);
+                            self.remaining_probe_ops = self.remaining_probe_ops.saturating_sub(1);
+                            if use_history {
+                                self.remaining_history_probe_ops =
+                                    self.remaining_history_probe_ops.saturating_sub(1);
+                            }
+                            use_history
+                        } else {
+                            history_ratio > 0.0
+                                && !self.history_ts_candidates.is_empty()
+                                && self.rng.gen::<f64>() < history_ratio
+                        };
                         if use_history {
-                            Some(*self.history_ts_candidates.choose(&mut self.rng).unwrap())
+                            if self.cli.distinct_history_targets {
+                                Some(self.next_distinct_history_ts())
+                            } else {
+                                Some(*self.history_ts_candidates.choose(&mut self.rng).unwrap())
+                            }
                         } else {
                             None
                         }
