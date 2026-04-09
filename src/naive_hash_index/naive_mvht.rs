@@ -132,9 +132,10 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
     }
 
     pub fn mark_ts(&self, ts: Timestamp) -> Duration {
+        let _ = ts;
         self.readable_timestamps_published
             .set(self.readable_timestamps_published.get() + 1);
-        self.build_table_from_base_and_ts(ts)
+        Duration::default()
     }
 
     pub fn ensure_snapshot_materialized(&self, ts: Timestamp) -> Duration {

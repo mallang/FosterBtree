@@ -365,7 +365,7 @@ fn run_juj(
             for entry in stock_entries {
                 t.add_insert_rec_new(&entry.s_i_id, &entry.s_i_id, &entry.s_quantity);
             }
-            t.mark_ts(0);
+            t.build_table_from_base_and_ts(0);
         }
     }
     let j1_insert_ms = j1_build_start.elapsed().as_secs_f64() * 1000.0;
@@ -436,7 +436,6 @@ fn run_juj(
             let rebuilt = match create_table(TableType::Naive, cli.bucket_num)? {
                 TableEngine::Snap(t) => t,
                 TableEngine::Mvcc(_) => unreachable!(),
-                TableEngine::Ivmh(_) => unreachable!(),
             };
             for entry in stock_entries {
                 let qty = overrides
@@ -446,9 +445,9 @@ fn run_juj(
                 rebuilt.add_insert_rec_new(&entry.s_i_id, &entry.s_i_id, &qty);
             }
 
-            // -- join2 build: mark_ts (snapshot finalization, timed) --
+            // -- join2 build: materialize the fresh snapshot, timed --
             let j2_build_start = Instant::now();
-            rebuilt.mark_ts(after_update_ts);
+            rebuilt.build_table_from_base_and_ts(after_update_ts);
             let j2_build = j2_build_start.elapsed().as_secs_f64() * 1000.0;
 
             // -- join2 probe --
