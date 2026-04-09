@@ -175,6 +175,8 @@ pub struct TxBench {
 
     pub data_source: DataSource,
     pub updates_since_mark: usize,
+    pub next_history_target_idx: usize,
+    pub next_delta_target_idx: usize,
 }
 
 impl TxBench {
@@ -194,6 +196,8 @@ impl TxBench {
 
             data_source: DataSource::new(cli),
             updates_since_mark: 0,
+            next_history_target_idx: 0,
+            next_delta_target_idx: 0,
         }
     }
 
@@ -287,7 +291,11 @@ impl TxBench {
 
     pub fn gen_scan_txs_history(&mut self) {
         let (tx_id, tx_ts) = self.gen_new_tx();
-        let scan_ts = if let Some(ts) = self.history_ts_candidates.choose(&mut self.rng) {
+        let scan_ts = if self.cli.distinct_history_targets && !self.history_ts_candidates.is_empty() {
+            let idx = self.next_history_target_idx % self.history_ts_candidates.len();
+            self.next_history_target_idx += 1;
+            self.history_ts_candidates[idx]
+        } else if let Some(ts) = self.history_ts_candidates.choose(&mut self.rng) {
             *ts
         } else {
             *self.read_ts_candidates.choose(&mut self.rng).unwrap()
@@ -372,16 +380,20 @@ impl TxBench {
 
         let (tx_id, tx_ts) = self.gen_new_tx();
         let all_ts = &self.read_ts_candidates[start_idx..];
-        // randomly select 2 different timestamps
-        let mut selected_ts = all_ts.choose_multiple(&mut self.rng, 2);
-        let read_ts1 = selected_ts.next().unwrap();
-        let read_ts2 = selected_ts.next().unwrap();
-        assert!(
-            read_ts1 != read_ts2,
-            "Selected timestamps must be different"
-        );
-        let from_ts = read_ts1.min(read_ts2);
-        let to_ts = read_ts1.max(read_ts2);
+        let (from_ts, to_ts) = if self.cli.distinct_delta_targets && all_ts.len() >= 2 {
+            let pair_idx = self.next_delta_target_idx % (all_ts.len() - 1);
+            self.next_delta_target_idx += 1;
+            (&all_ts[pair_idx], &all_ts[pair_idx + 1])
+        } else {
+            let mut selected_ts = all_ts.choose_multiple(&mut self.rng, 2);
+            let read_ts1 = selected_ts.next().unwrap();
+            let read_ts2 = selected_ts.next().unwrap();
+            assert!(
+                read_ts1 != read_ts2,
+                "Selected timestamps must be different"
+            );
+            (read_ts1.min(read_ts2), read_ts1.max(read_ts2))
+        };
 
         let op = TxOperation::new_delta_scan(tx_id, tx_ts, *from_ts, *to_ts);
         let tx = Tx::new(OperationType::DeltaScan, tx_id, tx_ts, vec![op]);

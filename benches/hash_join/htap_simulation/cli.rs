@@ -76,4 +76,10 @@ pub struct Cli {
 
     #[arg(long = "readable-every", default_value = "1")]
     pub readable_every: usize,
+
+    #[arg(long = "distinct-history-targets", default_value_t = false)]
+    pub distinct_history_targets: bool,
+
+    #[arg(long = "distinct-delta-targets", default_value_t = false)]
+    pub distinct_delta_targets: bool,
 }
