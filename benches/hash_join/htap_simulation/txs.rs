@@ -142,6 +142,67 @@ pub struct Tx {
     pub tx_ts: Timestamp,
     pub ops: Vec<TxOperation>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualOp {
+    Update,
+    RecentProbe,
+    HistoryProbe,
+    RecentScan,
+    HistoryScan,
+    DeltaScan,
+    GbgCollect,
+}
+
+impl ManualOp {
+    fn parse_token(token: &str) -> Option<Self> {
+        let normalized = token.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "u" | "update" => Some(Self::Update),
+            "p" | "probe" | "recentprobe" | "recent_probe" => Some(Self::RecentProbe),
+            "h" | "hp" | "historyprobe" | "history_probe" => Some(Self::HistoryProbe),
+            "r" | "recentscan" | "recent_scan" | "scan" => Some(Self::RecentScan),
+            "s" | "hs" | "historyscan" | "history_scan" => Some(Self::HistoryScan),
+            "d" | "delta" | "deltascan" | "delta_scan" => Some(Self::DeltaScan),
+            "g" | "gc" | "garbagecollect" | "garbage_collect" => Some(Self::GbgCollect),
+            _ => None,
+        }
+    }
+
+    fn parse_sequence(spec: &str) -> Vec<Self> {
+        let compact = spec
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != ',' && *c != ';' && *c != '|')
+            .collect::<String>();
+        if compact
+            .chars()
+            .all(|c| matches!(c.to_ascii_uppercase(), 'U' | 'P' | 'H' | 'R' | 'S' | 'D' | 'G'))
+        {
+            return compact
+                .chars()
+                .filter_map(|c| match c.to_ascii_uppercase() {
+                    'U' => Some(Self::Update),
+                    'P' => Some(Self::RecentProbe),
+                    'H' => Some(Self::HistoryProbe),
+                    'R' => Some(Self::RecentScan),
+                    'S' => Some(Self::HistoryScan),
+                    'D' => Some(Self::DeltaScan),
+                    'G' => Some(Self::GbgCollect),
+                    _ => None,
+                })
+                .collect();
+        }
+
+        spec.split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '|')
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| {
+                Self::parse_token(t).unwrap_or_else(|| {
+                    panic!("unsupported manual op token: {t}");
+                })
+            })
+            .collect()
+    }
+}
 impl Tx {
     pub fn new(
         tx_type: OperationType,
@@ -440,7 +501,7 @@ impl TxBench {
         if self.cli.manual_txs.is_none() {
             self.gen_random_txs();
         } else {
-            unimplemented!()
+            self.gen_manual_txs();
         }
     }
 
@@ -674,8 +735,71 @@ impl TxBench {
         self.txs.push(tx);
     }
 
+    fn gen_probe_tx_history(&mut self, probe_count: usize) {
+        let probe_ts = if self.cli.distinct_history_targets && !self.history_ts_candidates.is_empty()
+        {
+            self.next_distinct_history_ts()
+        } else if let Some(ts) = self.history_ts_candidates.choose(&mut self.rng) {
+            *ts
+        } else {
+            *self.read_ts_candidates.choose(&mut self.rng).unwrap()
+        };
+        self.gen_probe_tx(probe_count, probe_ts);
+    }
+
     pub fn gen_manual_txs(&mut self) {
-        todo!()
+        self.gen_initial_insert_from_cli();
+
+        if (*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6 {
+            self.gen_mark_ts_txs();
+        }
+
+        let update_count =
+            (self.cli.update_ratio * self.data_source.get_custoemr_vec().len() as f64) as usize;
+        self.gen_update_tx(update_count);
+
+        if (*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6 {
+            self.maybe_publish_readable_ts(true);
+            self.gen_scan_txs_latest();
+        }
+
+        if (*self.cli.analytical_ratio.as_ref().unwrap() - 1.0).abs() > 1e-6 {
+            self.gen_update_tx(update_count);
+            if (*self.cli.analytical_ratio.as_ref().unwrap() - 0.0).abs() > 1e-6 {
+                self.maybe_publish_readable_ts(false);
+                self.gen_scan_txs_latest();
+            }
+        }
+
+        let ops = ManualOp::parse_sequence(self.cli.manual_txs.as_ref().unwrap());
+        let probe_count =
+            (self.cli.probe_ratio * self.data_source.get_custoemr_vec().len() as f64) as usize;
+
+        for op in ops {
+            match op {
+                ManualOp::Update => {
+                    self.gen_update_tx(update_count);
+                }
+                ManualOp::RecentProbe => {
+                    self.gen_probe_tx_latest(probe_count);
+                }
+                ManualOp::HistoryProbe => {
+                    self.gen_probe_tx_history(probe_count);
+                }
+                ManualOp::RecentScan => {
+                    self.gen_scan_txs_latest();
+                }
+                ManualOp::HistoryScan => {
+                    self.gen_scan_txs_history();
+                }
+                ManualOp::DeltaScan => {
+                    let _ = self.gen_delta_scan_tx(0);
+                }
+                ManualOp::GbgCollect => {
+                    self.gen_gc_txs();
+                }
+            }
+        }
     }
 
     fn prepare_tx_untimed(&self, tx: &Tx, hash_join_table: &BoxMVIndex) {

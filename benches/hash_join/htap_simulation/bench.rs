@@ -289,7 +289,7 @@ fn main() {
 
     let mut bench = TxBench::new(cli.clone());
     bench.print_cli();
-    bench.gen_random_txs();
+    bench.gen_txs();
     bench.print_txs();
 
     if let Some(path) = cli.space_stat.as_ref() {
