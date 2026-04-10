@@ -297,7 +297,9 @@ fn main() {
     } else if let Some(path) = cli.snapshot_stat.as_ref() {
         run_and_collect_snapshot_stat(&bench, &cli, Path::new(path));
     } else {
-        run_no_repair(&bench, &cli);
-        run_three_repairs(&bench, &cli);
+        match cli.table_type {
+            TableType::Naive | TableType::Ivmh => run_no_repair(&bench, &cli),
+            TableType::Heap | TableType::Chain | TableType::Par => run_three_repairs(&bench, &cli),
+        }
     }
 }

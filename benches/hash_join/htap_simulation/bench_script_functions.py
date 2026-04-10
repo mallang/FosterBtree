@@ -6,14 +6,12 @@ import re
 def parse_result(log_text, table_type):
     data = []
     repair_type = None
-    no_repair_run_count = 0
 
     for line in log_text.splitlines():
         line = line.strip()
 
         if line.startswith("No Repair"):
             repair_type = "No Repair"
-            no_repair_run_count += 1
             continue
         elif line.startswith("Read Repair"):
             repair_type = "Read Repair"
@@ -24,9 +22,6 @@ def parse_result(log_text, table_type):
         
         match = re.match(r'\[(.*?)\]\s+idx:\s+(\d+),\s+tx_id:\s+(\d+),\s+tx_type:\s+(\w+),\s+duration:\s+([0-9\.]+)(ms|s|µs|ns),(.*)', line)
         if match and repair_type:
-            if repair_type == "No Repair" and no_repair_run_count == 1:
-                continue
-            
             _, idx, tx_id, tx_type, duration_value, duration_unit, rest = match.groups()
 
             duration_value = float(duration_value)
