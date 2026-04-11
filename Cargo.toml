@@ -133,6 +133,10 @@ name = "htap_scanonly_wkld"
 path = "benches/hash_join/htap_scanonly/scan_only_bench.rs"
 
 [[bin]]
+name = "htap_scanmix_wkld"
+path = "benches/hash_join/htap_scanmix/scan_mix_bench.rs"
+
+[[bin]]
 name = "join_benchmark"
 path = "benches/sigmod/join_benchmark/main.rs"
 
