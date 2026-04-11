@@ -312,12 +312,10 @@ impl<T: MemPool + 'static> IvmHashTable<T> {
         if self.is_current_or_future(ts) {
             self.current_reads_total
                 .set(self.current_reads_total.get() + 1);
-            let res: Vec<_> = self.current_table.scan().unwrap().collect();
-            return Ok(Box::new(res.into_iter()));
+            return self.current_table.scan();
         }
         let table = self.get_or_build_snapshot(ts)?;
-        let res: Vec<_> = table.scan().unwrap().collect();
-        Ok(Box::new(res.into_iter()))
+        table.scan()
     }
 
     pub fn delta_scan(

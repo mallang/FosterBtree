@@ -137,6 +137,10 @@ name = "htap_scanmix_wkld"
 path = "benches/hash_join/htap_scanmix/scan_mix_bench.rs"
 
 [[bin]]
+name = "htap_ivmh_history_breakdown_wkld"
+path = "benches/hash_join/htap_ivmh_history_breakdown/ivmh_history_breakdown_bench.rs"
+
+[[bin]]
 name = "join_benchmark"
 path = "benches/sigmod/join_benchmark/main.rs"
 

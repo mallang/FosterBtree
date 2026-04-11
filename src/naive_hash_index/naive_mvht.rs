@@ -266,8 +266,7 @@ impl<T: MemPool + 'static> NaiveMvHashTable<T> {
         };
         self.snapshot_reads_total
             .set(self.snapshot_reads_total.get() + 1);
-        let res: Vec<_> = entry.scan().unwrap().collect();
-        Ok(Box::new(res.into_iter()))
+        entry.scan()
     }
 
     pub fn print_stats(&self) {
