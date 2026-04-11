@@ -491,10 +491,27 @@ fn print_tx_result(phase: &str, bench: &TxBench, txs_idx: usize, elapsed: Durati
     }
 }
 
+fn run_prime_history_scan(
+    bench: &TxBench,
+    hash_join_table: &BoxMVIndex,
+    is_read_repair: bool,
+) -> Result<(), AccessMethodError> {
+    let Some(&prime_ts) = bench.read_ts_candidates.first() else {
+        return Ok(());
+    };
+    let _ = hash_join_table.ensure_snapshot_materialized(prime_ts);
+    let iter = hash_join_table.scan(prime_ts, is_read_repair)?;
+    for entry in iter {
+        assert_eq!(entry.2.len(), 688);
+    }
+    Ok(())
+}
+
 fn run_repair(bench: &TxBench, cli: &Cli, repair: RepairType, c_key: ContainerKey) {
     println!();
     println!("{}", repair.label());
     let table = build_table(cli, c_key);
+    let mut primed_history = false;
     for txs_idx in 0..bench.txs.len() {
         let elapsed = match repair {
             RepairType::NoRepair => run_tx_no_repair_inclusive(bench, txs_idx, &table).unwrap(),
@@ -504,6 +521,10 @@ fn run_repair(bench: &TxBench, cli: &Cli, repair: RepairType, c_key: ContainerKe
             }
         };
         print_tx_result(repair.label(), bench, txs_idx, elapsed);
+        if !primed_history && bench.txs[txs_idx].tx_type == OperationType::MarkTs {
+            run_prime_history_scan(bench, &table, repair == RepairType::ReadRepair).unwrap();
+            primed_history = true;
+        }
     }
 }
 
