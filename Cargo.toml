@@ -129,6 +129,10 @@ name = "htap_wkld"
 path = "benches/hash_join/htap_simulation/bench.rs"
 
 [[bin]]
+name = "htap_scanonly_wkld"
+path = "benches/hash_join/htap_scanonly/scan_only_bench.rs"
+
+[[bin]]
 name = "join_benchmark"
 path = "benches/sigmod/join_benchmark/main.rs"
 
