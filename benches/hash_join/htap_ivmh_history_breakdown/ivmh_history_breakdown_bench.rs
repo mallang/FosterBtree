@@ -41,6 +41,12 @@ impl RepairMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum SweepType {
+    History,
+    Delta,
+}
+
 #[derive(Parser, Debug, Clone)]
 struct IvmhHistoryBreakdownCli {
     #[command(flatten)]
@@ -48,6 +54,9 @@ struct IvmhHistoryBreakdownCli {
 
     #[arg(long = "repair-mode", value_enum, default_value = "no-repair")]
     repair_mode: RepairMode,
+
+    #[arg(long = "sweep-type", value_enum, default_value = "history")]
+    sweep_type: SweepType,
 
     #[arg(long = "blocks", default_value = "5")]
     blocks: usize,
@@ -91,6 +100,21 @@ fn push_history_scan(bench: &mut TxBench, read_ts: u64) {
         .push(Tx::new(OperationType::HistoryScan, tx_id, tx_ts, vec![op]));
 }
 
+fn push_delta_scan(bench: &mut TxBench, from_ts: u64) {
+    let (tx_id, tx_ts) = bench.gen_new_tx();
+    let op = TxOperation::new_delta_scan(tx_id, tx_ts, from_ts, tx_ts);
+    bench
+        .txs
+        .push(Tx::new(OperationType::DeltaScan, tx_id, tx_ts, vec![op]));
+}
+
+fn push_special_scan(bench: &mut TxBench, sweep_type: SweepType, read_ts: u64) {
+    match sweep_type {
+        SweepType::History => push_history_scan(bench, read_ts),
+        SweepType::Delta => push_delta_scan(bench, read_ts),
+    }
+}
+
 fn build_bench(cli: &IvmhHistoryBreakdownCli) -> TxBench {
     assert!(cli.blocks > 0, "blocks must be positive");
     assert!(
@@ -126,7 +150,7 @@ fn build_bench(cli: &IvmhHistoryBreakdownCli) -> TxBench {
         .last()
         .expect("prime mark_ts must publish a readable timestamp");
     bench.gen_update_tx(update_count);
-    push_history_scan(&mut bench, prime_history_ts);
+    push_special_scan(&mut bench, cli.sweep_type, prime_history_ts);
 
     for block_idx in 0..cli.blocks {
         let history_slot_idx = block_idx / 2;
@@ -134,7 +158,7 @@ fn build_bench(cli: &IvmhHistoryBreakdownCli) -> TxBench {
             block_idx % 2 == 1 && history_slot_idx < cli.history_scans;
         if should_insert_history {
             let read_ts = published_readables[block_idx - 1];
-            push_history_scan(&mut bench, read_ts);
+            push_special_scan(&mut bench, cli.sweep_type, read_ts);
             for _ in 1..cli.scans_per_block {
                 push_recent_scan(&mut bench);
             }
@@ -277,9 +301,10 @@ fn main() {
     let table = build_table(&cli);
 
     println!(
-        "history-breakdown trace: table={:?}, repair={}, wc={}, blocks={}, scans_per_block={}, history_scans={}, update_ratio={:.6}, bucket_num={}",
+        "special-scan breakdown trace: table={:?}, repair={}, sweep={:?}, wc={}, blocks={}, scans_per_block={}, special_scans={}, update_ratio={:.6}, bucket_num={}",
         cli.base.table_type,
         cli.repair_mode.label(),
+        cli.sweep_type,
         cli.base.warehouse_count,
         cli.blocks,
         cli.scans_per_block,
