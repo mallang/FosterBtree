@@ -1,3 +1,6 @@
+#[path = "../../common/rpmalloc_global.rs"]
+mod rpmalloc_global;
+
 mod cli;
 mod dbgen;
 mod interface;

@@ -1,3 +1,6 @@
+#[path = "../common/rpmalloc_global.rs"]
+mod rpmalloc_global;
+
 use clap::{Parser, ValueEnum};
 use fbtree::bp::{get_in_mem_pool, ContainerKey, InMemPool, MemPool};
 use fbtree::mvcc_index::hash_common::{KVWithTs, RowDelta};

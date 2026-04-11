@@ -1,3 +1,6 @@
+#[path = "../../common/rpmalloc_global.rs"]
+mod rpmalloc_global;
+
 #[path = "../htap_simulation/cli.rs"]
 mod cli;
 #[path = "../htap_simulation/dbgen.rs"]
