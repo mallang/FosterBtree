@@ -52,8 +52,6 @@ pub trait MultiVersionJoinTable {
     fn end_txs(&self, optype: OperationType) -> Result<(), AccessMethodError>;
     fn garbage_collect(&self, ts: Timestamp);
 
-    fn after_mark_ts(&self, ts: Timestamp);
-
     fn collect_space_stat(&self) -> StatCollector;
     fn collect_snapshot_stat(&self) -> Option<SnapshotStat> {
         None
@@ -95,10 +93,6 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for ChainedHashTable<T> {
     }
 
     fn mark_ts(&self, ts: u64) {}
-    fn after_mark_ts(&self, ts: u64) {
-        // for cache warm-up
-        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
-    }
 
     fn scan_delta(
         &self,
@@ -177,10 +171,6 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for HeapHashTable<T> {
     }
 
     fn mark_ts(&self, ts: u64) {}
-    fn after_mark_ts(&self, ts: u64) {
-        // for cache warm-up
-        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
-    }
 
     fn scan_delta(
         &self,
@@ -270,11 +260,6 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
         <Self as MvccIndex<_>>::split_at_ts(self, ts).unwrap();
     }
 
-    fn after_mark_ts(&self, ts: u64) {
-        // for cache warm-up
-        let _ = <Self as MvccIndex<_>>::scan(self, ts).unwrap();
-    }
-
     fn scan_delta(
         &self,
         from_ts: Timestamp,
@@ -325,7 +310,6 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for TsPartitionedTable<T> {
 
 // NAIVE
 impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
-    fn after_mark_ts(&self, ts: Timestamp) {}
     fn ensure_snapshot_materialized(&self, ts: Timestamp) -> std::time::Duration {
         NaiveMvHashTable::ensure_snapshot_materialized(self, ts)
     }
@@ -396,7 +380,6 @@ impl<T: MemPool + 'static> MultiVersionJoinTable for NaiveMvHashTable<T> {
 
 // IVMH — IVM-style baseline: in-place update + rebuild for snapshot
 impl<T: MemPool + 'static> MultiVersionJoinTable for IvmHashTable<T> {
-    fn after_mark_ts(&self, _ts: Timestamp) {}
     fn ensure_snapshot_materialized(&self, ts: Timestamp) -> std::time::Duration {
         IvmHashTable::ensure_snapshot_materialized(self, ts)
     }

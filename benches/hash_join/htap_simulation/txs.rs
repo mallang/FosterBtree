@@ -887,7 +887,6 @@ impl TxBench {
         self.prepare_tx_untimed(tx, hash_join_table);
         self.emit_build_snap_if_needed("No Repair", txs_idx, tx, hash_join_table);
         let start = Instant::now();
-        let mut is_need_scan_warpup = false;
         match tx.tx_type {
             OperationType::InitLoad => {
                 hash_join_table.begin_txs(OperationType::InitLoad).unwrap();
@@ -903,7 +902,6 @@ impl TxBench {
             OperationType::MarkTs => {
                 let ts = tx.tx_ts;
                 hash_join_table.mark_ts(ts);
-                is_need_scan_warpup = true;
             }
             OperationType::Probe => {
                 for op in &tx.ops {
@@ -988,9 +986,6 @@ impl TxBench {
                 println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
-        if is_need_scan_warpup {
-            hash_join_table.after_mark_ts(tx.tx_ts);
-        }
         Ok(elapsed)
     }
 
@@ -1003,7 +998,6 @@ impl TxBench {
         self.prepare_tx_untimed(tx, hash_join_table);
         self.emit_build_snap_if_needed("Read Repair", txs_idx, tx, hash_join_table);
         let start = Instant::now();
-        let mut is_need_scan_warpup = false;
 
         match tx.tx_type {
             OperationType::InitLoad => {
@@ -1023,7 +1017,6 @@ impl TxBench {
             OperationType::MarkTs => {
                 let ts = tx.tx_ts;
                 hash_join_table.mark_ts(ts);
-                is_need_scan_warpup = true;
             }
             OperationType::Update => {
                 hash_join_table.begin_txs(OperationType::Update).unwrap();
@@ -1103,9 +1096,6 @@ impl TxBench {
                 println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
         }
-        if is_need_scan_warpup {
-            hash_join_table.after_mark_ts(tx.tx_ts);
-        }
         Ok(elapsed)
     }
 
@@ -1118,7 +1108,6 @@ impl TxBench {
         self.prepare_tx_untimed(tx, hash_join_table);
         self.emit_build_snap_if_needed("Write Repair", txs_idx, tx, hash_join_table);
         let start = Instant::now();
-        let mut is_need_scan_warmup = false;
         match tx.tx_type {
             OperationType::Probe => {
                 for op in &tx.ops {
@@ -1137,7 +1126,6 @@ impl TxBench {
             OperationType::MarkTs => {
                 let ts = tx.tx_ts;
                 hash_join_table.mark_ts(ts);
-                is_need_scan_warmup = true;
             }
             OperationType::Update => {
                 hash_join_table.begin_txs(OperationType::UpdateWR).unwrap();
@@ -1221,10 +1209,6 @@ impl TxBench {
                 assert_eq!(tx.ops.len(), 1);
                 println!("Garbage collection read_ts: {:?}", tx.ops[0].read_ts);
             }
-        }
-
-        if is_need_scan_warmup {
-            hash_join_table.after_mark_ts(tx.tx_ts);
         }
         Ok(elapsed)
     }
