@@ -795,7 +795,12 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     ///
     /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
     unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
-        use libc::{c_int, c_uchar, c_void, mincore, size_t, sysconf, _SC_PAGESIZE};
+        use libc::{c_int, c_void, mincore, size_t, sysconf, _SC_PAGESIZE};
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        type MincoreVec = libc::c_char;
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        type MincoreVec = libc::c_uchar;
+
         // 1. Get the page address.
         let i = self.page_key_to_offset(page_key);
         let addr = self.pages.ptr.add(i) as *mut c_void;
@@ -816,8 +821,8 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         }
 
         // 3. Call mincore(); it fills one byte per page in `vec`.
-        let mut vec: c_uchar = 0;
-        let ret: c_int = mincore(addr, page_sz as size_t, &mut vec as *mut c_uchar);
+        let mut vec: MincoreVec = 0;
+        let ret: c_int = mincore(addr, page_sz as size_t, &mut vec as *mut MincoreVec);
 
         if ret == -1 {
             // mincore failed (e.g., the page is not mapped in this process)
@@ -825,7 +830,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         }
 
         // 4. Bit 0 == 1 → page is resident.
-        (vec & 1) == 1
+        (vec as u8 & 1) == 1
     }
 }
 

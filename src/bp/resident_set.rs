@@ -9,10 +9,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use libc::{
-    madvise, mmap, munmap, MADV_HUGEPAGE, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ,
-    PROT_WRITE,
-};
+#[cfg(target_os = "linux")]
+use libc::{madvise, MADV_HUGEPAGE};
+use libc::{mmap, munmap, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 
 #[allow(unused_imports)]
 use crate::{log, log_warn};
@@ -54,6 +53,7 @@ unsafe fn alloc_huge(len: usize) -> *mut u8 {
     if std::ptr::eq(raw, MAP_FAILED) {
         panic!("mmap failed: {}", std::io::Error::last_os_error());
     }
+    #[cfg(target_os = "linux")]
     madvise(raw, size, MADV_HUGEPAGE);
     raw.cast()
 }

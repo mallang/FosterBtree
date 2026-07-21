@@ -124,12 +124,17 @@ pub mod preadpwrite_sync {
     use crate::log;
     use crate::log_trace;
     use crate::page::{Page, PageId, PAGE_SIZE};
-    use libc::{c_void, fsync, pread, pwrite, O_DIRECT};
+    use libc::{c_void, fsync, pread, pwrite};
     use std::fs::{File, OpenOptions};
     use std::mem::MaybeUninit;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    const DIRECT_OPEN_FLAG: i32 = libc::O_DIRECT;
+    #[cfg(not(target_os = "linux"))]
+    const DIRECT_OPEN_FLAG: i32 = 0;
 
     pub struct FileManager {
         _c_id: ContainerId,
@@ -152,7 +157,7 @@ pub mod preadpwrite_sync {
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .custom_flags(O_DIRECT)
+                .custom_flags(DIRECT_OPEN_FLAG)
                 .open(&path)?;
             let file_no = file.as_raw_fd();
             Ok(FileManager {
@@ -161,7 +166,7 @@ pub mod preadpwrite_sync {
                 _file: file,
                 stats: FileStats::new(),
                 file_no,
-                direct: true,
+                direct: cfg!(target_os = "linux"),
             })
         }
 
@@ -274,6 +279,7 @@ pub mod preadpwrite_sync {
     }
 }
 
+#[cfg(feature = "iouring_sync")]
 #[allow(dead_code)]
 pub mod iouring_sync {
     use super::{ContainerId, FileStats};
@@ -581,6 +587,7 @@ pub mod inmemory_async_simulator {
     }
 }
 
+#[cfg(feature = "iouring_async")]
 #[allow(dead_code)]
 pub mod iouring_async {
     use super::{ContainerId, FileManagerTrait, FileStats};
@@ -1110,6 +1117,7 @@ pub mod iouring_async {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    #[cfg(feature = "iouring_async")]
     use std::sync::Arc;
 
     use rstest::rstest;
@@ -1123,6 +1131,7 @@ mod tests {
         super::preadpwrite_sync::FileManager::new(db_dir, 0).unwrap()
     }
 
+    #[cfg(feature = "iouring_async")]
     fn get_iouring_async_fm(db_dir: &Path) -> impl FileManagerTrait {
         let rings = Arc::new(super::iouring_async::GlobalRings::new(128));
         super::iouring_async::FileManager::new(db_dir, 0, rings).unwrap()
@@ -1130,7 +1139,7 @@ mod tests {
 
     #[rstest]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
-    #[case::iouring_async(get_iouring_async_fm)]
+    #[cfg_attr(feature = "iouring_async", case::iouring_async(get_iouring_async_fm))]
     fn test_page_write_read<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         let temp_path = tempfile::tempdir().unwrap();
         let file_manager = file_manager_gen(temp_path.path());
@@ -1152,7 +1161,7 @@ mod tests {
 
     #[rstest]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
-    #[case::iouring_async(get_iouring_async_fm)]
+    #[cfg_attr(feature = "iouring_async", case::iouring_async(get_iouring_async_fm))]
     fn test_prefetch_page<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         let temp_path = tempfile::tempdir().unwrap();
         let file_manager = file_manager_gen(temp_path.path());
@@ -1180,7 +1189,7 @@ mod tests {
 
     #[rstest]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
-    #[case::iouring_async(get_iouring_async_fm)]
+    #[cfg_attr(feature = "iouring_async", case::iouring_async(get_iouring_async_fm))]
     fn test_page_write_read_sequential<T: FileManagerTrait>(
         #[case] file_manager_gen: fn(&Path) -> T,
     ) {
@@ -1210,7 +1219,7 @@ mod tests {
 
     #[rstest]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
-    #[case::iouring_async(get_iouring_async_fm)]
+    #[cfg_attr(feature = "iouring_async", case::iouring_async(get_iouring_async_fm))]
     fn test_page_write_read_random<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         let temp_path = tempfile::tempdir().unwrap();
         let file_manager = file_manager_gen(temp_path.path());
@@ -1241,7 +1250,7 @@ mod tests {
 
     #[rstest]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
-    #[case::iouring_async(get_iouring_async_fm)]
+    #[cfg_attr(feature = "iouring_async", case::iouring_async(get_iouring_async_fm))]
     fn test_page_write_read_interleave<T: FileManagerTrait>(
         #[case] file_manager_gen: fn(&Path) -> T,
     ) {
@@ -1270,7 +1279,7 @@ mod tests {
 
     #[rstest]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
-    #[case::iouring_async(get_iouring_async_fm)]
+    #[cfg_attr(feature = "iouring_async", case::iouring_async(get_iouring_async_fm))]
     fn test_file_flush<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         // Create two file managers with the same path.
         // Issue multiple write operations to one of the file managers.
@@ -1308,7 +1317,7 @@ mod tests {
 
     #[rstest]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
-    #[case::iouring_async(get_iouring_async_fm)]
+    #[cfg_attr(feature = "iouring_async", case::iouring_async(get_iouring_async_fm))]
     fn test_concurrent_read_write_file<T: FileManagerTrait>(
         #[case] file_manager_gen: fn(&Path) -> T,
     ) {
