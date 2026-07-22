@@ -4,12 +4,15 @@ use clap::{Parser, ValueEnum};
 use fbtree::{
     access_method::{
         chain::prelude::HashReadOptimize,
-        fbt::prelude::FosterBtree,
+        fbt::{
+            prelude::{FosterBtree, FosterBtreePage},
+            PageVisitor,
+        },
         paged_hash_chain_v1::prelude::{encode_hash_key, PagedHashChainV1},
         UniqueKeyIndex,
     },
     bp::{get_in_mem_pool, ContainerKey, InMemPool},
-    prelude::PAGE_SIZE,
+    prelude::{Page, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
     ycsb::prelude::{
         make_lookup_trace, read_lookup_trace, write_lookup_trace, ycsb_key_bytes, YcsbDistribution,
         YcsbLookupTrace, YcsbLookupTraceConfig,
@@ -77,10 +80,42 @@ enum LookupDistribution {
     Zipf,
 }
 
+/// Structural statistics captured after the measured run.
+/// These are the "always reported" explanatory variables from the research
+/// plan: chain length for PagedHash, tree height for HashBTree.
+#[derive(Clone, Debug, Default)]
+struct HashStructStats {
+    bucket_count: usize,
+    load_factor: f64, // avg records per bucket
+    total_pages: usize,
+    overflow_pages: usize,
+    avg_chain_len: f64,
+    max_chain_len: usize,
+    max_bucket_records: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TreeStructStats {
+    tree_height: usize, // number of levels, leaf level included
+    internal_pages: usize,
+    leaf_pages: usize,
+    avg_leaf_fill: f64, // bytes used / available bytes, averaged over leaves
+}
+
+#[derive(Clone, Debug)]
+enum StructureStats {
+    None,
+    Hash(HashStructStats),
+    Tree(TreeStructStats),
+}
+
 trait PointIndex: Send + Sync {
     fn name(&self) -> &'static str;
     fn insert_point(&self, key: &[u8], value: &[u8]);
     fn get_point(&self, key: &[u8]) -> Vec<u8>;
+    fn structure_stats(&self) -> StructureStats {
+        StructureStats::None
+    }
 }
 
 impl PointIndex for HashReadOptimize<InMemPool> {
@@ -95,6 +130,9 @@ impl PointIndex for HashReadOptimize<InMemPool> {
     fn get_point(&self, key: &[u8]) -> Vec<u8> {
         UniqueKeyIndex::get(self, key).unwrap()
     }
+
+    // Sanity reference only: exposes stats as an opaque string, so no
+    // structured output here. Paper numbers come from PagedHashChainV1.
 }
 
 impl PointIndex for PagedHashChainV1<InMemPool> {
@@ -109,6 +147,48 @@ impl PointIndex for PagedHashChainV1<InMemPool> {
     fn get_point(&self, key: &[u8]) -> Vec<u8> {
         UniqueKeyIndex::get(self, key).unwrap()
     }
+
+    fn structure_stats(&self) -> StructureStats {
+        match self.page_stats() {
+            Ok(stats) => StructureStats::Hash(HashStructStats {
+                bucket_count: stats.bucket_count,
+                load_factor: stats.avg_bucket_records(),
+                total_pages: stats.total_pages,
+                overflow_pages: stats.overflow_pages,
+                avg_chain_len: stats.avg_chain_len(),
+                max_chain_len: stats.max_chain_len,
+                max_bucket_records: stats.max_bucket_records,
+            }),
+            Err(err) => {
+                eprintln!("warning: paged_hash_chain_v1 page_stats failed: {:?}", err);
+                StructureStats::None
+            }
+        }
+    }
+}
+
+/// Collects tree height, page counts, and leaf fill via the public
+/// FosterBtree page traversal (thread-unsafe; call outside measured runs).
+#[derive(Default)]
+struct TreeStatsVisitor {
+    max_level: u8,
+    internal_pages: usize,
+    leaf_pages: usize,
+    leaf_fill_sum: f64,
+}
+
+impl PageVisitor for TreeStatsVisitor {
+    fn visit_pre(&mut self, page: &Page) {
+        self.max_level = self.max_level.max(page.level());
+        if page.is_leaf() {
+            self.leaf_pages += 1;
+            self.leaf_fill_sum += page.total_bytes_used() as f64 / AVAILABLE_PAGE_SIZE as f64;
+        } else {
+            self.internal_pages += 1;
+        }
+    }
+
+    fn visit_post(&mut self, _page: &Page) {}
 }
 
 struct HashBTree {
@@ -139,6 +219,22 @@ impl PointIndex for HashBTree {
         let encoded_key = Self::encode_key(key);
         UniqueKeyIndex::get(self.tree.as_ref(), &encoded_key).unwrap()
     }
+
+    fn structure_stats(&self) -> StructureStats {
+        let mut visitor = TreeStatsVisitor::default();
+        self.tree.page_traverser().visit(&mut visitor);
+        let avg_leaf_fill = if visitor.leaf_pages == 0 {
+            0.0
+        } else {
+            visitor.leaf_fill_sum / visitor.leaf_pages as f64
+        };
+        StructureStats::Tree(TreeStructStats {
+            tree_height: visitor.max_level as usize + 1,
+            internal_pages: visitor.internal_pages,
+            leaf_pages: visitor.leaf_pages,
+            avg_leaf_fill,
+        })
+    }
 }
 
 struct BenchResult {
@@ -155,6 +251,38 @@ struct BenchResult {
     p50_latency_ns: u64,
     p95_latency_ns: u64,
     p99_latency_ns: u64,
+    structure: StructureStats,
+}
+
+/// CSV fragments for the variant-specific structural columns.
+/// Column order:
+///   hash block: load_factor,total_pages,overflow_pages,avg_chain_len,max_chain_len,max_bucket_records
+///   tree block: tree_height,internal_pages,leaf_pages,avg_leaf_fill
+fn structure_csv_fragments(structure: &StructureStats) -> (String, String) {
+    const EMPTY_HASH: &str = ",,,,,";
+    const EMPTY_TREE: &str = ",,,";
+    match structure {
+        StructureStats::Hash(h) => (
+            format!(
+                "{:.3},{},{},{:.3},{},{}",
+                h.load_factor,
+                h.total_pages,
+                h.overflow_pages,
+                h.avg_chain_len,
+                h.max_chain_len,
+                h.max_bucket_records
+            ),
+            EMPTY_TREE.to_string(),
+        ),
+        StructureStats::Tree(t) => (
+            EMPTY_HASH.to_string(),
+            format!(
+                "{},{},{},{:.4}",
+                t.tree_height, t.internal_pages, t.leaf_pages, t.avg_leaf_fill
+            ),
+        ),
+        StructureStats::None => (EMPTY_HASH.to_string(), EMPTY_TREE.to_string()),
+    }
 }
 
 struct ThreadResult {
@@ -169,13 +297,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let trace = load_or_make_trace(&args)?;
 
     println!(
-        "variant,n_keys,key_size,page_size,distribution,zipf_theta,threads,measured_lookups,build_sec,duration_sec,throughput_ops_sec,avg_latency_ns,p50_latency_ns,p95_latency_ns,p99_latency_ns,bucket_count"
+        "variant,n_keys,key_size,page_size,distribution,zipf_theta,threads,measured_lookups,build_sec,duration_sec,throughput_ops_sec,avg_latency_ns,p50_latency_ns,p95_latency_ns,p99_latency_ns,bucket_count,load_factor,total_pages,overflow_pages,avg_chain_len,max_chain_len,max_bucket_records,tree_height,internal_pages,leaf_pages,avg_leaf_fill"
     );
 
     for variant in variants_to_run(args.variant) {
         let result = run_variant(&args, &trace, variant)?;
+        let (hash_cols, tree_cols) = structure_csv_fragments(&result.structure);
         println!(
-            "{},{},{},{},{},{:.3},{},{},{:.6},{:.6},{:.3},{:.1},{},{},{},{}",
+            "{},{},{},{},{},{:.3},{},{},{:.6},{:.6},{:.3},{:.1},{},{},{},{},{},{}",
             result.variant,
             result.n_keys,
             trace.config.key_size,
@@ -192,6 +321,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             result.p95_latency_ns,
             result.p99_latency_ns,
             args.buckets,
+            hash_cols,
+            tree_cols,
         );
     }
 
@@ -332,6 +463,11 @@ fn run_variant(
         histogram.add(&result.histogram)?;
     }
 
+    // Collected after the measured run, single-threaded (the tree traversal
+    // is documented as thread-unsafe). Read-only lookups do not change the
+    // structure, so this equals the post-build state.
+    let structure = index.structure_stats();
+
     Ok(BenchResult {
         variant: index.name(),
         n_keys: trace.config.n_keys,
@@ -346,6 +482,7 @@ fn run_variant(
         p50_latency_ns: histogram.value_at_quantile(0.50),
         p95_latency_ns: histogram.value_at_quantile(0.95),
         p99_latency_ns: histogram.value_at_quantile(0.99),
+        structure,
     })
 }
 

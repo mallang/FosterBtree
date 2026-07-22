@@ -3,8 +3,8 @@ mod foster_btree_page;
 mod foster_btree_visualizer_wasm;
 
 pub use foster_btree::{
-    FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor,
-    FosterBtreeAppendOnlyRangeScanner, FosterBtreeCursor, FosterBtreeRangeScanner,
+    FosterBTreePageTraversal, FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor,
+    FosterBtreeAppendOnlyRangeScanner, FosterBtreeCursor, FosterBtreeRangeScanner, PageVisitor,
 };
 pub use foster_btree_page::BTreeKey;
 pub use foster_btree_page::FosterBtreePage;

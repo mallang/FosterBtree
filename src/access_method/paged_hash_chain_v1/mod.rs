@@ -45,6 +45,25 @@ pub struct PagedHashChainV1Stats {
     pub overflow_pages: usize,
     pub max_chain_len: usize,
     pub total_records: usize,
+    pub max_bucket_records: usize,
+}
+
+impl PagedHashChainV1Stats {
+    pub fn avg_chain_len(&self) -> f64 {
+        if self.bucket_count == 0 {
+            0.0
+        } else {
+            self.total_pages as f64 / self.bucket_count as f64
+        }
+    }
+
+    pub fn avg_bucket_records(&self) -> f64 {
+        if self.bucket_count == 0 {
+            0.0
+        } else {
+            self.total_records as f64 / self.bucket_count as f64
+        }
+    }
 }
 
 pub type PagedHashChainV1Iter = std::vec::IntoIter<(Vec<u8>, Vec<u8>)>;
@@ -146,12 +165,15 @@ impl<T: MemPool> PagedHashChainV1<T> {
 
         for bucket in &self.buckets {
             let mut chain_len = 0;
+            let mut bucket_records = 0usize;
             let mut current_key = *bucket;
             loop {
                 let page = self.read_page(current_key)?;
                 chain_len += 1;
                 stats.total_pages += 1;
-                stats.total_records += page.hash_leaf_record_count() as usize;
+                let page_records = page.hash_leaf_record_count() as usize;
+                stats.total_records += page_records;
+                bucket_records += page_records;
 
                 if let Some((next_page_id, next_frame_id)) = page.hash_leaf_next_page() {
                     current_key =
@@ -161,6 +183,7 @@ impl<T: MemPool> PagedHashChainV1<T> {
                 }
             }
             stats.max_chain_len = stats.max_chain_len.max(chain_len);
+            stats.max_bucket_records = stats.max_bucket_records.max(bucket_records);
             stats.overflow_pages += chain_len.saturating_sub(1);
         }
 
