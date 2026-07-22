@@ -4,9 +4,12 @@ use crate::bp::MemPoolStatus;
 
 pub mod append_only_store;
 pub mod chain;
+pub mod common_leaf_page;
 pub mod fbt;
 pub mod hash_fbt;
+pub mod hash_leaf_page;
 pub mod hashindex;
+pub mod paged_hash_chain_v1;
 
 #[derive(Debug, PartialEq)]
 pub enum AccessMethodError {
@@ -37,9 +40,12 @@ impl From<MemPoolStatus> for AccessMethodError {
 pub mod prelude {
     pub use super::append_only_store::prelude::*;
     pub use super::chain::prelude::*;
+    pub use super::common_leaf_page::*;
     pub use super::fbt::prelude::*;
     pub use super::hash_fbt::prelude::*;
+    pub use super::hash_leaf_page::*;
     pub use super::hashindex::prelude::*;
+    pub use super::paged_hash_chain_v1::prelude::*;
     pub use super::AccessMethodError;
     pub use super::{NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex};
 }
