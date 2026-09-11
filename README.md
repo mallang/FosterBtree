@@ -1,3 +1,12 @@
+> **Looking for the MVHT (Multi-Version Hash Tables) artifact?**
+> See [`README_MVHT.md`](README_MVHT.md). The MVHT implementation is under
+> `src/mvcc_index/`, the single-version baselines under
+> `src/naive_hash_index/`, and the per-experiment drivers and figure
+> notebooks under `benches/sigmod_exp*/`. The notes below describe the
+> underlying storage engine, not MVHT.
+
+---
+
 # TODO
 
 ## Buffer pool

@@ -1,0 +1,67 @@
+table_type,repair_type,tx_type,duration_ms
+naive,,BuildSnap,122.74208144729344
+naive,,GbgCollect,0.014693378917378916
+naive,,InitLoad,0.024249168091168092
+naive,,Probe,1.1137645982905982
+naive,,RecentScan,23.599776242165245
+naive,,Update,0.0
+ivmh,,BuildSnap,3.561253561253561e-06
+ivmh,,GbgCollect,0.0007475071225071225
+ivmh,,InitLoad,0.40100712535612537
+ivmh,,Probe,0.8069975042735043
+ivmh,,RecentScan,20.213519706552706
+ivmh,,Update,0.028624763532763536
+heap,No Repair,BuildSnap,0.0
+heap,No Repair,GbgCollect,1.7391807920227922
+heap,No Repair,InitLoad,0.548441472934473
+heap,No Repair,Probe,1.1242080997150996
+heap,No Repair,RecentScan,24.908670569800574
+heap,No Repair,Update,0.003932113960113961
+heap,Read Repair,BuildSnap,0.0
+heap,Read Repair,GbgCollect,1.761855888888889
+heap,Read Repair,InitLoad,0.541931623931624
+heap,Read Repair,Probe,0.8961754586894587
+heap,Read Repair,RecentScan,25.20421605698006
+heap,Read Repair,Update,0.0036768746438746434
+heap,Write Repair,BuildSnap,0.0
+heap,Write Repair,GbgCollect,1.7495390455840454
+heap,Write Repair,InitLoad,0.5691798404558405
+heap,Write Repair,Probe,0.8253753760683761
+heap,Write Repair,RecentScan,18.98461407122507
+heap,Write Repair,Update,0.4998342763532764
+chain,No Repair,BuildSnap,0.0
+chain,No Repair,GbgCollect,0.0020083048433048433
+chain,No Repair,InitLoad,0.6447508347578347
+chain,No Repair,Probe,0.8326297606837607
+chain,No Repair,RecentScan,20.233752831908834
+chain,No Repair,Update,0.5196962336182337
+chain,Read Repair,BuildSnap,0.0
+chain,Read Repair,GbgCollect,0.002026356125356125
+chain,Read Repair,InitLoad,0.5813208660968661
+chain,Read Repair,Probe,0.8423966182336183
+chain,Read Repair,RecentScan,20.17128668091168
+chain,Read Repair,Update,0.5204710284900285
+chain,Write Repair,BuildSnap,0.0
+chain,Write Repair,GbgCollect,0.002287156695156695
+chain,Write Repair,InitLoad,0.5809766153846154
+chain,Write Repair,Probe,0.8454985783475784
+chain,Write Repair,RecentScan,20.548617507122508
+chain,Write Repair,Update,0.5329762564102564
+par,No Repair,BuildSnap,0.010121552706552706
+par,No Repair,GbgCollect,1.7554786324786325
+par,No Repair,InitLoad,0.5814660484330484
+par,No Repair,Probe,1.1052496381766381
+par,No Repair,RecentScan,26.570810424501428
+par,No Repair,Update,0.006316621082621082
+par,Read Repair,BuildSnap,0.010122746438746439
+par,Read Repair,GbgCollect,1.7697177094017096
+par,Read Repair,InitLoad,0.5869717464387465
+par,Read Repair,Probe,0.9413423561253561
+par,Read Repair,RecentScan,26.523830384615383
+par,Read Repair,Update,0.005446105413105413
+par,Write Repair,BuildSnap,0.011153737891737894
+par,Write Repair,GbgCollect,1.806262584045584
+par,Write Repair,InitLoad,0.6122250683760683
+par,Write Repair,Probe,0.8720491538461538
+par,Write Repair,RecentScan,21.314810675213675
+par,Write Repair,Update,0.5848150398860398

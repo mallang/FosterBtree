@@ -1,0 +1,202 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1773032442373,
+  "projectRoot": "/Users/jun/Desktop/dev/mbp16/crustydb/riki/FosterBtree",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "src"
+    ],
+    "gitBranches": {
+      "defaultBranch": "master",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "benches": {
+      "path": "benches",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1773032442364,
+      "keyFiles": [
+        "foster_btree_insert.rs",
+        "hash_index_insert.rs"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 1,
+      "lastAccessed": 1773032442364,
+      "keyFiles": [
+        "iouring_parameter_notes.md"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 9,
+      "lastAccessed": 1773032442365,
+      "keyFiles": [
+        "bench_utils.rs",
+        "file_manager.rs",
+        "heap_page.rs",
+        "hybrid_latch.rs",
+        "lib.rs"
+      ]
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1773032442365,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "venv": {
+      "path": "venv",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1773032442368,
+      "keyFiles": [
+        "pyvenv.cfg"
+      ]
+    },
+    "src/bin": {
+      "path": "src/bin",
+      "purpose": "Executable scripts",
+      "fileCount": 13,
+      "lastAccessed": 1773032442370,
+      "keyFiles": [
+        "aps_scan_latency.rs",
+        "fbt_in_mem.rs",
+        "fbt_on_disk.rs"
+      ]
+    },
+    "venv/bin": {
+      "path": "venv/bin",
+      "purpose": "Executable scripts",
+      "fileCount": 28,
+      "lastAccessed": 1773032442371,
+      "keyFiles": [
+        "Activate.ps1",
+        "activate",
+        "activate.csh"
+      ]
+    },
+    "venv/lib": {
+      "path": "venv/lib",
+      "purpose": "Library code",
+      "fileCount": 0,
+      "lastAccessed": 1773032442372,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1773032962002,
+      "type": "file"
+    },
+    {
+      "path": "benches/sigmod/tpch_q14_all_variants.ipynb",
+      "accessCount": 2,
+      "lastAccessed": 1773033359192,
+      "type": "file"
+    },
+    {
+      "path": "benches/exp4_stock_join/exp4_plot.ipynb",
+      "accessCount": 2,
+      "lastAccessed": 1773033359852,
+      "type": "file"
+    },
+    {
+      "path": "benches/sigmod/tpch_q14_join_update_join.rs",
+      "accessCount": 1,
+      "lastAccessed": 1773032559567,
+      "type": "file"
+    },
+    {
+      "path": "benches/sigmod/generate_data.sh",
+      "accessCount": 1,
+      "lastAccessed": 1773032566914,
+      "type": "file"
+    },
+    {
+      "path": "benches/sigmod/generate_updates.py",
+      "accessCount": 1,
+      "lastAccessed": 1773032571673,
+      "type": "file"
+    },
+    {
+      "path": "tpcc_bench.sh",
+      "accessCount": 1,
+      "lastAccessed": 1773032572043,
+      "type": "file"
+    },
+    {
+      "path": "benches/exp4_stock_join/stock_join_bench.rs",
+      "accessCount": 1,
+      "lastAccessed": 1773032815342,
+      "type": "file"
+    },
+    {
+      "path": "benches/exp4_stock_join/generate_chbenchmark_data.py",
+      "accessCount": 1,
+      "lastAccessed": 1773032840279,
+      "type": "file"
+    },
+    {
+      "path": "benches/exp4_stock_join/generate_stock_updates.py",
+      "accessCount": 1,
+      "lastAccessed": 1773032867991,
+      "type": "file"
+    },
+    {
+      "path": "benches/exp4_stock_join/run_exp4.sh",
+      "accessCount": 1,
+      "lastAccessed": 1773032889629,
+      "type": "file"
+    },
+    {
+      "path": "benches/exp4_stock_join/exp4_stock_join.ipynb",
+      "accessCount": 1,
+      "lastAccessed": 1773033485110,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
